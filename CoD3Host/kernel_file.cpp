@@ -438,12 +438,17 @@ PPC_FUNC(__imp__NtReadFile)
             fflush(stdout);
         }
     }
+    // One answer, used everywhere: the status block, the completion routine
+    // and the return value all say the same thing. They used to disagree at
+    // the end of a file, where the call returned end-of-file while the
+    // routine was told success.
+    const uint32_t finalStatus = (read == 0) ? X_STATUS_END_OF_FILE : X_STATUS_SUCCESS;
     if (ioStatusBlock != 0)
     {
-        Guest::Write32(base, ioStatusBlock + 0, X_STATUS_SUCCESS);
+        Guest::Write32(base, ioStatusBlock + 0, finalStatus);
         Guest::Write32(base, ioStatusBlock + 4, read);
     }
-    ctx.r3.u32 = (read == 0) ? X_STATUS_END_OF_FILE : X_STATUS_SUCCESS;
+    ctx.r3.u32 = finalStatus;
 
     // A read that named a completion routine is asynchronous as far as the
     // title is concerned, however quickly the bytes actually arrived. It gets
@@ -451,7 +456,7 @@ PPC_FUNC(__imp__NtReadFile)
     // run when the thread next waits.
     if (apcRoutine != 0)
     {
-        Kernel::QueueApc(apcRoutine, apcContext, ioStatusBlock);
+        Kernel::QueueApc(apcRoutine, apcContext, ioStatusBlock, finalStatus, read);
         ctx.r3.u32 = X_STATUS_PENDING;
     }
 }

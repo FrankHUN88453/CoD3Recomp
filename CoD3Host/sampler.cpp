@@ -244,3 +244,11 @@ int Sampler::FunctionsOnStack(uint32_t* functions, int limit)
     RtlCaptureContext(&context);
     return WalkGuestStack(&context, functions, limit);
 }
+
+void Sampler::SampleNow()
+{
+    // The same report the timer prints, on demand: what every guest thread is
+    // doing at this exact moment, which is the question the moment something
+    // in memory has just been found overwritten.
+    SampleOnce();
+}

@@ -17,6 +17,7 @@
 // is the largest single piece of work left in this project.
 
 #include "kernel.h"
+#include "sampler.h"
 #include "audio_out.h"
 #include "scheduler.h"
 #include "gpu.h"
@@ -104,18 +105,24 @@ namespace
             // What the handler did with the acknowledgement block, the first
             // few times, so a handler that runs and changes nothing can be
             // told from one that never ran.
+            // The handler decides what to do from the mirrored scratch block:
+            // register four is the callback it armed, or 0x0BADF00D when it
+            // armed nothing, and an interrupt that finds the latter is one it
+            // did not ask for. Printing that value with every interrupt says
+            // whether the stream is asking twice or the arming is being lost.
             const uint32_t block = Gpu::ReadRegister(Gpu::ApertureBase + 0x1DD * 4) & ~3u;
-            const uint32_t before = block ? Guest::Read32(Guest::Base, Guest::PhysicalAlias(block)) : 0;
-            routine(context, Guest::Base);
+            const uint32_t armed = block
+                ? Guest::Read32(Guest::Base, Guest::PhysicalAlias(block + 16)) : 0;
             const uint64_t raised = video.interruptsRaised.fetch_add(1, std::memory_order_relaxed);
-            if (raised < 6 && block != 0)
+            if (raised < 400)
             {
-                printf("gpu: interrupt handler ran for source 1; the block at 0x%08X "
-                       "held 0x%08X before and 0x%08X after, status register 0x%08X\n",
-                    block, before, Guest::Read32(Guest::Base, Guest::PhysicalAlias(block)),
-                    Gpu::ReadRegister(Gpu::RegisterInterruptStatus));
+                printf("gpu: interrupt %llu raised from the stream, scratch block at "
+                       "0x%08X, scratch 4 holds 0x%08X%s\n", (unsigned long long)raised,
+                    block, armed,
+                    armed == 0x0BADF00Du ? " (nothing armed: the driver will call it unanticipated)" : "");
                 fflush(stdout);
             }
+            routine(context, Guest::Base);
         });
 
         while (video.running.load(std::memory_order_acquire))
@@ -132,6 +139,37 @@ namespace
                 video.readPointer.store(consumed);
                 Gpu::WriteRegister(Gpu::ApertureBase + 0x710, consumed);
                 worked = consumed != before;
+            }
+
+            // The driver's write-back block, checked for the fill pattern.
+            //
+            // The block the driver registered for the GPU's progress was found
+            // holding 0xCDCDCDCD, the pattern the title's allocator writes into
+            // memory it has just handed out, and the ring buffer 0x55555555.
+            // Something the title allocated landed on top of the driver's
+            // state. A hardware watchpoint slows the run enough that it never
+            // happens, so instead this looks every time round and, the first
+            // time the pattern is there, prints what every guest thread is in
+            // the middle of: one of them is the memset.
+            {
+                static bool reported = false;
+                const uint32_t writeBack = video.readPointerWriteBack.load();
+                if (!reported && writeBack != 0)
+                {
+                    const uint32_t block = Guest::PhysicalAlias(writeBack & ~0xFFFFu);
+                    const uint32_t word = Guest::Read32(Guest::Base, block);
+                    if (word == 0xCDCDCDCDu || word == 0x55555555u ||
+                        word == 0xDDDDDDDDu || word == 0xFEEEFEEEu)
+                    {
+                        reported = true;
+                        printf("gpu: the write back block at 0x%08X now holds 0x%08X, "
+                               "a fill pattern: something allocated over it. Every "
+                               "guest thread, right now:\n", block, word);
+                        fflush(stdout);
+                        Sampler::SampleNow();
+                        Kernel::ReportRecentCalls();
+                    }
+                }
             }
 
             // Interrupts the stream asked for, raised now that everything

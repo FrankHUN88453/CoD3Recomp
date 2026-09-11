@@ -576,14 +576,16 @@ void Kernel::CountImportOn(const char* name, uint32_t subject)
 
 void Kernel::CountImport(const char* name) { CountImportOn(name, 0); }
 
-void Kernel::ReportRecentCalls()
+void Kernel::ReportRecentCalls(uint32_t onlyThread)
 {
     std::lock_guard<std::mutex> lock(g_historyMutex);
-    printf("recent kernel calls per thread, oldest first:\n");
+    printf("recent kernel calls %s, oldest first:\n",
+        onlyThread ? "on the thread that threw" : "per thread");
     for (const auto& entry : g_histories)
     {
         const History& history = entry.second;
         if (history.next == 0) continue;
+        if (onlyThread != 0 && entry.first != onlyThread) continue;
 
         printf("  os %-6u:", entry.first);
         const size_t count = history.next < HistoryLength ? history.next : HistoryLength;

@@ -469,7 +469,40 @@ PPC_FUNC(__imp__RtlRaiseException)
 
         // What this thread asked the kernel for just before it threw. A throw
         // about a file is nearly always the answer to one of these.
-        Kernel::ReportRecentCalls();
+        // The thrown object itself. IdvFileError derives from std::string,
+        // so the object is the message: a word of allocator, sixteen bytes of
+        // inline text or a pointer, then the size and the capacity.
+        if (code == 0xE06D7363 && count >= 2)
+        {
+            const uint32_t object = Guest::Read32(base, record + 20 + 4);
+            if (object >= 0x10000 && object < 0xC0000000)
+            {
+                printf("  the thrown object at 0x%08X:", object);
+                for (int i = 0; i < 12; i++)
+                    printf(" %08X", Guest::Read32(base, object + i * 4));
+                printf("\n");
+
+                for (uint32_t skip = 0; skip <= 4; skip += 4)
+                {
+                    const uint32_t size = Guest::Read32(base, object + skip + 16);
+                    const uint32_t capacity = Guest::Read32(base, object + skip + 20);
+                    if (size == 0 || size > 512 || capacity < size) continue;
+                    const uint32_t text = capacity >= 16
+                        ? Guest::Read32(base, object + skip) : object + skip;
+                    if (text < 0x10000 || text >= 0xC0000000) continue;
+                    printf("  the message: \"");
+                    for (uint32_t i = 0; i < size && i < 200; i++)
+                    {
+                        const uint8_t c = Guest::Read8(base, text + i);
+                        printf("%c", (c >= 32 && c < 127) ? char(c) : '.');
+                    }
+                    printf("\"\n");
+                    break;
+                }
+            }
+        }
+
+        Kernel::ReportRecentCalls(GetCurrentThreadId());
     }
 
     {

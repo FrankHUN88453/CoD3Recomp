@@ -18,6 +18,7 @@
 #include "kernel.h"
 
 #include <cstdio>
+#include <atomic>
 #include <chrono>
 #include <deque>
 #include <map>
@@ -32,6 +33,8 @@ namespace
         uint32_t routine;
         uint32_t context;
         uint32_t statusBlock;
+        uint32_t status;        // written into the block when this is delivered
+        uint32_t information;
         std::chrono::steady_clock::time_point queued;
     };
 
@@ -41,13 +44,15 @@ namespace
     uint64_t g_delivered = 0;
 }
 
-void Kernel::QueueApc(uint32_t routine, uint32_t context, uint32_t statusBlock)
+void Kernel::QueueApc(uint32_t routine, uint32_t context, uint32_t statusBlock,
+                      uint32_t status, uint32_t information)
 {
     if (routine == 0) return;
 
     std::lock_guard<std::mutex> lock(g_mutex);
     g_queues[GetCurrentThreadId()].push_back(
-        { routine, context, statusBlock, std::chrono::steady_clock::now() });
+        { routine, context, statusBlock, status, information,
+          std::chrono::steady_clock::now() });
     g_queued++;
 }
 
@@ -59,14 +64,31 @@ void Kernel::DeliverApcs(PPCContext& ctx, bool alertable)
         auto found = g_queues.find(GetCurrentThreadId());
         if (found == g_queues.end() || found->second.empty()) return;
 
-        // A thread that did not ask to be interrupted keeps its routines
-        // waiting, up to a point. Holding them forever would be its own bug,
-        // so anything older than a frame goes regardless.
+        // Only at an alertable wait, which is the only time the console runs
+        // a user mode routine. This used to hand them over anyway once they
+        // were a frame old, on the theory that a title might never wait
+        // alertably; what it did instead was run a completion routine in the
+        // middle of whatever the thread was doing under a lock, and the
+        // title's archive parser then found its own request list changed
+        // under it. "malformed branch data []", one run in four to eight.
+        // A routine that is genuinely never collected is reported below
+        // rather than forced.
         if (!alertable)
         {
             const auto age = std::chrono::steady_clock::now()
                            - found->second.front().queued;
-            if (age < std::chrono::milliseconds(16)) return;
+            if (age > std::chrono::seconds(2))
+            {
+                static std::atomic<int> announced{ 0 };
+                if (announced.fetch_add(1) < 3)
+                {
+                    printf("apc: a completion routine has waited two seconds "
+                           "for an alertable wait on thread %u\n",
+                        GetCurrentThreadId());
+                    fflush(stdout);
+                }
+            }
+            return;
         }
         pending.swap(found->second);
     }
@@ -95,6 +117,19 @@ void Kernel::DeliverApcs(PPCContext& ctx, bool alertable)
                 fflush(stdout);
             }
             continue;
+        }
+
+        // The status block is written at completion, which is now, the way
+        // the console's I/O manager writes it: after the call returned pending
+        // and before the routine runs. Writing it at the call instead left a
+        // window in which a title that sets the block to pending itself after
+        // the call would read that back as the result, and this one did: its
+        // archive parser found an empty token where the data should have been
+        // and threw "malformed general branch information []", one run in four.
+        if (apc.statusBlock != 0)
+        {
+            Guest::Write32(Guest::Base, apc.statusBlock + 0, apc.status);
+            Guest::Write32(Guest::Base, apc.statusBlock + 4, apc.information);
         }
 
         ctx.r3.u32 = apc.context;

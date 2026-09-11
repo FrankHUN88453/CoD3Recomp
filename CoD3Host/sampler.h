@@ -17,6 +17,9 @@ namespace Sampler
     // The same, for code that is running now rather than stopped in a handler.
     int FunctionsOnStack(uint32_t* functions, int limit);
 
+    // One report of every guest thread, right now.
+    void SampleNow();
+
     void Start(int intervalSeconds);
     void Stop();
 }

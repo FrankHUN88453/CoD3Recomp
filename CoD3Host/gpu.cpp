@@ -340,7 +340,7 @@ namespace
         g_recentAt = (g_recentAt + 1) % RecentCount;
         slot.header = header;
         for (uint32_t i = 0; i < 5; i++)
-            slot.words[i] = (i < available) ? words[i] : 0;
+            slot.words[i] = (words != nullptr && i < available) ? words[i] : 0;
     }
 
     void PrintRecent()
@@ -352,12 +352,16 @@ namespace
             if (slot.header == 0) continue;
             const uint32_t type = slot.header >> 30;
             if (type == 3)
-                printf("    %-18s", Type3Name((slot.header >> 8) & 0x7F));
+            {
+                const char* name = Type3Name((slot.header >> 8) & 0x7F);
+                if (name) printf("    %-18s", name);
+                else printf("    opcode 0x%02X        ", (slot.header >> 8) & 0x7F);
+            }
             else if (type == 0)
-                printf("    reg 0x%04X x%-6u", slot.header & 0x7FFF,
-                    ((slot.header >> 16) & 0x3FFF) + 1);
+                printf("    reg 0x%04X x%-4u [%08X]", slot.header & 0x7FFF,
+                    ((slot.header >> 16) & 0x3FFF) + 1, slot.header);
             else
-                printf("    type %u            ", type);
+                printf("    type %u [%08X]     ", type, slot.header);
             for (uint32_t w = 0; w < 5; w++) printf(" %08X", slot.words[w]);
             printf("\n");
         }
@@ -689,6 +693,29 @@ void Gpu::WriteRegister(uint32_t address, uint32_t value)
         // four kilobytes on had no obvious author. It is SCRATCH_REG0 and
         // SCRATCH_REG1, mirrored to where SCRATCH_ADDR points.
         const uint32_t index = (address - ApertureBase) / 4;
+
+        // Where the scratch block is and which registers are mirrored, every
+        // time either changes: a block that moves under the driver's feet is
+        // a handler reading the old one.
+        if (index == 0x1DC || index == 0x1DD)
+        {
+            printf("gpu: scratch %s = 0x%08X\n",
+                index == 0x1DD ? "block address" : "mirror mask", value);
+
+            // A block address that is not one: the scratch block lives in a
+            // sixty four kilobyte allocation below the 512 MB of physical
+            // memory, so anything else here is packet data being taken for a
+            // register write. What came just before says which packet was
+            // sized wrong.
+            if (index == 0x1DD && value != 0 &&
+                ((value & 0xFFFF) != 0 || value >= 0x20000000u))
+            {
+                printf("gpu: that is not a block address; the stream is out of step\n");
+                PrintRecent();
+            }
+            fflush(stdout);
+        }
+
         if (index >= 0x578 && index < 0x580)
         {
             const uint32_t which = index - 0x578;
@@ -704,7 +731,7 @@ void Gpu::WriteRegister(uint32_t address, uint32_t value)
         Guest::WritePhysical32(mirrorTo, value);
 
         static std::atomic<int> announced{ 0 };
-        if (announced.fetch_add(1) < 6)
+        if (announced.fetch_add(1) < 40)
         {
             printf("gpu: scratch register %u = 0x%08X, mirrored to physical "
                    "0x%08X\n", (address - ApertureBase) / 4 - 0x578, value, mirrorTo);
@@ -985,6 +1012,38 @@ namespace
                 const uint32_t count = ((header >> 16) & 0x3FFF) + 1;
                 const uint32_t baseRegister = header & 0x7FFF;
                 const bool oneRegister = ((header >> 15) & 1) != 0;
+
+                {
+                    uint32_t words[5];
+                    uint32_t available = 0;
+                    for (; available < 5 && available < count &&
+                           cursor + 1 + available < dwords; available++)
+                        words[available] = Guest::Read32(Guest::Base,
+                            base + (cursor + 1 + available) * 4);
+                    Remember(header, words, available);
+                }
+
+                // A register write that lands on the command processor's own
+                // control registers, 0x1C0 to 0x1FF, with what came before it.
+                // The scratch block address was seen taking a packet header as
+                // its value, which is a stream read out of step: the packet
+                // before this one was sized wrong, and these are its tail.
+                if (baseRegister >= 0x1C0 && baseRegister + count > 0x1DC && baseRegister < 0x200)
+                {
+                    static std::atomic<int> announced{ 0 };
+                    if (announced.fetch_add(1) < 10)
+                    {
+                        printf("gpu: register write of %u from 0x%04X, header 0x%08X, "
+                               "at dword %u of a %u dword buffer at 0x%08X\n",
+                            count, baseRegister, header, cursor, dwords, base);
+                        printf("  the words:");
+                        for (uint32_t i = 0; i < count && i < 8 && cursor + 1 + i < dwords; i++)
+                            printf(" %08X", Guest::Read32(Guest::Base, base + (cursor + 1 + i) * 4));
+                        printf("\n");
+                        PrintRecent();
+                    }
+                }
+
                 for (uint32_t i = 0; i < count; i++)
                 {
                     if (cursor + 1 + i >= dwords) break;
@@ -998,6 +1057,7 @@ namespace
             else if (type == 2)
             {
                 length = 1;
+                Remember(header, nullptr, 0);
             }
             else if (type == 3)
             {

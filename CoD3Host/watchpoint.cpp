@@ -181,10 +181,24 @@ bool Kernel::ReportWatchpoint(void* winContext)
         std::lock_guard<std::mutex> lock(g_mutex);
         if (g_watched == 0) return false;
     }
-    if (g_reports.fetch_add(1) >= 6) return true;
+    // Every hit is counted, because the self test below is a host side
+    // write that expects to be counted. Only the printing is filtered.
+    const int report = g_reports.fetch_add(1);
 
     uint32_t functions[12] = {};
     const int count = Sampler::WalkGuestStack(winContext, functions, 12);
+
+    // Writes made by this runtime on the title's behalf, fences and the
+    // like, come from host threads whose only guest frames are the import
+    // thunks at 0x82578000 and the thread start trampoline behind them.
+    // Those are known and uninteresting; the writes worth seeing are the
+    // title's own, which have real code on the stack.
+    bool guestCode = false;
+    for (int i = 0; i < count; i++)
+        if (functions[i] < 0x82578000u) guestCode = true;
+    if (!guestCode) return true;
+
+    if (report >= 40) return true;
 
     printf("\nwatchpoint: guest address 0x%08X was written\n", g_watched);
     if (count > 0)

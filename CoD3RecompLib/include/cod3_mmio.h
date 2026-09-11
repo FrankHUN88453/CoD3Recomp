@@ -74,6 +74,30 @@ namespace Mmio
 
     void Store32(uint32_t address, uint32_t value);
     uint32_t Load32(uint32_t address);
+
+    // A doubleword is two words, high word first, and each half goes where
+    // it belongs: a doubleword that straddles the edge of the window is half
+    // register and half memory, and is treated as exactly that.
+    inline uint64_t Load64(uint8_t* base, uint32_t address)
+    {
+        const uint32_t high = InWindow(address)
+            ? Load32(address)
+            : __builtin_bswap32(*(volatile uint32_t*)(base + address));
+        const uint32_t low = InWindow(address + 4)
+            ? Load32(address + 4)
+            : __builtin_bswap32(*(volatile uint32_t*)(base + address + 4));
+        return (uint64_t(high) << 32) | low;
+    }
+
+    inline void Store64(uint8_t* base, uint32_t address, uint64_t value)
+    {
+        const uint32_t high = uint32_t(value >> 32);
+        const uint32_t low = uint32_t(value);
+        if (InWindow(address)) Store32(address, high);
+        else *(volatile uint32_t*)(base + address) = __builtin_bswap32(high);
+        if (InWindow(address + 4)) Store32(address + 4, low);
+        else *(volatile uint32_t*)(base + address + 4) = __builtin_bswap32(low);
+    }
 }
 
 #define PPC_LOAD_U32(x) \
@@ -87,6 +111,27 @@ namespace Mmio
         const uint32_t mmioValue = static_cast<uint32_t>(y); \
         if (Mmio::InWindow(mmioAddress)) Mmio::Store32(mmioAddress, mmioValue); \
         else *(volatile uint32_t*)(base + mmioAddress) = __builtin_bswap32(mmioValue); \
+    } while (0)
+
+// The same for sixty four bit accesses.
+//
+// Only the thirty two bit forms were caught, and the driver clears two of the
+// scratch registers with a single doubleword store: both of them at once, since
+// they sit side by side. That store went into RAM behind the aperture, the
+// registers kept their values, and the command stream waited for zeros that
+// never arrived. A doubleword in the window is two registers, high word first.
+#define PPC_LOAD_U64(x) \
+    ((Mmio::InWindow(static_cast<uint32_t>(x)) || Mmio::InWindow(static_cast<uint32_t>(x) + 4)) \
+        ? Mmio::Load64(base, static_cast<uint32_t>(x)) \
+        : __builtin_bswap64(*(volatile uint64_t*)(base + (x))))
+
+#define PPC_STORE_U64(x, y) \
+    do { \
+        const uint32_t mmioAddress64 = static_cast<uint32_t>(x); \
+        const uint64_t mmioValue64 = static_cast<uint64_t>(y); \
+        if (Mmio::InWindow(mmioAddress64) || Mmio::InWindow(mmioAddress64 + 4)) \
+            Mmio::Store64(base, mmioAddress64, mmioValue64); \
+        else *(volatile uint64_t*)(base + mmioAddress64) = __builtin_bswap64(mmioValue64); \
     } while (0)
 
 // On x86-64 __rdtsc is a compiler intrinsic with no declaration to collide

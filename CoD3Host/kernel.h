@@ -114,7 +114,7 @@ namespace Kernel
     // The last few kernel calls each thread made, in order. A thread that has
     // stopped making progress is repeating something, and the repetition names
     // what it is waiting for far better than a count does.
-    void ReportRecentCalls();
+    void ReportRecentCalls(uint32_t onlyThread = 0);
 
     // A hardware watch on one word of guest memory. The processor raises an
     // exception on the instruction that writes it, which is the only way to
@@ -139,7 +139,8 @@ namespace Kernel
 
     // Completion routines for asynchronous work: queued against the thread
     // that asked, run when that thread next waits.
-    void QueueApc(uint32_t routine, uint32_t context, uint32_t statusBlock);
+    void QueueApc(uint32_t routine, uint32_t context, uint32_t statusBlock,
+                  uint32_t status, uint32_t information);
     // Completion routines run when the thread waits and says it may be
     // interrupted. A thread that waits without saying so is not expecting its
     // own code to run underneath it, and running it there turns a sequence the
