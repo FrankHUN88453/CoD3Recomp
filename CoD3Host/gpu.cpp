@@ -329,8 +329,9 @@ namespace
     {
         uint32_t header = 0;
         uint32_t words[5] = {};
+        bool used = false;   // a zero header is a real packet, not an empty slot
     };
-    constexpr int RecentCount = 12;
+    constexpr int RecentCount = 28;
     Recent g_recent[RecentCount];
     int g_recentAt = 0;
 
@@ -339,6 +340,7 @@ namespace
         Recent& slot = g_recent[g_recentAt];
         g_recentAt = (g_recentAt + 1) % RecentCount;
         slot.header = header;
+        slot.used = true;
         for (uint32_t i = 0; i < 5; i++)
             slot.words[i] = (words != nullptr && i < available) ? words[i] : 0;
     }
@@ -349,7 +351,7 @@ namespace
         for (int i = 0; i < RecentCount; i++)
         {
             const Recent& slot = g_recent[(g_recentAt + i) % RecentCount];
-            if (slot.header == 0) continue;
+            if (slot.header == 0 && slot.words[0] == 0 && slot.words[1] == 0 && !slot.used) continue;
             const uint32_t type = slot.header >> 30;
             if (type == 3)
             {
@@ -387,11 +389,11 @@ namespace
     // driver puts a wait immediately after the interrupt for a value the
     // handler writes, and a handler that runs after the wait has given up is
     // a handler that ran for nothing.
-    void (*g_raiseInterrupt)() = nullptr;
+    void (*g_raiseInterrupt)(uint32_t cpuMask) = nullptr;
 
-    void RaiseInterruptNow()
+    void RaiseInterruptNow(uint32_t cpuMask)
     {
-        if (g_raiseInterrupt != nullptr) g_raiseInterrupt();
+        if (g_raiseInterrupt != nullptr) g_raiseInterrupt(cpuMask);
         else g_pendingInterrupts.fetch_add(1, std::memory_order_relaxed);
     }
 
@@ -775,6 +777,10 @@ namespace
     // an address and a length, and its contents are ordinary packets.
     void ExecuteBuffer(uint32_t base, uint32_t dwords, Gpu::Statistics& local, int depth);
 
+    // The indirect buffer packet most recently followed, raw, for reports.
+    thread_local uint32_t t_lastIndirectAddress = 0;
+    thread_local uint32_t t_lastIndirectSize = 0;
+
     // The whole walk shares one deadline. Almost every draw in this title's
     // stream is inside an indirect buffer, so a budget that only covered the
     // ring's own packets was a budget on nothing: one buffer would run for
@@ -838,6 +844,29 @@ uint32_t Gpu::ProcessRing(uint32_t ringBase, uint32_t ringSizeDwords,
             const uint32_t count = ((header >> 16) & 0x3FFF) + 1;
             const uint32_t baseRegister = (header & 0x7FFF);
             const bool oneRegister = ((header >> 15) & 1) != 0;
+
+            // The same watch as inside the buffers: a write that lands on the
+            // command processor's own registers from the ring, with the ring
+            // around it.
+            if (baseRegister >= 0x1C0 && baseRegister + count > 0x1DC && baseRegister < 0x200)
+            {
+                static std::atomic<int> announced{ 0 };
+                if (announced.fetch_add(1) < 8)
+                {
+                    const uint32_t from = cursor > 24 ? cursor - 24 : 0;
+                    printf("gpu: ring register write of %u from 0x%04X, header 0x%08X, "
+                           "at ring dword %u, write pointer %u\n",
+                        count, baseRegister, header, cursor, writePointer);
+                    printf("  the ring from dword %u:", from);
+                    for (uint32_t i = from; i < cursor + 8; i++)
+                    {
+                        if (((i - from) % 8) == 0) printf("\n    %4u:", i);
+                        printf(" %08X", ReadDword(i));
+                    }
+                    printf("\n");
+                    PrintRecent();
+                }
+            }
 
             for (uint32_t i = 0; i < count; i++)
             {
@@ -909,7 +938,7 @@ uint32_t Gpu::ProcessRing(uint32_t ringBase, uint32_t ringSizeDwords,
                 // anything finished eventually decides the GPU has stopped and
                 // says so in as many words. It is raised where it appears in
                 // the stream, after everything queued before it has been done.
-                RaiseInterruptNow();
+                RaiseInterruptNow(ReadDword(cursor + 1));
                 break;
             case OpIndirectBuffer:
             {
@@ -917,6 +946,8 @@ uint32_t Gpu::ProcessRing(uint32_t ringBase, uint32_t ringSizeDwords,
                 // leave the driver waiting for work that was never done.
                 const uint32_t target = ReadDword(cursor + 1);
                 const uint32_t targetDwords = ReadDword(cursor + 2) & 0xFFFFF;
+                t_lastIndirectAddress = target;
+                t_lastIndirectSize = ReadDword(cursor + 2);
                 ExecuteBuffer(Guest::PhysicalAlias(target), targetDwords, local, 1);
                 break;
             }
@@ -958,6 +989,32 @@ uint32_t Gpu::ProcessRing(uint32_t ringBase, uint32_t ringSizeDwords,
 
         CountPacket(type, type == 3 ? ((header >> 8) & 0x7F) : 0);
         local.packets++;
+        // A packet that runs past the write pointer.
+        //
+        // The walk stops only when the cursor lands on the write pointer
+        // exactly; a packet that straddles it carries the cursor over, and
+        // the loop then walks the rest of the ring, which is whatever the
+        // title has not written yet, as commands. That is how a run of zero
+        // words and then shader constants came to be executed. Either the
+        // pointer was read mid packet, or the packet's length is wrong; both
+        // are reported, and the walk stops at the pointer either way.
+        {
+            const uint32_t distance = (writePointer + ringSizeDwords - cursor) % ringSizeDwords;
+            if (distance != 0 && length > distance)
+            {
+                static std::atomic<int> announced{ 0 };
+                if (announced.fetch_add(1) < 6)
+                {
+                    const uint32_t now = Gpu::WritePointer();
+                    printf("gpu: a %u dword packet at ring dword %u runs past the write "
+                           "pointer %u (the register now says %u); header 0x%08X\n",
+                        length, cursor, writePointer, now, header);
+                    PrintRecent();
+                }
+                cursor = writePointer;
+                break;
+            }
+        }
         cursor = (cursor + length) % ringSizeDwords;
     }
 
@@ -1028,10 +1085,10 @@ namespace
                 // The scratch block address was seen taking a packet header as
                 // its value, which is a stream read out of step: the packet
                 // before this one was sized wrong, and these are its tail.
-                if (baseRegister >= 0x1C0 && baseRegister + count > 0x1DC && baseRegister < 0x200)
+                if ((baseRegister < 0x100 && count > 64) || (baseRegister >= 0x1C0 && baseRegister + count > 0x1DC && baseRegister < 0x200))
                 {
                     static std::atomic<int> announced{ 0 };
-                    if (announced.fetch_add(1) < 10)
+                    if (announced.fetch_add(1) < 20)
                     {
                         printf("gpu: register write of %u from 0x%04X, header 0x%08X, "
                                "at dword %u of a %u dword buffer at 0x%08X\n",
@@ -1039,6 +1096,46 @@ namespace
                         printf("  the words:");
                         for (uint32_t i = 0; i < count && i < 8 && cursor + 1 + i < dwords; i++)
                             printf(" %08X", Guest::Read32(Guest::Base, base + (cursor + 1 + i) * 4));
+                        printf("\n");
+
+                        // The buffer around the cursor, so the shape of what
+                        // was submitted can be seen: where the packets end,
+                        // what follows them, and how far the declared size
+                        // runs past that.
+                        printf("  reached through INDIRECT_BUFFER address 0x%08X size word 0x%08X\n",
+                            t_lastIndirectAddress, t_lastIndirectSize);
+                        printf("  the buffer begins:");
+                        for (uint32_t i = 0; i < 12 && i < dwords; i++)
+                            printf(" %08X", Guest::Read32(Guest::Base, base + i * 4));
+                        printf("\n");
+                        // Is the CPU still writing this buffer? If the words
+                        // here change while the command processor waits, the
+                        // buffer was submitted before it was finished, or
+                        // rather this thread got to it before the title had
+                        // finished with it.
+                        {
+                            const uint32_t at = cursor > 34 ? cursor - 34 : 0;
+                            uint32_t before[6];
+                            for (int i = 0; i < 6; i++)
+                                before[i] = Guest::Read32(Guest::Base, base + (at + i) * 4);
+                            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                            printf("  twenty milliseconds later, dwords %u..%u read:", at, at + 5);
+                            bool changed = false;
+                            for (int i = 0; i < 6; i++)
+                            {
+                                const uint32_t now = Guest::Read32(Guest::Base, base + (at + i) * 4);
+                                printf(" %08X", now);
+                                if (now != before[i]) changed = true;
+                            }
+                            printf("%s\n", changed ? "  (CHANGED: the CPU was still writing)" : "  (unchanged)");
+                        }
+                        const uint32_t from = cursor > 72 ? cursor - 72 : 0;
+                        printf("  the buffer from dword %u:", from);
+                        for (uint32_t i = from; i < dwords && i < cursor + 12; i++)
+                        {
+                            if (((i - from) % 8) == 0) printf("\n    %4u:", i);
+                            printf(" %08X", Guest::Read32(Guest::Base, base + i * 4));
+                        }
                         printf("\n");
                         PrintRecent();
                     }
@@ -1079,8 +1176,11 @@ namespace
                 {
                     // Nearly all of the stream is inside these buffers, and so
                     // are nearly all of the interrupts; raising them only from
-                    // the outer ring missed almost every one.
-                    RaiseInterruptNow();
+                    // the outer ring missed almost every one. The word after
+                    // the header is the mask of CPUs to interrupt.
+                    const uint32_t cpuMask = cursor + 1 < dwords
+                        ? Guest::Read32(Guest::Base, base + (cursor + 1) * 4) : 0;
+                    RaiseInterruptNow(cpuMask);
                 }
                 else if (opcode == OpDrawIndx && cursor + 2 < dwords)
                 {
@@ -1140,9 +1240,11 @@ namespace
                     local.swaps++;
                 else if (opcode == OpIndirectBuffer && cursor + 2 < dwords)
                 {
+                    t_lastIndirectAddress = Guest::Read32(Guest::Base, base + (cursor + 1) * 4);
+                    t_lastIndirectSize = Guest::Read32(Guest::Base, base + (cursor + 2) * 4);
                     ExecuteBuffer(
-                        Guest::PhysicalAlias(Guest::Read32(Guest::Base, base + (cursor + 1) * 4)),
-                        Guest::Read32(Guest::Base, base + (cursor + 2) * 4) & 0xFFFFF,
+                        Guest::PhysicalAlias(t_lastIndirectAddress),
+                        t_lastIndirectSize & 0xFFFFF,
                         local, depth + 1);
                 }
                 else if (Type3Name(opcode) == nullptr)
@@ -1370,7 +1472,7 @@ void Gpu::ReportFences()
     fflush(stdout);
 }
 
-void Gpu::SetInterruptRaiser(void (*raiser)())
+void Gpu::SetInterruptRaiser(void (*raiser)(uint32_t cpuMask))
 {
     g_raiseInterrupt = raiser;
 }

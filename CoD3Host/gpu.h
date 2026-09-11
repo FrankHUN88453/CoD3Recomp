@@ -33,7 +33,7 @@ namespace Gpu
 
     // Installs the routine that raises an interrupt where the packet stands,
     // on the command thread. Until one is installed they are only counted.
-    void SetInterruptRaiser(void (*raiser)());
+    void SetInterruptRaiser(void (*raiser)(uint32_t cpuMask));
 
     // Every address a fence has been written to, with a count.
     void ReportFences();

@@ -247,6 +247,12 @@ void Guest::ReleaseThreadPointer(uint32_t block)
     g_freeBlocks.push_back(block);
 }
 
+void Guest::SetProcessor(const PPCContext& ctx, int processor)
+{
+    if (ctx.r13.u32 == 0 || processor < 0 || processor >= int(HardwareThreads)) return;
+    *(Base + ctx.r13.u32 + PcrProcessorNumber) = uint8_t(processor);
+}
+
 int Guest::CurrentProcessor(const PPCContext& ctx)
 {
     if (ctx.r13.u32 == 0) return 0;

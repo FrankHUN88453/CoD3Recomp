@@ -300,6 +300,9 @@ namespace Guest
     // Which hardware thread the caller is on, read out of its own thread block.
     int CurrentProcessor(const PPCContext& ctx);
 
+    // Changes which of the six hardware threads a context says it is on.
+    void SetProcessor(const PPCContext& ctx, int processor);
+
     // A small block of guest memory for a kernel object's dispatcher header.
     // Objects the title reaches through a handle also have to exist as memory,
     // because it can turn a handle into a pointer and wait on that instead.

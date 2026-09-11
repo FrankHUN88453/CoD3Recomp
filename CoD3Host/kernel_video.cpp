@@ -30,6 +30,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <thread>
 
 #include <Windows.h>
@@ -50,6 +51,10 @@ namespace
         std::atomic<uint64_t> frames{ 0 };
         std::thread thread;
         std::thread commandThread;
+
+        // Held while the ring is walked and while it is replaced, so the two
+        // never overlap.
+        std::mutex ringMutex;
     };
 
     VideoState& Video()
@@ -72,6 +77,38 @@ namespace
     thread_local PPCContext* t_commandContext = nullptr;
     thread_local uint32_t t_commandStackTop = 0;
 
+    // The handler itself, on the command thread's context, as the given CPU.
+    void RunInterruptHandler(PPCFunc* routine, uint32_t cpu)
+    {
+        VideoState& video = Video();
+        PPCContext& context = *t_commandContext;
+
+        context.r1.u32 = t_commandStackTop - 0x100;
+        context.r3.u32 = 1;   // source: the command processor
+        context.r4.u32 = video.interruptContext.load();
+
+        // The handler decides what to do from the mirrored scratch block:
+        // register four is the callback it armed, or 0x0BADF00D when it armed
+        // nothing, and an interrupt that finds the latter is one it did not
+        // ask for. The first word is the mask of CPUs with an interrupt
+        // pending, which the handler clears its own bit from.
+        const uint32_t block = Gpu::ReadRegister(Gpu::ApertureBase + 0x1DD * 4) & ~3u;
+        const uint32_t pending = block
+            ? Guest::Read32(Guest::Base, Guest::PhysicalAlias(block)) : 0;
+        const uint32_t armed = block
+            ? Guest::Read32(Guest::Base, Guest::PhysicalAlias(block + 16)) : 0;
+        const uint64_t raised = video.interruptsRaised.fetch_add(1, std::memory_order_relaxed);
+        if (raised < 40)
+        {
+            printf("gpu: interrupt %llu on cpu %u, pending mask 0x%02X, callback "
+                   "0x%08X%s\n", (unsigned long long)raised, cpu, pending, armed,
+                armed == 0x0BADF00Du ? " (none armed)" : "");
+            fflush(stdout);
+        }
+
+        routine(context, Guest::Base);
+    }
+
     void CommandThread()
     {
         VideoState& video = Video();
@@ -87,7 +124,7 @@ namespace
         // run the handler the moment it is decoded.
         t_commandContext = &ctx;
         t_commandStackTop = stackTop;
-        Gpu::SetInterruptRaiser([]() {
+        Gpu::SetInterruptRaiser([](uint32_t cpuMask) {
             VideoState& video = Video();
             const uint32_t callback = video.interruptCallback.load();
             if (callback == 0 || t_commandContext == nullptr || t_commandStackTop == 0)
@@ -98,31 +135,25 @@ namespace
             Gpu::WriteRegister(Gpu::RegisterInterruptStatus,
                 Gpu::ReadRegister(Gpu::RegisterInterruptStatus) | 1);
 
-            PPCContext& context = *t_commandContext;
-            context.r1.u32 = t_commandStackTop - 0x100;
-            context.r3.u32 = 1;   // source: the command processor
-            context.r4.u32 = video.interruptContext.load();
-            // What the handler did with the acknowledgement block, the first
-            // few times, so a handler that runs and changes nothing can be
-            // told from one that never ran.
-            // The handler decides what to do from the mirrored scratch block:
-            // register four is the callback it armed, or 0x0BADF00D when it
-            // armed nothing, and an interrupt that finds the latter is one it
-            // did not ask for. Printing that value with every interrupt says
-            // whether the stream is asking twice or the arming is being lost.
-            const uint32_t block = Gpu::ReadRegister(Gpu::ApertureBase + 0x1DD * 4) & ~3u;
-            const uint32_t armed = block
-                ? Guest::Read32(Guest::Base, Guest::PhysicalAlias(block + 16)) : 0;
-            const uint64_t raised = video.interruptsRaised.fetch_add(1, std::memory_order_relaxed);
-            if (raised < 400)
+            // On the CPU the packet names.
+            //
+            // The handler ends by clearing its own CPU's bit out of the first
+            // word of the scratch block, in memory, under a spin lock: that
+            // word is the mask of CPUs the driver has interrupts pending on,
+            // and the wait that follows in the stream is for it to reach zero.
+            // The driver puts the mask into SCRATCH_REG0 and the same mask
+            // into the packet, so the handler has to run as that CPU, or it
+            // clears the wrong bit and the wait never ends. The thread this
+            // runs on is not a guest thread and its processor number is
+            // whatever it was given at creation, so it is set here, per
+            // interrupt, to each CPU in the mask in turn.
+            if (cpuMask == 0) cpuMask = 1;
+            for (uint32_t cpu = 0; cpu < 6; cpu++)
             {
-                printf("gpu: interrupt %llu raised from the stream, scratch block at "
-                       "0x%08X, scratch 4 holds 0x%08X%s\n", (unsigned long long)raised,
-                    block, armed,
-                    armed == 0x0BADF00Du ? " (nothing armed: the driver will call it unanticipated)" : "");
-                fflush(stdout);
+                if (((cpuMask >> cpu) & 1) == 0) continue;
+                Guest::SetProcessor(*t_commandContext, int(cpu));
+                RunInterruptHandler(routine, cpu);
             }
-            routine(context, Guest::Base);
         });
 
         while (video.running.load(std::memory_order_acquire))
@@ -133,9 +164,14 @@ namespace
 
             if (ring != 0 && ringDwords != 0)
             {
+                std::lock_guard<std::mutex> lock(video.ringMutex);
+                // Read again under the lock: the ring may have been replaced
+                // between the reads above and here.
+                const uint32_t lockedRing = video.ringBuffer.load();
+                const uint32_t lockedDwords = video.ringBufferSize.load() / 4;
                 const uint32_t before = video.readPointer.load();
                 const uint32_t consumed = Gpu::ProcessRing(
-                    ring, ringDwords, before, Gpu::WritePointer());
+                    lockedRing, lockedDwords, before, Gpu::WritePointer());
                 video.readPointer.store(consumed);
                 Gpu::WriteRegister(Gpu::ApertureBase + 0x710, consumed);
                 worked = consumed != before;
@@ -437,11 +473,44 @@ PPC_FUNC(__imp__VdInitializeRingBuffer)
     // pointer then wraps before it can ever reach the value the title is
     // spinning for.
     VideoState& video = Video();
+
+    // A new ring starts empty: the command processor is reset with it, so
+    // both pointers are zero. This used to keep the old read pointer and the
+    // old write pointer register, and the title initialises the ring twice at
+    // start up; if the command thread ran between the second initialisation
+    // and the title's first write pointer, it walked the new ring from the
+    // old read position to the old write position, through whatever the
+    // allocator had left there. Executing 0xCDCDCDCD as packets was the
+    // start of every "GPU is hung". The lock keeps the command thread out
+    // while the three values change together.
+    std::lock_guard<std::mutex> lock(video.ringMutex);
+
+    // Whatever the old ring still holds is carried out first. The console
+    // is idle by the time a title re-initialises its ring, because the title
+    // waited for it to be; here the command thread may simply not have got
+    // to the tail yet, and resetting the pointers over it dropped those
+    // packets, fences included, and the title then waited for them forever.
+    {
+        const uint32_t oldRing = video.ringBuffer.load();
+        const uint32_t oldDwords = video.ringBufferSize.load() / 4;
+        const uint32_t oldRead = video.readPointer.load();
+        const uint32_t oldWrite = Gpu::WritePointer();
+        if (oldRing != 0 && oldDwords != 0 && oldRead != oldWrite && oldWrite < oldDwords)
+        {
+            const uint32_t consumed = Gpu::ProcessRing(oldRing, oldDwords, oldRead, oldWrite);
+            printf("video: the previous ring was drained from dword %u to %u before "
+                   "being replaced\n", oldRead, consumed);
+        }
+    }
+
+    Gpu::WriteRegister(Gpu::RegisterWritePointer, 0);
+    video.readPointer.store(0);
     video.ringBuffer.store(ctx.r3.u32);
     video.ringBufferSize.store(8u << (ctx.r4.u32 & 0x1F));
-    printf("video: ring buffer at 0x%08X, %u bytes (%u dwords)\n",
+    printf("video: ring buffer at 0x%08X, %u bytes (%u dwords), pointers reset\n",
         video.ringBuffer.load(), video.ringBufferSize.load(),
         video.ringBufferSize.load() / 4);
+    fflush(stdout);
 }
 
 // VOID VdEnableRingBufferRPtrWriteBack(ULONG address, ULONG blockSize)
