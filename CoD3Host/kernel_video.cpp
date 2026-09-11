@@ -1,0 +1,615 @@
+// Xbox 360 kernel imports: the video driver.
+//
+// On the console these calls talk to the Xenos GPU. The title hands over a
+// command ring buffer, writes packets into it, advances a write pointer, and
+// waits for the GPU to catch up and for a vertical blank interrupt before
+// starting the next frame.
+//
+// There is no GPU here. What this file provides is the part of that contract
+// the title can observe from the CPU: the ring buffer is accepted, a thread
+// advances the read pointer to wherever the write pointer has reached, and the
+// graphics interrupt callback is invoked at 60 Hz. That is enough for the
+// title to believe frames are completing and to keep running its main loop.
+//
+// Nothing in the ring buffer is read. No packet is decoded, no shader is
+// translated, nothing is drawn. Producing a picture means writing a real
+// command processor and running XenosRecomp over the title's shaders, which
+// is the largest single piece of work left in this project.
+
+#include "kernel.h"
+#include "audio_out.h"
+#include "scheduler.h"
+#include "gpu.h"
+#include "edram.h"
+#include "shaders.h"
+#include "raster.h"
+#include "window.h"
+
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <thread>
+
+#include <Windows.h>
+
+namespace
+{
+    struct VideoState
+    {
+        std::atomic<bool> running{ false };
+        std::atomic<uint32_t> ringBuffer{ 0 };
+        std::atomic<uint32_t> ringBufferSize{ 0 };
+        std::atomic<uint32_t> readPointerWriteBack{ 0 };
+        std::atomic<uint32_t> readPointer{ 0 };
+        std::atomic<uint32_t> gpuIdentifier{ 0 };
+        std::atomic<uint32_t> interruptCallback{ 0 };
+        std::atomic<uint64_t> interruptsRaised{ 0 };
+        std::atomic<uint32_t> interruptContext{ 0 };
+        std::atomic<uint64_t> frames{ 0 };
+        std::thread thread;
+        std::thread commandThread;
+    };
+
+    VideoState& Video()
+    {
+        static VideoState state;
+        return state;
+    }
+
+    // The pretend GPU. It never looks at what is in the ring buffer; it only
+    // keeps the bookkeeping the title polls consistent.
+    // The command processor.
+    //
+    // This used to share the video thread, and that only worked while there was
+    // nothing to draw. Once draws were really carried out, one busy buffer took
+    // longer than a frame and the vertical blank stopped happening, which the
+    // title reads as a display that has stopped. Giving the two their own
+    // threads is also what the hardware does: the command processor and the
+    // scanout run independently and neither waits for the other.
+    // The command thread's guest context, for the interrupt hook above.
+    thread_local PPCContext* t_commandContext = nullptr;
+    thread_local uint32_t t_commandStackTop = 0;
+
+    void CommandThread()
+    {
+        VideoState& video = Video();
+
+        // The handler this thread raises is guest code, so it needs a context
+        // and a stack of its own, exactly like a thread the title made itself.
+        const uint32_t stackTop = Guest::AllocateStack(128u << 10);
+        alignas(0x40) PPCContext ctx{};
+        ctx.r13.u32 = Guest::CreateThreadPointer(GetCurrentThreadId());
+        ctx.fpscr.loadFromHost();
+
+        // Reachable from the command processor, so an interrupt packet can
+        // run the handler the moment it is decoded.
+        t_commandContext = &ctx;
+        t_commandStackTop = stackTop;
+        Gpu::SetInterruptRaiser([]() {
+            VideoState& video = Video();
+            const uint32_t callback = video.interruptCallback.load();
+            if (callback == 0 || t_commandContext == nullptr || t_commandStackTop == 0)
+                return;
+            PPCFunc* routine = Guest::Lookup(callback);
+            if (routine == nullptr) return;
+
+            Gpu::WriteRegister(Gpu::RegisterInterruptStatus,
+                Gpu::ReadRegister(Gpu::RegisterInterruptStatus) | 1);
+
+            PPCContext& context = *t_commandContext;
+            context.r1.u32 = t_commandStackTop - 0x100;
+            context.r3.u32 = 1;   // source: the command processor
+            context.r4.u32 = video.interruptContext.load();
+            // What the handler did with the acknowledgement block, the first
+            // few times, so a handler that runs and changes nothing can be
+            // told from one that never ran.
+            const uint32_t block = Gpu::ReadRegister(Gpu::ApertureBase + 0x1DD * 4) & ~3u;
+            const uint32_t before = block ? Guest::Read32(Guest::Base, Guest::PhysicalAlias(block)) : 0;
+            routine(context, Guest::Base);
+            const uint64_t raised = video.interruptsRaised.fetch_add(1, std::memory_order_relaxed);
+            if (raised < 6 && block != 0)
+            {
+                printf("gpu: interrupt handler ran for source 1; the block at 0x%08X "
+                       "held 0x%08X before and 0x%08X after, status register 0x%08X\n",
+                    block, before, Guest::Read32(Guest::Base, Guest::PhysicalAlias(block)),
+                    Gpu::ReadRegister(Gpu::RegisterInterruptStatus));
+                fflush(stdout);
+            }
+        });
+
+        while (video.running.load(std::memory_order_acquire))
+        {
+            const uint32_t ring = video.ringBuffer.load();
+            const uint32_t ringDwords = video.ringBufferSize.load() / 4;
+            bool worked = false;
+
+            if (ring != 0 && ringDwords != 0)
+            {
+                const uint32_t before = video.readPointer.load();
+                const uint32_t consumed = Gpu::ProcessRing(
+                    ring, ringDwords, before, Gpu::WritePointer());
+                video.readPointer.store(consumed);
+                Gpu::WriteRegister(Gpu::ApertureBase + 0x710, consumed);
+                worked = consumed != before;
+            }
+
+            // Interrupts the stream asked for, raised now that everything
+            // queued ahead of them has been carried out. Source one is the
+            // command processor; the vertical blank on the other thread is
+            // source zero.
+            if (const uint32_t raised = Gpu::TakePendingInterrupts())
+            {
+                const uint32_t callback = video.interruptCallback.load();
+                if (callback != 0 && stackTop != 0)
+                {
+                    if (PPCFunc* routine = Guest::Lookup(callback))
+                    {
+                        Gpu::WriteRegister(Gpu::RegisterInterruptStatus,
+                            Gpu::ReadRegister(Gpu::RegisterInterruptStatus) | 1);
+
+                        // Once, however many were queued: the handler asks the
+                        // hardware what happened rather than being told, so
+                        // raising it repeatedly only costs time.
+                        (void)raised;
+                        ctx.r1.u32 = stackTop - 0x100;
+                        ctx.r3.u32 = 1;   // source: the command processor
+                        ctx.r4.u32 = video.interruptContext.load();
+                        routine(ctx, Guest::Base);
+                        worked = true;
+                    }
+                }
+            }
+
+            // What the title waits on is not that register. It spins comparing
+            // its own write pointer at 0x2A1C against whatever is at the
+            // address in 0x2A10, and a GPU that has caught up publishes exactly
+            // the write pointer. Publishing anything past it makes the title's
+            // unsigned distance arithmetic wrap and it spins forever.
+            const uint32_t context = video.interruptContext.load();
+            if (context != 0)
+            {
+                const uint32_t readPointerAt =
+                    Guest::Read32(Guest::Base, context + 0x2A10);
+                const uint32_t titleWritePointer =
+                    Guest::Read32(Guest::Base, context + 0x2A1C);
+                if (readPointerAt != 0)
+                {
+                    Guest::WritePhysical32(readPointerAt, titleWritePointer);
+                    Guest::WritePhysical32(readPointerAt & ~0x3Fu, titleWritePointer);
+                }
+            }
+
+            if (!worked) std::this_thread::sleep_for(std::chrono::microseconds(200));
+        }
+    }
+
+    void VideoThread()
+    {
+        VideoState& video = Video();
+
+        // Guest code runs on this thread when the interrupt callback fires, so
+        // it needs a processor context and a stack of its own, exactly like a
+        // thread the title created itself.
+        const uint32_t stackTop = Guest::AllocateStack(256u << 10);
+        if (stackTop == 0)
+        {
+            fprintf(stderr, "video: no room for the interrupt stack\n");
+            return;
+        }
+
+        alignas(0x40) PPCContext ctx{};
+        ctx.r13.u32 = Guest::CreateThreadPointer(GetCurrentThreadId());
+        ctx.fpscr.loadFromHost();
+
+        auto nextFrame = std::chrono::steady_clock::now();
+        while (video.running.load(std::memory_order_acquire))
+        {
+            nextFrame += std::chrono::microseconds(16667);   // 60 Hz
+
+            // Two separate things, which looked like one and cost a while to
+            // untangle. The command ring is the buffer VdInitializeRingBuffer
+            // named, and the register at 0x714 says how far the title has
+            // filled it. The field at 0x2A04 in the title's own structure is
+            // the system command buffer, a different allocation that stays
+            // empty here.
+            // The word at offset 4 of the write back block is how far the GPU
+            // has got: an address in the upper thirty bits and a two bit tag
+            // below it. The render thread waits until that address reaches the
+            // one it cares about.
+            //
+            // This used to be cycled through all four tag values from here, as
+            // a stand in for not knowing what wrote it. The command stream
+            // writes it: that is what an EVENT_WRITE_SHD packet is for. Now
+            // those packets are carried out, forcing a tag from here would
+            // overwrite the real answer with a rotating guess.
+
+            const uint32_t callback = video.interruptCallback.load();
+            if (callback != 0)
+            {
+                if (PPCFunc* routine = Guest::Lookup(callback))
+                {
+                    // The handler checks the interrupt status register before
+                    // it does anything, so raising the interrupt means setting
+                    // the pending bit as well as making the call.
+                    Gpu::WriteRegister(Gpu::RegisterInterruptStatus,
+                        Gpu::ReadRegister(Gpu::RegisterInterruptStatus) | 1);
+
+                    ctx.r1.u32 = stackTop - 0x100;
+                    ctx.r3.u32 = 0;   // source: vertical blank
+                    ctx.r4.u32 = video.interruptContext.load();
+                    routine(ctx, Guest::Base);
+                }
+            }
+
+            const uint64_t frame = video.frames.fetch_add(1, std::memory_order_relaxed) + 1;
+            Kernel::Stats().frames.store(frame, std::memory_order_relaxed);
+
+            // Without a picture, this line is the only evidence the title is
+            // doing anything. Once a second is often enough to see movement
+            // and rare enough not to bury the rest of the output.
+            if (frame % 60 == 0)
+            {
+                const auto& stats = Kernel::Stats();
+                // The ring pointers say whether the command processor is
+                // keeping up, and whether the size the driver asked for is
+                // being interpreted the way the driver meant it.
+                printf("ring: write pointer %u, read pointer %u, size %u dwords\n",
+                    Gpu::WritePointer(), video.readPointer.load(),
+                    video.ringBufferSize.load() / 4);
+
+                // The write back block and the fields around the ring
+                // description. Which field the render thread compares against
+                // the progress pointer is not known yet, so the whole
+                // neighbourhood is printed and the one that moves is the one
+                // that matters.
+                const uint32_t identifier = video.gpuIdentifier.load();
+                if (identifier >= 8)
+                {
+                    const uint32_t blockAt = identifier - 8;
+                    printf("block:");
+                    for (int i = 0; i < 6; i++)
+                        printf(" %08X", Guest::Read32(Guest::Base, blockAt + i * 4));
+                    printf("\n");
+                }
+
+                // Strings the title keeps near the code that is stuck. Its own
+                // words about what it is waiting for are worth more than any
+                // guess made from the outside.
+                {
+                    static bool once = false;
+                    if (!once)
+                    {
+                        once = true;
+                        for (uint32_t at = 0x82A8DE00; at < 0x82A8E100; at++)
+                        {
+                            const char* text =
+                                reinterpret_cast<const char*>(Guest::Ptr(at));
+                            size_t length = 0;
+                            while (length < 90 && text[length] >= 0x20 &&
+                                   text[length] < 0x7F)
+                                length++;
+                            if (length >= 12 && text[length] == 0)
+                            {
+                                printf("string 0x%08X: %.*s\n", at, int(length), text);
+                                at += uint32_t(length);
+                            }
+                        }
+                        fflush(stdout);
+                    }
+                }
+
+                // The render thread waits on the word four bytes into whatever
+                // this field points at. Printing the pointer and what is around
+                // it is the only way to tell whether the fences the command
+                // stream writes are landing in the block it is watching.
+                const uint32_t deviceContext = video.interruptContext.load();
+                if (deviceContext != 0)
+                {
+                    const uint32_t watched =
+                        Guest::Read32(Guest::Base, deviceContext + 0x2A10);
+                    printf("watched: 0x%08X ->", watched);
+                    if (watched != 0)
+                    {
+                        const uint32_t at = Guest::PhysicalAlias(watched);
+                        for (int i = 0; i < 4; i++)
+                            printf(" %08X", Guest::Read32(Guest::Base, at + i * 4));
+                    }
+                    printf("\n");
+                }
+
+                const uint32_t context = video.interruptContext.load();
+                if (context != 0)
+                {
+                    printf("ctx:  ");
+                    for (uint32_t offset = 0x2A00; offset <= 0x2A3C; offset += 4)
+                        printf(" %08X", Guest::Read32(Guest::Base, context + offset));
+                    printf("\n");
+                }
+
+                Gpu::ReportPacketMix();
+                Edram::Report();
+                Shaders::Report();
+                Raster::Report();
+                Kernel::ReportImports();
+                Kernel::ReportApcs();
+                Scheduler::Report();
+                Audio::Report();
+                Gpu::ReportFences();
+                Kernel::ReportFileReads();
+                Gpu::ReportPolling();
+                if (frame >= 600) Kernel::ReportWaitTraffic();
+                const Gpu::Statistics gpu = Gpu::Stats();
+                printf("[%4llus] frames %llu  files %llu (%.1f MB read)  threads %llu  "
+                       "allocated %.1f MB  audio %llu  packets %llu  draws %llu\n",
+                    (unsigned long long)(frame / 60),
+                    (unsigned long long)frame,
+                    (unsigned long long)stats.filesOpened.load(),
+                    stats.fileBytesRead.load() / 1048576.0,
+                    (unsigned long long)stats.threadsCreated.load(),
+                    stats.bytesAllocated.load() / 1048576.0,
+                    (unsigned long long)stats.audioFrames.load(),
+                    (unsigned long long)gpu.packets,
+                    (unsigned long long)gpu.draws);
+                fflush(stdout);
+            }
+
+            std::this_thread::sleep_until(nextFrame);
+        }
+    }
+
+    void StartVideoThread()
+    {
+        VideoState& video = Video();
+        bool expected = false;
+        if (!video.running.compare_exchange_strong(expected, true))
+            return;
+        video.thread = std::thread(VideoThread);
+        video.commandThread = std::thread(CommandThread);
+    }
+}
+
+// VOID VdInitializeEngines(ULONG unk, VOID* callback, ULONG unk, ULONG* unk, ULONG* unk)
+PPC_FUNC(__imp__VdInitializeEngines)
+{
+    Kernel::CountImport("VdInitializeEngines");
+    printf("video: engines initialised (no GPU behind them, nothing will be drawn)\n");
+    StartVideoThread();
+}
+
+// VOID VdShutdownEngines(void)
+PPC_FUNC(__imp__VdShutdownEngines)
+{
+    Kernel::CountImport("VdShutdownEngines");
+    VideoState& video = Video();
+    if (video.running.exchange(false) && video.thread.joinable())
+        video.thread.join();
+        if (video.commandThread.joinable()) video.commandThread.join();
+    printf("video: engines shut down after %llu frames\n",
+        (unsigned long long)video.frames.load());
+}
+
+// VOID VdInitializeRingBuffer(ULONG address, ULONG sizeLog2)
+PPC_FUNC(__imp__VdInitializeRingBuffer)
+{
+    Kernel::CountImport("VdInitializeRingBuffer");
+    // The second argument is the log2 of the size in quadwords, which is how
+    // CP_RB_CNTL encodes it, so the ring is 8 << log2 bytes. Reading it as a
+    // plain byte count makes the ring eight times too small, and the read
+    // pointer then wraps before it can ever reach the value the title is
+    // spinning for.
+    VideoState& video = Video();
+    video.ringBuffer.store(ctx.r3.u32);
+    video.ringBufferSize.store(8u << (ctx.r4.u32 & 0x1F));
+    printf("video: ring buffer at 0x%08X, %u bytes (%u dwords)\n",
+        video.ringBuffer.load(), video.ringBufferSize.load(),
+        video.ringBufferSize.load() / 4);
+}
+
+// VOID VdEnableRingBufferRPtrWriteBack(ULONG address, ULONG blockSize)
+PPC_FUNC(__imp__VdEnableRingBufferRPtrWriteBack)
+{
+    Kernel::CountImport("VdEnableRingBufferRPtrWriteBack");
+    printf("video: read pointer write back at 0x%08X, block size %u\n",
+        ctx.r3.u32, ctx.r4.u32);
+    // The address where the GPU is expected to publish how far it has read.
+    // The video thread keeps this equal to the write pointer.
+    Video().readPointerWriteBack.store(ctx.r3.u32);
+}
+
+// VOID VdSetSystemCommandBufferGpuIdentifierAddress(ULONG address)
+PPC_FUNC(__imp__VdSetSystemCommandBufferGpuIdentifierAddress)
+{
+    Kernel::CountImport("VdSetSystemCommandBufferGpuIdentifierAddress");
+    printf("video: gpu identifier address 0x%08X\n", ctx.r3.u32);
+    fflush(stdout);
+    Video().gpuIdentifier.store(ctx.r3.u32);
+    if (ctx.r3.u32 != 0)
+        Guest::Write32(base, ctx.r3.u32, 0);
+}
+
+// VOID VdSetGraphicsInterruptCallback(VOID* callback, ULONG context)
+PPC_FUNC(__imp__VdSetGraphicsInterruptCallback)
+{
+    Kernel::CountImport("VdSetGraphicsInterruptCallback");
+    Video().interruptCallback.store(ctx.r3.u32);
+    Video().interruptContext.store(ctx.r4.u32);
+    printf("video: interrupt callback at 0x%08X\n", ctx.r3.u32);
+}
+
+// VOID VdCallGraphicsNotificationRoutines(ULONG value)
+PPC_FUNC(__imp__VdCallGraphicsNotificationRoutines) {}
+
+// VOID VdGetSystemCommandBuffer(ULONG* bufferOut, ULONG* valueOut)
+PPC_FUNC(__imp__VdGetSystemCommandBuffer)
+{
+    Kernel::CountImport("VdGetSystemCommandBuffer");
+    // A scratch buffer the title writes system packets into. It is never read,
+    // so any committed guest memory will do.
+    static uint32_t buffer = 0;
+    if (buffer == 0)
+    {
+        buffer = Guest::AllocateStack(64u << 10);
+        if (buffer != 0) buffer -= (64u << 10);   // AllocateStack returns the top
+    }
+
+    if (ctx.r3.u32 != 0) Guest::Write32(base, ctx.r3.u32, buffer);
+    if (ctx.r4.u32 != 0) Guest::Write32(base, ctx.r4.u32, 0);
+}
+
+// VOID VdInitializeScalerCommandBuffer(...)
+PPC_FUNC(__imp__VdInitializeScalerCommandBuffer)
+{
+    Kernel::CountImport("VdInitializeScalerCommandBuffer");
+    // Returns the number of words written into the caller's buffer.
+    ctx.r3.u32 = 0;
+}
+
+// VOID VdSwap(...)
+PPC_FUNC(__imp__VdSwap)
+{
+    Kernel::CountImport("VdSwap");
+    // VdSwap is where the title hands over a finished frame. Its arguments
+    // name the buffer, so the first few are reported in full: that address is
+    // what the window would present if anything had rendered into it.
+    static std::atomic<uint64_t> swaps{ 0 };
+    const uint64_t count = swaps.fetch_add(1) + 1;
+    // The fourth argument points at the texture fetch constant that describes
+    // the front buffer: its address, its size and its format. That is the one
+    // piece of information the window needs to show a real frame, so it is
+    // decoded here and handed over.
+    const uint32_t fetchConstant = ctx.r4.u32;
+
+    // Every argument, the first few times. Only the fetch constant was ever
+    // read, and a swap the console performs is more than a picture: the first
+    // argument is where in the ring buffer the driver expects a swap packet to
+    // be written, and one of the others may well be where it expects the swap
+    // to be acknowledged, which is the address a wait has been abandoned on
+    // after every first frame of every run.
+    if (count <= 3)
+    {
+        printf("video: VdSwap arguments r3..r10:");
+        for (int i = 3; i <= 10; i++)
+            printf(" %08X", (&ctx.r0)[i].u32);
+        printf("\n");
+        const uint32_t buffer = ctx.r3.u32;
+        if (buffer != 0)
+        {
+            printf("video:   at r3, the buffer holds:");
+            for (int i = 0; i < 8; i++)
+                printf(" %08X", Guest::Read32(base, buffer + i * 4));
+            printf("\n");
+        }
+        printf("video:   ring write pointer register reads %u\n",
+            Gpu::WritePointer());
+        fflush(stdout);
+    }
+
+    if (fetchConstant != 0)
+    {
+        const uint32_t word0 = Guest::Read32(base, fetchConstant + 0);
+        const uint32_t word1 = Guest::Read32(base, fetchConstant + 4);
+        const uint32_t word2 = Guest::Read32(base, fetchConstant + 8);
+
+        // The address is in the upper bits of the second word, in 4 KB units.
+        const uint32_t surface = (word1 & 0xFFFFF000);
+        const uint32_t width  = ((word2 & 0x00001FFF) + 1);
+        const uint32_t height = (((word2 >> 13) & 0x00001FFF) + 1);
+
+        if (count <= 3)
+        {
+            printf("video: VdSwap %llu fetch constant %08X %08X %08X\n",
+                (unsigned long long)count, word0, word1, word2);
+            printf("video:   surface 0x%08X, %ux%u\n", surface, width, height);
+
+            bool anything = false;
+            for (uint32_t i = 0; i < 4096 && !anything; i += 4)
+                if (Guest::Read32(Guest::Base, Guest::PhysicalAlias(surface) + i) != 0)
+                    anything = true;
+            printf("video:   the surface is %s\n",
+                anything ? "not empty" : "entirely zero, nothing was rendered into it");
+            fflush(stdout);
+        }
+
+        if (surface != 0 && width > 1 && height > 1 && width <= 4096 && height <= 4096)
+            Window::SetFrontBuffer(Guest::PhysicalAlias(surface), width, height);
+    }
+    ctx.r3.u32 = 0;
+}
+
+// --- Display queries -------------------------------------------------------
+
+// VOID VdQueryVideoMode(X_VIDEO_MODE* mode)
+PPC_FUNC(__imp__VdQueryVideoMode)
+{
+    Kernel::CountImport("VdQueryVideoMode");
+    const uint32_t mode = ctx.r3.u32;
+    if (mode == 0) return;
+
+    // The same mode XGetVideoMode reports, so the title never sees the two
+    // disagree.
+    memset(Guest::Ptr(mode), 0, 48);
+    Guest::Write32(base, mode + 0x00, 1280);
+    Guest::Write32(base, mode + 0x04, 720);
+    Guest::Write32(base, mode + 0x08, 0);
+    Guest::Write32(base, mode + 0x0C, 1);
+    Guest::Write32(base, mode + 0x10, 1);
+    Guest::Write32(base, mode + 0x14, 0x42700000);   // 60.0f
+    Guest::Write32(base, mode + 0x18, 1);
+}
+
+// ULONG VdQueryVideoFlags(void)
+PPC_FUNC(__imp__VdQueryVideoFlags)
+{
+    Kernel::CountImport("VdQueryVideoFlags");
+    // Widescreen and high definition.
+    ctx.r3.u32 = 0x00000003;
+}
+
+// VOID VdGetCurrentDisplayInformation(void* information)
+PPC_FUNC(__imp__VdGetCurrentDisplayInformation)
+{
+    Kernel::CountImport("VdGetCurrentDisplayInformation");
+    const uint32_t information = ctx.r3.u32;
+    if (information == 0) return;
+
+    memset(Guest::Ptr(information), 0, 0x58);
+    Guest::Write32(base, information + 0x00, 1280);
+    Guest::Write32(base, information + 0x04, 720);
+}
+
+// VOID VdGetCurrentDisplayGamma(ULONG* unk, float* gamma)
+PPC_FUNC(__imp__VdGetCurrentDisplayGamma)
+{
+    Kernel::CountImport("VdGetCurrentDisplayGamma");
+    if (ctx.r3.u32 != 0) Guest::Write32(base, ctx.r3.u32, 2);
+    if (ctx.r4.u32 != 0) Guest::Write32(base, ctx.r4.u32, 0x40133333);   // 2.3f
+}
+
+// VOID VdSetDisplayMode(ULONG mode)
+PPC_FUNC(__imp__VdSetDisplayMode) { ctx.r3.u32 = 0; }
+
+// BOOL VdPersistDisplay(ULONG unk, ULONG* out)
+PPC_FUNC(__imp__VdPersistDisplay)
+{
+    Kernel::CountImport("VdPersistDisplay");
+    if (ctx.r4.u32 != 0) Guest::Write32(base, ctx.r4.u32, 0);
+    ctx.r3.u32 = 1;
+}
+
+// BOOL VdIsHSIOTrainingSucceeded(void)
+PPC_FUNC(__imp__VdIsHSIOTrainingSucceeded) { ctx.r3.u32 = 1; }
+
+// VOID VdEnableDisableClockGating(ULONG enable)
+PPC_FUNC(__imp__VdEnableDisableClockGating) {}
+
+// ULONG VdRetrainEDRAM(...)
+PPC_FUNC(__imp__VdRetrainEDRAM) { ctx.r3.u32 = 0; }
+
+// ULONG VdRetrainEDRAMWorker(...)
+PPC_FUNC(__imp__VdRetrainEDRAMWorker) { ctx.r3.u32 = 0; }
+
+uint32_t Gpu::InterruptContext()
+{
+    return Video().interruptContext.load();
+}

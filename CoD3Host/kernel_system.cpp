@@ -1,0 +1,557 @@
+// Xbox 360 kernel imports: process and system queries, time, interrupt level,
+// critical sections, thread local storage, and the debug entry points.
+//
+// Guest threads are real host threads, so the primitives here are real too.
+// Thread local storage is per thread with a shared slot allocator, and a
+// critical section blocks a thread that does not own it. Interrupt level is
+// the exception: there are no interrupts to mask, so raising and lowering it
+// is bookkeeping the guest never observes.
+
+#include "kernel.h"
+#include "scheduler.h"
+#include <chrono>
+
+#include <cstdio>
+#include <cstring>
+#include <mutex>
+#include <string>
+#include <vector>
+
+#include <Windows.h>
+
+namespace
+{
+    constexpr uint32_t X_STATUS_SUCCESS           = 0x00000000;
+    constexpr uint32_t X_STATUS_INVALID_PARAMETER = 0xC000000D;
+    constexpr uint32_t X_STATUS_NOT_FOUND         = 0xC0000225;
+
+    // The console's timebase, used for KeQueryPerformanceFrequency and by any
+    // guest code that turns tick deltas into seconds.
+    constexpr uint64_t TimebaseFrequency = 49875000;
+
+    // Critical section layout, as the title sees it.
+    constexpr uint32_t CS_LOCK_COUNT      = 0x10;
+    constexpr uint32_t CS_RECURSION_COUNT = 0x14;
+    constexpr uint32_t CS_OWNING_THREAD   = 0x18;
+
+    // Slot indices are shared across threads; the values in them are not.
+    constexpr uint32_t TlsSlotCount = 64;
+    std::mutex g_tlsMutex;
+    bool g_tlsTaken[TlsSlotCount] = {};
+    thread_local uint32_t t_tlsSlots[TlsSlotCount] = {};
+
+    std::string GuestString(const uint8_t* base, uint32_t address, size_t limit = 1024)
+    {
+        if (address == 0) return {};
+        std::string out;
+        for (size_t i = 0; i < limit; i++)
+        {
+            const char c = static_cast<char>(*(base + address + i));
+            if (c == '\0') break;
+            out += c;
+        }
+        return out;
+    }
+
+    [[noreturn]] void Stop(const char* what, uint32_t code)
+    {
+        printf("\nThe guest stopped the console: %s (0x%08X)\n", what, code);
+        fflush(stdout);
+            Kernel::Exit(1);
+    }
+}
+
+// --- Process and system queries ------------------------------------------
+
+// ULONG KeGetCurrentProcessType(void)
+PPC_FUNC(__imp__KeGetCurrentProcessType)
+{
+    Kernel::CountImport("KeGetCurrentProcessType");
+    ctx.r3.u32 = 1;   // a title, as opposed to the dashboard or a system process
+}
+
+// NTSTATUS ExGetXConfigSetting(WORD category, WORD setting, void* buffer,
+//                              WORD length, WORD* outLength)
+PPC_FUNC(__imp__ExGetXConfigSetting)
+{
+    Kernel::CountImport("ExGetXConfigSetting");
+    const uint32_t category = ctx.r3.u32 & 0xFFFF;
+    const uint32_t setting = ctx.r4.u32 & 0xFFFF;
+    const uint32_t buffer = ctx.r5.u32;
+    const uint32_t length = ctx.r6.u32 & 0xFFFF;
+
+    uint32_t value = 0;
+    bool known = true;
+
+    if (category == 0x0002)         // secured settings
+    {
+        switch (setting)
+        {
+        case 0x0002: value = 0x00001000; break;   // AV region: NTSC
+        default: known = false; break;
+        }
+    }
+    else if (category == 0x0003)    // user settings
+    {
+        switch (setting)
+        {
+        case 0x0001: value = 0; break;            // time zone bias
+        case 0x0009: value = 1; break;            // language: English
+        case 0x000A: value = 0x00040000; break;   // video flags: widescreen
+        case 0x000C: value = 0; break;            // retail flags
+        case 0x000E: value = 103; break;          // country: United States
+        default: known = false; break;
+        }
+    }
+    else
+    {
+        known = false;
+    }
+
+    if (!known)
+    {
+        // Report it rather than inventing a value. A setting the title
+        // actually depends on will show up here first.
+        printf("ExGetXConfigSetting: category 0x%04X setting 0x%04X is not known, "
+               "reporting not found\n", category, setting);
+        ctx.r3.u32 = X_STATUS_NOT_FOUND;
+        return;
+    }
+
+    if (buffer != 0 && length >= 4)
+        Guest::Write32(base, buffer, value);
+    if (ctx.r7.u32 != 0)
+        Guest::Write32(base, ctx.r7.u32, 4);
+
+    ctx.r3.u32 = X_STATUS_SUCCESS;
+}
+
+// ULONG XGetLanguage(void)
+PPC_FUNC(__imp__XGetLanguage) { ctx.r3.u32 = 1; }          // English
+
+// ULONG XGetAVPack(void)
+PPC_FUNC(__imp__XGetAVPack) { ctx.r3.u32 = 8; }            // HDMI
+
+// ULONG XGetGameRegion(void)
+PPC_FUNC(__imp__XGetGameRegion) { ctx.r3.u32 = 0x00FF; }   // region free
+
+// VOID XGetVideoMode(X_VIDEO_MODE* mode)
+PPC_FUNC(__imp__XGetVideoMode)
+{
+    Kernel::CountImport("XGetVideoMode");
+    const uint32_t mode = ctx.r3.u32;
+    if (mode == 0) return;
+
+    memset(Guest::Ptr(mode), 0, 48);
+    Guest::Write32(base, mode + 0x00, 1280);        // width
+    Guest::Write32(base, mode + 0x04, 720);         // height
+    Guest::Write32(base, mode + 0x08, 0);           // not interlaced
+    Guest::Write32(base, mode + 0x0C, 1);           // widescreen
+    Guest::Write32(base, mode + 0x10, 1);           // high definition
+    Guest::Write32(base, mode + 0x14, 0x42700000);  // 60.0f refresh rate
+    Guest::Write32(base, mode + 0x18, 1);           // NTSC
+}
+
+// ULONG XamGetSystemVersion(void)
+PPC_FUNC(__imp__XamGetSystemVersion) { ctx.r3.u32 = 0; }
+
+// NTSTATUS XexCheckExecutablePrivilege(ULONG privilege)
+PPC_FUNC(__imp__XexCheckExecutablePrivilege) { ctx.r3.u32 = 0; }
+
+// HANDLE XexGetModuleHandle(char* name, HANDLE* out)
+PPC_FUNC(__imp__XexGetModuleHandle)
+{
+    Kernel::CountImport("XexGetModuleHandle");
+    // Only the title itself is loaded, and it has no handle to hand out yet.
+    if (ctx.r4.u32 != 0)
+        Guest::Write32(base, ctx.r4.u32, 0);
+    ctx.r3.u32 = X_STATUS_NOT_FOUND;
+}
+
+// --- Time ------------------------------------------------------------------
+
+// VOID KeQueryPerformanceFrequency(void) -> frequency in r3:r4
+PPC_FUNC(__imp__KeQueryPerformanceFrequency)
+{
+    Kernel::CountImport("KeQueryPerformanceFrequency");
+    ctx.r3.u64 = TimebaseFrequency;
+}
+
+// VOID KeQuerySystemTime(LARGE_INTEGER* time)
+PPC_FUNC(__imp__KeQuerySystemTime)
+{
+    Kernel::CountImport("KeQuerySystemTime");
+    Scheduler::Checkpoint();
+    if (ctx.r3.u32 == 0) return;
+
+    // The coarse form of this only moves every 15.6 milliseconds, and the
+    // title reads it in a tight loop to measure short intervals.
+    FILETIME now;
+    GetSystemTimePreciseAsFileTime(&now);
+    const uint64_t value =
+        (uint64_t(now.dwHighDateTime) << 32) | uint64_t(now.dwLowDateTime);
+    Guest::Write64(base, ctx.r3.u32, value);
+}
+
+// NTSTATUS KeDelayExecutionThread(mode, alertable, LARGE_INTEGER* interval)
+PPC_FUNC(__imp__KeDelayExecutionThread)
+{
+    Kernel::CountImport("KeDelayExecutionThread");
+    Scheduler::Release();
+    struct Resume { ~Resume() { Scheduler::Acquire(); } } resume;
+    Kernel::DeliverApcs(ctx, ctx.r4.u32 != 0);
+    uint32_t milliseconds = 0;
+    if (ctx.r5.u32 != 0)
+    {
+        // Negative means relative, in 100 nanosecond units.
+        const int64_t interval = static_cast<int64_t>(Guest::Read64(base, ctx.r5.u32));
+        if (interval < 0)
+            milliseconds = static_cast<uint32_t>((-interval) / 10000);
+    }
+    Sleep(milliseconds);
+    ctx.r3.u32 = X_STATUS_SUCCESS;
+}
+
+// NTSTATUS NtYieldExecution(void)
+PPC_FUNC(__imp__NtYieldExecution)
+{
+    Kernel::CountImport("NtYieldExecution");
+    Scheduler::Release();
+    struct Resume { ~Resume() { Scheduler::Acquire(); } } resume;
+    Kernel::DeliverApcs(ctx, false);
+    SwitchToThread();
+    ctx.r3.u32 = X_STATUS_SUCCESS;
+}
+
+// --- Interrupt level and spin locks ---------------------------------------
+// Nothing runs concurrently yet, so these only have to be consistent with each
+// other. They become real work the moment ExCreateThread does something.
+
+PPC_FUNC(__imp__KeEnterCriticalRegion) {}
+PPC_FUNC(__imp__KeLeaveCriticalRegion) {}
+PPC_FUNC(__imp__KeAcquireSpinLockAtRaisedIrql) {}
+PPC_FUNC(__imp__KeReleaseSpinLockFromRaisedIrql) {}
+PPC_FUNC(__imp__KeLockL2) { ctx.r3.u32 = 0; }
+PPC_FUNC(__imp__KeUnlockL2) {}
+PPC_FUNC(__imp__KiApcNormalRoutineNop) { ctx.r3.u32 = 0; }
+
+// KIRQL KeRaiseIrqlToDpcLevel(void)
+PPC_FUNC(__imp__KeRaiseIrqlToDpcLevel) { ctx.r3.u32 = 0; }
+
+// VOID KfLowerIrql(KIRQL irql)
+PPC_FUNC(__imp__KfLowerIrql) {}
+
+// KIRQL KfAcquireSpinLock(spinlock*)
+PPC_FUNC(__imp__KfAcquireSpinLock) { ctx.r3.u32 = 0; }
+
+// VOID KfReleaseSpinLock(spinlock*, KIRQL)
+PPC_FUNC(__imp__KfReleaseSpinLock) {}
+
+// --- Critical sections -----------------------------------------------------
+
+namespace
+{
+    // Who owns a critical section, in the form the guest writes there.
+    //
+    // The console stores a pointer to the thread object, not a number, and the
+    // title's inline fast path stores exactly that. Storing a host thread id
+    // instead means the two sides never recognise each other's ownership: the
+    // recursive case is missed and the lock deadlocks on its own holder.
+    uint32_t OwnerValue(PPCContext& ctx, uint8_t* base)
+    {
+        if (ctx.r13.u32 != 0)
+        {
+            const uint32_t object = Guest::Read32(base, ctx.r13.u32 + 0x100);
+            if (object != 0) return object;
+        }
+        return GetCurrentThreadId();
+    }
+}
+
+PPC_FUNC(__imp__RtlInitializeCriticalSection)
+{
+    Kernel::CountImport("RtlInitializeCriticalSection");
+    const uint32_t cs = ctx.r3.u32;
+    if (cs == 0) return;
+    std::lock_guard<std::mutex> lock(Kernel::DispatcherLock());
+    memset(Guest::Ptr(cs), 0, 0x1C);
+    Guest::Write32(base, cs + CS_LOCK_COUNT, uint32_t(-1));
+}
+
+PPC_FUNC(__imp__RtlEnterCriticalSection)
+{
+    Kernel::CountImport("RtlEnterCriticalSection");
+    Scheduler::Release();
+    struct Resume { ~Resume() { Scheduler::Acquire(); } } resume;
+    const uint32_t cs = ctx.r3.u32;
+    if (cs == 0) return;
+
+    // The lock is the lock count, not the owner field.
+    //
+    // A free critical section holds minus one here, and taking it is a compare
+    // and exchange of minus one for zero. Titles inline that fast path and only
+    // call the kernel when it fails, so a runtime that tracks ownership in a
+    // different field is not sharing a lock with the guest at all: both sides
+    // can hold it at once. That is what let one thread walk a list while
+    // another was resetting it.
+    // The protocol, as the console runs it. A free lock holds minus one. Taking
+    // it is an atomic increment: the thread that sees zero has it. Anyone else
+    // has already recorded that there is contention, which is how the thread
+    // holding it knows to wake somebody on the way out.
+    //
+    // Doing this in a field of this runtime's own instead left the guest's
+    // inline fast path and the kernel path holding different locks, and two
+    // threads could be inside the same critical section at once.
+    const uint32_t self = OwnerValue(ctx, base);
+
+    if (Guest::AtomicAdd32(base, cs + CS_LOCK_COUNT, 1) == 0)
+    {
+        Guest::Write32(base, cs + CS_OWNING_THREAD, self);
+        Guest::Write32(base, cs + CS_RECURSION_COUNT, 1);
+        return;
+    }
+
+    if (Guest::Read32(base, cs + CS_OWNING_THREAD) == self)
+    {
+        Guest::Write32(base, cs + CS_RECURSION_COUNT,
+            Guest::Read32(base, cs + CS_RECURSION_COUNT) + 1);
+        return;
+    }
+
+    // Contended. The holder may release inline without telling this runtime,
+    // so the wait re-checks on a timer rather than trusting a wake up.
+    std::unique_lock<std::mutex> lock(Kernel::DispatcherLock());
+    for (;;)
+    {
+        if (Guest::Read32(base, cs + CS_OWNING_THREAD) == 0)
+        {
+            Guest::Write32(base, cs + CS_OWNING_THREAD, self);
+            Guest::Write32(base, cs + CS_RECURSION_COUNT, 1);
+            return;
+        }
+        Kernel::DispatcherChanged().wait_for(lock, std::chrono::milliseconds(1));
+    }
+}
+
+PPC_FUNC(__imp__RtlTryEnterCriticalSection)
+{
+    Kernel::CountImport("RtlTryEnterCriticalSection");
+    const uint32_t cs = ctx.r3.u32;
+    if (cs == 0) { ctx.r3.u32 = 0; return; }
+
+    {
+        std::lock_guard<std::mutex> lock(Kernel::DispatcherLock());
+        const uint32_t me = OwnerValue(ctx, base);
+        if (Guest::CompareExchange32(base, cs + CS_LOCK_COUNT, uint32_t(-1), 0))
+        {
+            Guest::Write32(base, cs + CS_OWNING_THREAD, me);
+            Guest::Write32(base, cs + CS_RECURSION_COUNT, 1);
+            ctx.r3.u32 = 1;
+            return;
+        }
+        if (Guest::Read32(base, cs + CS_OWNING_THREAD) == me)
+        {
+            Guest::Write32(base, cs + CS_RECURSION_COUNT,
+                Guest::Read32(base, cs + CS_RECURSION_COUNT) + 1);
+            Guest::AtomicAdd32(base, cs + CS_LOCK_COUNT, 1);
+            ctx.r3.u32 = 1;
+            return;
+        }
+        ctx.r3.u32 = 0;
+        return;
+    }
+
+    const uint32_t self = GetCurrentThreadId();
+    std::lock_guard<std::mutex> lock(Kernel::DispatcherLock());
+
+    const uint32_t owner = Guest::Read32(base, cs + CS_OWNING_THREAD);
+    if (owner != 0 && owner != self) { ctx.r3.u32 = 0; return; }
+
+    Guest::Write32(base, cs + CS_OWNING_THREAD, self);
+    Guest::Write32(base, cs + CS_RECURSION_COUNT,
+        Guest::Read32(base, cs + CS_RECURSION_COUNT) + 1);
+    ctx.r3.u32 = 1;
+}
+
+PPC_FUNC(__imp__RtlLeaveCriticalSection)
+{
+    Kernel::CountImport("RtlLeaveCriticalSection");
+    const uint32_t cs = ctx.r3.u32;
+    if (cs == 0) return;
+
+    const uint32_t recursion = Guest::Read32(base, cs + CS_RECURSION_COUNT);
+    if (recursion > 1)
+    {
+        Guest::Write32(base, cs + CS_RECURSION_COUNT, recursion - 1);
+        Guest::AtomicAdd32(base, cs + CS_LOCK_COUNT, -1);
+        return;
+    }
+
+    // Ownership goes first, then the count, so a thread that sees the count
+    // free never finds a stale owner behind it.
+    Guest::Write32(base, cs + CS_RECURSION_COUNT, 0);
+    Guest::Write32(base, cs + CS_OWNING_THREAD, 0);
+    Guest::AtomicAdd32(base, cs + CS_LOCK_COUNT, -1);
+    Kernel::DispatcherChanged().notify_all();
+}
+
+// --- Thread local storage --------------------------------------------------
+// One set of slots, because there is one thread.
+
+PPC_FUNC(__imp__KeTlsAlloc)
+{
+    Kernel::CountImport("KeTlsAlloc");
+    std::lock_guard<std::mutex> lock(g_tlsMutex);
+    for (uint32_t i = 0; i < TlsSlotCount; i++)
+    {
+        if (!g_tlsTaken[i])
+        {
+            g_tlsTaken[i] = true;
+            ctx.r3.u32 = i;
+            return;
+        }
+    }
+    ctx.r3.u32 = uint32_t(-1);   // TLS_OUT_OF_INDEXES
+}
+
+PPC_FUNC(__imp__KeTlsFree)
+{
+    Kernel::CountImport("KeTlsFree");
+    const uint32_t slot = ctx.r3.u32;
+    if (slot < TlsSlotCount)
+    {
+        std::lock_guard<std::mutex> lock(g_tlsMutex);
+        g_tlsTaken[slot] = false;
+    }
+    ctx.r3.u32 = 1;
+}
+
+PPC_FUNC(__imp__KeTlsGetValue)
+{
+    Kernel::CountImport("KeTlsGetValue");
+    const uint32_t slot = ctx.r3.u32;
+    ctx.r3.u32 = slot < TlsSlotCount ? t_tlsSlots[slot] : 0;
+}
+
+PPC_FUNC(__imp__KeTlsSetValue)
+{
+    Kernel::CountImport("KeTlsSetValue");
+    const uint32_t slot = ctx.r3.u32;
+    if (slot < TlsSlotCount) t_tlsSlots[slot] = ctx.r4.u32;
+    ctx.r3.u32 = 1;
+}
+
+// --- Small Rtl helpers -----------------------------------------------------
+
+// VOID RtlFillMemoryUlong(void* destination, SIZE_T length, ULONG pattern)
+PPC_FUNC(__imp__RtlFillMemoryUlong)
+{
+    Kernel::CountImport("RtlFillMemoryUlong");
+    const uint32_t destination = ctx.r3.u32;
+    const uint32_t length = ctx.r4.u32 & ~3u;
+    const uint32_t pattern = ctx.r5.u32;
+
+    for (uint32_t offset = 0; offset < length; offset += 4)
+        Guest::Write32(base, destination + offset, pattern);
+}
+
+// SIZE_T RtlCompareMemoryUlong(void* source, SIZE_T length, ULONG pattern)
+PPC_FUNC(__imp__RtlCompareMemoryUlong)
+{
+    Kernel::CountImport("RtlCompareMemoryUlong");
+    const uint32_t source = ctx.r3.u32;
+    const uint32_t length = ctx.r4.u32 & ~3u;
+    const uint32_t pattern = ctx.r5.u32;
+    uint32_t matched = 0;
+    for (uint32_t offset = 0; offset < length; offset += 4)
+    {
+        if (Guest::Read32(base, source + offset) != pattern) break;
+        matched += 4;
+    }
+    ctx.r3.u32 = matched;
+}
+
+// VOID RtlInitAnsiString(ANSI_STRING* target, const char* source)
+PPC_FUNC(__imp__RtlInitAnsiString)
+{
+    Kernel::CountImport("RtlInitAnsiString");
+    const uint32_t target = ctx.r3.u32;
+    const uint32_t source = ctx.r4.u32;
+    if (target == 0) return;
+
+    uint16_t length = 0;
+    if (source != 0)
+    {
+        while (length < 0xFFFE && *(base + source + length) != 0) length++;
+    }
+
+    // ANSI_STRING is { WORD length; WORD maximumLength; char* buffer; }
+    *reinterpret_cast<volatile uint16_t*>(base + target + 0) = __builtin_bswap16(length);
+    *reinterpret_cast<volatile uint16_t*>(base + target + 2) =
+        __builtin_bswap16(uint16_t(length == 0 ? 0 : length + 1));
+    Guest::Write32(base, target + 4, source);
+}
+
+// ULONG RtlNtStatusToDosError(NTSTATUS status)
+PPC_FUNC(__imp__RtlNtStatusToDosError)
+{
+    Kernel::CountImport("RtlNtStatusToDosError");
+    const uint32_t status = ctx.r3.u32;
+    ctx.r3.u32 = (status == 0) ? 0 : 317;   // ERROR_MR_MID_NOT_FOUND
+}
+
+// --- Debug and shutdown ----------------------------------------------------
+
+// ULONG DbgPrint(const char* format, ...)
+PPC_FUNC(__imp__DbgPrint)
+{
+    Kernel::CountImport("DbgPrint");
+    // The varargs are in guest registers and on the guest stack, and nothing
+    // here knows the conversions the format string asks for. Printing the
+    // format itself still says what the title is reporting.
+    const std::string format = GuestString(base, ctx.r3.u32);
+    if (!format.empty())
+        printf("guest: %s", format.c_str());
+    ctx.r3.u32 = X_STATUS_SUCCESS;
+}
+
+PPC_FUNC(__imp__DbgBreakPoint)
+{
+    Kernel::CountImport("DbgBreakPoint");
+    printf("\nguest: DbgBreakPoint at 0x%08X\n", uint32_t(ctx.lr));
+    fflush(stdout);
+}
+
+// VOID KeBugCheck(ULONG code)
+PPC_FUNC(__imp__KeBugCheck)
+{
+    Kernel::CountImport("KeBugCheck");
+    Stop("KeBugCheck", ctx.r3.u32);
+}
+
+// VOID KeBugCheckEx(ULONG code, ULONG p1, ULONG p2, ULONG p3, ULONG p4)
+PPC_FUNC(__imp__KeBugCheckEx)
+{
+    Kernel::CountImport("KeBugCheckEx");
+    printf("\n  parameters: 0x%08X 0x%08X 0x%08X 0x%08X\n",
+        ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32);
+    Stop("KeBugCheckEx", ctx.r3.u32);
+}
+
+// VOID HalReturnToFirmware(ULONG routine)
+PPC_FUNC(__imp__HalReturnToFirmware)
+{
+    Kernel::CountImport("HalReturnToFirmware");
+    printf("\nThe guest asked to return to the dashboard. Shutting down.\n");
+    fflush(stdout);
+    Kernel::Exit(0);
+}
+
+// NTSTATUS ExRegisterTitleTerminateNotification(void* routine, ULONG create)
+PPC_FUNC(__imp__ExRegisterTitleTerminateNotification)
+{
+    Kernel::CountImport("ExRegisterTitleTerminateNotification");
+    // Nothing calls the notification back, because nothing shuts the title
+    // down cleanly yet.
+    ctx.r3.u32 = X_STATUS_SUCCESS;
+}
