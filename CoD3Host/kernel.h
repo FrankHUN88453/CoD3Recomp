@@ -116,6 +116,35 @@ namespace Kernel
     // what it is waiting for far better than a count does.
     void ReportRecentCalls(uint32_t onlyThread = 0);
 
+    // The processor context of the guest thread this host thread is running,
+    // so a fault report can print the registers at the fault. Each thread
+    // that runs guest code registers its context on the way in.
+    void SetCurrentContext(PPCContext* context);
+    PPCContext* CurrentContext();
+
+    // COD3_DUMP names guest addresses, in hexadecimal separated by commas,
+    // to print whenever something goes wrong: a bad call, a host fault. Each
+    // gets eight words, and whatever its first word points at gets eight
+    // more, which is one hop along a list or into an object.
+    void DumpRequested();
+
+    // General register number n of a context. They are not laid out in order
+    // (r3 comes first), so this is the only way to index them.
+    inline uint32_t Register(const PPCContext& context, int n)
+    {
+        const PPCRegister* const registers[32] = {
+            &context.r0,  &context.r1,  &context.r2,  &context.r3,
+            &context.r4,  &context.r5,  &context.r6,  &context.r7,
+            &context.r8,  &context.r9,  &context.r10, &context.r11,
+            &context.r12, &context.r13, &context.r14, &context.r15,
+            &context.r16, &context.r17, &context.r18, &context.r19,
+            &context.r20, &context.r21, &context.r22, &context.r23,
+            &context.r24, &context.r25, &context.r26, &context.r27,
+            &context.r28, &context.r29, &context.r30, &context.r31,
+        };
+        return registers[n & 31]->u32;
+    }
+
     // A hardware watch on one word of guest memory. The processor raises an
     // exception on the instruction that writes it, which is the only way to
     // find out who changed a value that used to be right.
@@ -240,7 +269,13 @@ namespace Guest
     // separate ranges keeps that distinction visible when debugging.
     inline constexpr uint32_t VirtualHeapBase  = 0x40000000;
     inline constexpr uint32_t VirtualHeapLimit = 0x6F000000;   // stops below the stack
-    inline constexpr uint32_t PhysicalHeapBase  = 0xA0000000;
+    // Physical allocations begin a megabyte in. The console never hands a
+    // title physical page zero, and this runtime did: the first thing the
+    // title asked for landed at physical offset 0x80, which is where it then
+    // kept its job queue. A fence the GPU driver writes to physical 0x100
+    // at start up went straight into the second job's descriptor, and the job
+    // that ran from it called through whatever it found there.
+    inline constexpr uint32_t PhysicalHeapBase  = 0xA0100000;
     inline constexpr uint32_t PhysicalHeapLimit = 0xC0000000;
 
     extern uint8_t* Base;
@@ -288,6 +323,12 @@ namespace Guest
     // Reserves a stack for a new guest thread and returns the address to put
     // in r1. Zero means the address space is exhausted.
     uint32_t AllocateStack(uint32_t size);
+
+    // A block of physical memory, from the same pool the title is given.
+    uint32_t AllocatePhysical(uint32_t size);
+
+    // Where KeTimeStampBundle lives, for the clock thread to keep current.
+    void SetTimeStampBundle(uint32_t address);
 
     // The block r13 points at. Guest code reads its thread id, its last error
     // and a millisecond timestamp out of this rather than calling the kernel,

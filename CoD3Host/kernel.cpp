@@ -1,4 +1,5 @@
 #include "kernel.h"
+#include <unordered_map>
 #include "scheduler.h"
 #include <atomic>
 #include "sampler.h"
@@ -16,6 +17,7 @@
 
 #include <file.h>
 #include <image.h>
+#include <xex.h>
 
 namespace Guest
 {
@@ -178,6 +180,21 @@ namespace
                    "  guest memory runs from %p to %p\n",
                 AccessKind(record->ExceptionInformation[0]), (void*)faulting,
                 (void*)Guest::Base, (void*)(Guest::Base + Guest::TotalSize));
+
+            Kernel::DumpRequested();
+
+            // The guest registers at the fault: whichever one is the small
+            // negative number is the one that was handed an error code.
+            if (const PPCContext* guest = Kernel::CurrentContext())
+            {
+                printf("  guest registers r0 to r31, lr 0x%08X:", uint32_t(guest->lr));
+                for (int i = 0; i < 32; i++)
+                {
+                    if ((i % 8) == 0) printf("\n   r%-2d", i);
+                    printf(" %08X", Kernel::Register(*guest, i));
+                }
+                printf("\n");
+            }
             // An indirect call reads the function table, which sits at a fixed
             // offset from the base, so the address it read says which guest
             // address it was looking for. A fault below the base is that
@@ -237,6 +254,33 @@ namespace
         // object, which it then does for a long time before dying somewhere
         // that says nothing about the cause. Refusing it puts the report at
         // the first mistake instead of the last symptom.
+        // Where the guest touches memory nothing handed it. Everything the
+        // allocators give out is committed as it is given, so a commit here is
+        // the guest reaching somewhere else: the console's memory windows,
+        // where the same physical page has several addresses, or plain
+        // garbage. Which one is the question, and the region and the caller
+        // answer it.
+        {
+            static std::atomic<int> announced{ 0 };
+            const uint32_t guest = uint32_t(offset);
+            const bool inImage = guest >= 0x82000000u && guest < uint32_t(Guest::FuncTableEnd);
+            const bool inHeaps = (guest >= 0x3F000000u && guest < 0x70000000u);
+            if (!inImage && !inHeaps && announced.fetch_add(1) < 12)
+            {
+                uint32_t functions[8] = {};
+                const int count = Sampler::WalkGuestStack(info->ContextRecord, functions, 8);
+                printf("commit: guest %s at 0x%08X, outside every allocation;",
+                    AccessKind(record->ExceptionInformation[0]), guest);
+                if (count > 0)
+                {
+                    printf(" from");
+                    for (int i = 0; i < count; i++) printf(" sub_%08X", functions[i]);
+                }
+                printf("\n");
+                fflush(stdout);
+            }
+        }
+
         if (g_demandCommitted < DemandCommitLimit)
         {
             // Sixty four kilobytes at a time, because that is the granularity
@@ -292,6 +336,247 @@ namespace
             return false;
         }
         return true;
+    }
+}
+
+extern std::unordered_map<size_t, const char*> XboxKernelExports;
+extern std::unordered_map<size_t, const char*> XamExports;
+
+namespace
+{
+    // The kernel's exported variables.
+    //
+    // A XEX imports two kinds of thing from the kernel: functions, which the
+    // recompiler turns into calls to this runtime, and variables, which are
+    // addresses of data the kernel owns. XenonUtils binds the first kind and
+    // leaves the second untouched, so every slot that should have held the
+    // address of a kernel variable held whatever the file had there, and the
+    // title read those as pointers: the C runtime's start up read from
+    // 0x93010000, and the graphics driver's initialisation dereferenced a
+    // word in the import area and found nothing behind it.
+    //
+    // Each variable gets a block of guest memory of its own here, and the
+    // ones whose shape is known get the value the console would hold. The
+    // time stamp bundle is kept current by the clock thread.
+    // The kind of each export, function or variable, read off the same tables
+    // XenonUtils builds its names from. XenonUtils keeps the names and drops
+    // the kind; the kind is what decides what goes into the slot.
+    enum ExportKind { kFunction, kVariable };
+    struct ExportEntry { uint32_t ordinal; ExportKind kind; };
+#define XE_EXPORT(module, ordinal, name, kind) { uint32_t(ordinal), kind }
+    const ExportEntry kKernelExportKinds[] = {
+#include <xbox/xboxkrnl_table.inc>
+    };
+    const ExportEntry kXamExportKinds[] = {
+#include <xbox/xam_table.inc>
+    };
+#undef XE_EXPORT
+
+    bool SkipVariableValue(const char* name)
+    {
+        const char* list = getenv("COD3_NOVAR");
+        if (list == nullptr) return false;
+        const size_t length = strlen(name);
+        for (const char* at = list; *at != 0;)
+        {
+            const char* end = strchr(at, ',');
+            if (end == nullptr) end = at + strlen(at);
+            if (size_t(end - at) == length && strncmp(at, name, length) == 0) return true;
+            at = *end == ',' ? end + 1 : end;
+        }
+        return false;
+    }
+
+    bool IsVariableExport(const std::string& library, uint32_t ordinal)
+    {
+        const ExportEntry* table = nullptr;
+        size_t count = 0;
+        if (library == "xboxkrnl.exe") { table = kKernelExportKinds; count = sizeof(kKernelExportKinds) / sizeof(kKernelExportKinds[0]); }
+        else if (library == "xam.xex") { table = kXamExportKinds; count = sizeof(kXamExportKinds) / sizeof(kXamExportKinds[0]); }
+        for (size_t i = 0; i < count; i++)
+            if (table[i].ordinal == ordinal) return table[i].kind == kVariable;
+        return false;
+    }
+
+    struct KnownVariable
+    {
+        const char* name;
+        uint32_t size;
+    };
+
+    const KnownVariable kKnownVariables[] = {
+        { "XboxHardwareInfo",          0x40 },
+        { "KeTimeStampBundle",         0x20 },
+        { "ExLoadedCommandLine",       0x400 },
+        { "XexExecutableModuleHandle", 0x100 },
+        { "KeDebugMonitorData",        0x40 },
+        { "VdGlobalDevice",            0x10 },
+        { "VdGlobalXamDevice",         0x10 },
+        { "VdGpuClockInMHz",           0x10 },
+        { "VdHSIOCalibrationLock",     0x40 },
+        { "ExConsoleGameRegion",       0x10 },
+        { "XboxKrnlVersion",           0x10 },
+        { "KeCertMonitorData",         0x40 },
+    };
+
+    void BindVariableImports(const uint8_t* file)
+    {
+        const auto* header = reinterpret_cast<const Xex2ImportHeader*>(
+            getOptHeaderPtr(file, XEX_HEADER_IMPORT_LIBRARIES));
+        if (header == nullptr) return;
+
+        std::vector<std::string> libraries;
+        const char* strings = reinterpret_cast<const char*>(header + 1);
+        size_t at = 0;
+        for (uint32_t i = 0; i < header->numImports; i++)
+        {
+            libraries.emplace_back(strings + at);
+            at += ((libraries.back().size() + 1) + 3) & ~size_t(3);
+        }
+
+        // Sixty four kilobytes for all of them, carved in order.
+        const uint32_t block = Guest::AllocatePhysical(64u << 10);
+        if (block == 0) return;
+        uint32_t next = block;
+        auto Carve = [&](uint32_t size) {
+            const uint32_t address = next;
+            next += (size + 15) & ~15u;
+            return address;
+        };
+
+        size_t bound = 0;
+        size_t functionSlots = 0;
+        const auto* library = reinterpret_cast<const Xex2ImportLibrary*>(
+            reinterpret_cast<const char*>(header) + sizeof(Xex2ImportHeader) + header->sizeOfStringTable);
+        for (size_t i = 0; i < libraries.size(); i++)
+        {
+            const auto* descriptors = reinterpret_cast<const Xex2ImportDescriptor*>(library + 1);
+            const std::unordered_map<size_t, const char*>* names = nullptr;
+            if (libraries[i] == "xboxkrnl.exe") names = &XboxKernelExports;
+            else if (libraries[i] == "xam.xex") names = &XamExports;
+
+            // ParseImage replaced the code of every thunk with three nops and
+            // a blr, and left the word in each slot swapped to host order. The
+            // thunks are told apart by that replacement, because what they
+            // used to hold is gone: read as a slot word, a thunk's first nop
+            // says type 0, ordinal 96, and passed for an import of its own.
+            auto IsThunk = [](uint32_t address) {
+                static const uint32_t pattern[4] = { 0x00000060, 0x00000060, 0x00000060, 0x2000804E };
+                return memcmp(Guest::Base + address, pattern, sizeof(pattern)) == 0;
+            };
+
+            for (uint32_t im = 0; im < library->numberOfImports; im++)
+            {
+                const uint32_t slot = descriptors[im].firstThunk;
+                if (slot < PPC_IMAGE_BASE || slot >= PPC_IMAGE_BASE + PPC_IMAGE_SIZE) continue;
+                if (IsThunk(slot)) continue;
+
+                uint32_t raw;
+                memcpy(&raw, Guest::Base + slot, sizeof(raw));
+                const uint32_t type = raw >> 24;
+                const uint32_t ordinal = raw & 0xFFFF;
+                if (type != 0) continue;
+
+                const char* name = nullptr;
+                if (names != nullptr)
+                {
+                    auto found = names->find(ordinal);
+                    if (found != names->end()) name = found->second;
+                }
+                // The tables name them as import symbols, prefix and all.
+                if (name != nullptr && strncmp(name, "__imp__", 7) == 0) name += 7;
+
+                // Every import has one of these slots, functions included: it
+                // is the word the title reads to call through a pointer. For
+                // a function the slot gets the address of its thunk, which is
+                // the next entry in the table and which the function binding
+                // below points at this runtime. Only a variable gets memory.
+                if (!IsVariableExport(libraries[i], ordinal))
+                {
+                    // Its thunk is the entry after it, and only if that entry
+                    // really is one: a function with no thunk keeps its slot
+                    // as it was rather than pointing at somebody else's.
+                    if (im + 1 < library->numberOfImports)
+                    {
+                        const uint32_t thunk = descriptors[im + 1].firstThunk;
+                        if (thunk >= PPC_CODE_BASE && thunk < PPC_CODE_BASE + PPC_CODE_SIZE && IsThunk(thunk))
+                        {
+                            Guest::Write32(Guest::Base, slot, thunk);
+                            functionSlots++;
+                        }
+                        else
+                        {
+                            printf("  import %s (%s ordinal %u) at 0x%08X has no thunk after it\n",
+                                name ? name : "?", libraries[i].c_str(), ordinal, slot);
+                        }
+                    }
+                    continue;
+                }
+
+                uint32_t size = 0x10;
+                for (const KnownVariable& known : kKnownVariables)
+                    if (name != nullptr && strcmp(name, known.name) == 0) size = known.size;
+
+                const uint32_t variable = Carve(size);
+                Guest::Write32(Guest::Base, slot, variable);
+                bound++;
+
+                // COD3_NOVAR=name,name leaves those variables allocated but
+                // zero, to tell which value changes the title's behaviour.
+                if (name != nullptr && !SkipVariableValue(name))
+                {
+                    if (strcmp(name, "XboxHardwareInfo") == 0)
+                    {
+                        Guest::Write32(Guest::Base, variable + 0, 0);      // flags: retail
+                        *(Guest::Base + variable + 4) = 6;                  // hardware threads
+                    }
+                    else if (strcmp(name, "ExLoadedCommandLine") == 0)
+                    {
+                        const char* line = "default.xex";
+                        memcpy(Guest::Base + variable, line, strlen(line) + 1);
+                    }
+                    else if (strcmp(name, "VdGpuClockInMHz") == 0)
+                    {
+                        Guest::Write32(Guest::Base, variable, 500);
+                    }
+                    else if (strcmp(name, "XboxKrnlVersion") == 0)
+                    {
+                        // Major, minor, build and QFE, sixteen bits each:
+                        // 2.0.17559.0, the last retail kernel.
+                        Guest::Write16(Guest::Base, variable + 0, 2);
+                        Guest::Write16(Guest::Base, variable + 2, 0);
+                        Guest::Write16(Guest::Base, variable + 4, 17559);
+                        Guest::Write16(Guest::Base, variable + 6, 0);
+                    }
+                    else if (strcmp(name, "ExConsoleGameRegion") == 0)
+                    {
+                        Guest::Write32(Guest::Base, variable, 0xFFFFFFFFu);
+                    }
+                    else if (strcmp(name, "KeTimeStampBundle") == 0)
+                    {
+                        Guest::SetTimeStampBundle(variable);
+                    }
+                    else if (strcmp(name, "XexExecutableModuleHandle") == 0)
+                    {
+                        // Points at a module record; the record's first word
+                        // is the image base, which is what is usually wanted.
+                        const uint32_t record = Carve(0x100);
+                        Guest::Write32(Guest::Base, variable, record);
+                        Guest::Write32(Guest::Base, record + 0, uint32_t(PPC_IMAGE_BASE));
+                    }
+                }
+
+                static int announced = 0;
+                if (announced++ < 24)
+                    printf("  variable import %s (%s ordinal %u) at 0x%08X -> 0x%08X\n",
+                        name ? name : "?", libraries[i].c_str(), ordinal, slot, variable);
+            }
+            library = reinterpret_cast<const Xex2ImportLibrary*>(
+                reinterpret_cast<const char*>(library + 1) +
+                library->numberOfImports * sizeof(Xex2ImportDescriptor));
+        }
+        printf("  %zu variable imports bound to guest memory, %zu function slots "
+               "point at their thunks\n", bound, functionSlots);
     }
 }
 
@@ -397,6 +682,8 @@ bool Guest::Initialize(const char* xexPath)
     // --- Indirect call table ----------------------------------------------
     // PPC_LOOKUP_FUNC turns a guest code address into a host function pointer
     // by indexing this table at (address - PPC_CODE_BASE) * 2.
+    BindVariableImports(file.data());
+
     size_t entries = 0;
     for (size_t i = 0; PPCFuncMappings[i].guest != 0; i++)
     {
@@ -575,6 +862,44 @@ void Kernel::CountImportOn(const char* name, uint32_t subject)
 }
 
 void Kernel::CountImport(const char* name) { CountImportOn(name, 0); }
+
+namespace
+{
+    thread_local PPCContext* t_currentContext = nullptr;
+}
+
+void Kernel::DumpRequested()
+{
+    const char* list = getenv("COD3_DUMP");
+    if (list == nullptr) return;
+    auto Words = [](const char* label, uint32_t address) {
+        printf("  %s0x%08X ->", label, address);
+        for (int w = 0; w < 8; w++)
+            printf(" %08X", Guest::Read32(Guest::Base, address + w * 4));
+        printf("\n");
+    };
+    for (const char* at = list; *at != 0;)
+    {
+        char* end = nullptr;
+        const uint32_t address = uint32_t(strtoul(at, &end, 16));
+        if (end == at) break;
+        Words("dump ", address);
+        const uint32_t first = Guest::Read32(Guest::Base, address);
+        if (first >= 0x10000u && first < 0xC0000000u) Words("  -> ", first);
+        at = *end == ',' ? end + 1 : end;
+    }
+    fflush(stdout);
+}
+
+void Kernel::SetCurrentContext(PPCContext* context)
+{
+    t_currentContext = context;
+}
+
+PPCContext* Kernel::CurrentContext()
+{
+    return t_currentContext;
+}
 
 void Kernel::ReportRecentCalls(uint32_t onlyThread)
 {

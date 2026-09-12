@@ -133,11 +133,33 @@ namespace
 
     // The clock every thread reads. Writing it once a millisecond costs
     // nothing and is finer than anything the title measures.
+    std::atomic<uint32_t> g_timeStampBundle{ 0 };
+
+    // The time since 1601 in hundreds of nanoseconds, which is how the
+    // console's system time is expressed.
+    uint64_t SystemTimeNow()
+    {
+        FILETIME ft;
+        GetSystemTimeAsFileTime(&ft);
+        return (uint64_t(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+    }
+
     void ClockThread()
     {
         while (g_clockRunning.load(std::memory_order_acquire))
         {
             const uint32_t now = Milliseconds();
+
+            // KeTimeStampBundle: interrupt time and system time in hundreds
+            // of nanoseconds, then the millisecond tick count. Titles read
+            // the tick count directly rather than asking the kernel.
+            if (const uint32_t bundle = g_timeStampBundle.load())
+            {
+                const uint64_t system = SystemTimeNow();
+                Guest::Write64(Guest::Base, bundle + 0, uint64_t(now) * 10000ull);
+                Guest::Write64(Guest::Base, bundle + 8, system);
+                Guest::Write32(Guest::Base, bundle + 16, now);
+            }
             {
                 std::lock_guard<std::mutex> lock(g_mutex);
                 for (uint32_t object : g_threadObjects)
@@ -177,7 +199,15 @@ uint32_t Guest::CreateThreadPointer(uint32_t threadId, int processor)
     Write32(Base, block + PcrCurrentThread, object);
     *(Base + block + PcrProcessorNumber) = uint8_t(number);
     Write32(Base, object + ThreadId, threadId);
-    Write32(Base, object + ThreadTimestamp, 0);
+
+    // The timestamp starts at the current time, not at zero. The clock
+    // thread brings it up within a millisecond, but a thread that reads it
+    // before then sees zero, and the graphics driver's hang check on a
+    // thread that has just started subtracts its last progress time from
+    // it, gets a huge number, and declares the GPU hung the moment the
+    // level loader starts.
+    Write32(Base, object + ThreadTimestamp,
+        g_threadObjects.empty() ? 0 : Milliseconds());
 
     {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -257,4 +287,9 @@ int Guest::CurrentProcessor(const PPCContext& ctx)
 {
     if (ctx.r13.u32 == 0) return 0;
     return int(*(Base + ctx.r13.u32 + PcrProcessorNumber));
+}
+
+void Guest::SetTimeStampBundle(uint32_t address)
+{
+    g_timeStampBundle.store(address);
 }

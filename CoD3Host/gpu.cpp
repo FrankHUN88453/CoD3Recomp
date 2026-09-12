@@ -1447,7 +1447,7 @@ void Mmio::CallIndirect(PPCContext& ctx, uint8_t* base, uint32_t address)
         for (int i = 0; i < 32; i++)
         {
             if ((i % 8) == 0) printf("\n   r%-2d", i);
-            printf(" %08X", (&ctx.r0)[i].u32);
+            printf(" %08X", Kernel::Register(ctx, i));
         }
         printf("\n");
 
@@ -1480,13 +1480,15 @@ void Mmio::CallIndirect(PPCContext& ctx, uint8_t* base, uint32_t address)
         // looks like a pointer into the image gets its first words printed.
         for (int i = 14; i < 32; i++)
         {
-            const uint32_t value = (&ctx.r0)[i].u32;
+            const uint32_t value = Kernel::Register(ctx, i);
             if (value < 0x82000000u || value >= 0x82C30000u) continue;
             printf("  r%-2d 0x%08X ->", i, value);
             for (int word = 0; word < 6; word++)
                 printf(" %08X", Guest::Read32(base, value + word * 4));
             printf("\n");
         }
+
+        Kernel::DumpRequested();
 
         uint32_t functions[10] = {};
         const int count = Sampler::FunctionsOnStack(functions, 10);

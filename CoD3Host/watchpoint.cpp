@@ -196,9 +196,14 @@ bool Kernel::ReportWatchpoint(void* winContext)
     bool guestCode = false;
     for (int i = 0; i < count; i++)
         if (functions[i] < 0x82578000u) guestCode = true;
-    if (!guestCode) return true;
 
-    if (report >= 40) return true;
+    // A word that is written every frame fills the forty reports in a
+    // second with the writes that are right. The ones that matter are
+    // those that leave something that is not a pointer, and they are
+    // printed whoever made them and however many came before.
+    const uint32_t now = Guest::Read32(Guest::Base, g_watched);
+    const bool suspicious = now < 0x10000u || now >= 0xC0000000u;
+    if (!suspicious && (!guestCode || report >= 40)) return true;
 
     printf("\nwatchpoint: guest address 0x%08X was written\n", g_watched);
     if (count > 0)
@@ -208,7 +213,7 @@ bool Kernel::ReportWatchpoint(void* winContext)
             printf("%ssub_%08X", i == 0 ? " " : " <- ", functions[i]);
         printf("\n");
     }
-    printf("  it now holds 0x%08X\n", Guest::Read32(Guest::Base, g_watched));
+    printf("  it now holds 0x%08X%s\n", now, suspicious ? ", which is not a pointer" : "");
     fflush(stdout);
     return true;
 }

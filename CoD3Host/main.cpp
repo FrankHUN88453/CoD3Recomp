@@ -268,6 +268,7 @@ int Run(int argc, char** argv)
     ctx.r1.u32 = Guest::StackBase - 0x100;
     ctx.r13.u32 = Guest::CreateThreadPointer(1);
     ctx.fpscr.loadFromHost();
+    Kernel::SetCurrentContext(&ctx);
 
     // Reports where the guest threads are, so a stall in translated code can be
     // located without a debugger.
@@ -294,7 +295,7 @@ int Run(int argc, char** argv)
     if (const char* watch = getenv("COD3_WATCH"))
     {
         const uint32_t address = uint32_t(strtoul(watch, nullptr, 16));
-        if (address != 0)
+        if (*watch != 0)   // zero is a valid address to watch: the null object
         {
             printf("watch: 0x%08X holds %08X %08X %08X %08X before the guest starts\n",
                 address,
@@ -305,6 +306,35 @@ int Run(int argc, char** argv)
             Kernel::WatchWrite(address);
             Kernel::ArmWatchpoints();
         }
+    }
+
+    // COD3_PEEK takes hexadecimal guest addresses separated by commas and
+    // prints sixty four bytes of each, as words and as text, then exits: a
+    // way to read a string or a table out of the image without running it.
+    if (const char* peek = getenv("COD3_PEEK"))
+    {
+        for (const char* at = peek; *at != 0;)
+        {
+            char* end = nullptr;
+            const uint32_t address = uint32_t(strtoul(at, &end, 16));
+            if (end == at) break;
+            printf("peek: 0x%08X\n", address);
+            for (uint32_t row = 0; row < 64; row += 16)
+            {
+                printf("  %08X:", address + row);
+                for (uint32_t w = 0; w < 16; w += 4) printf(" %08X", Guest::Read32(Guest::Base, address + row + w));
+                printf("  ");
+                for (uint32_t b = 0; b < 16; b++)
+                {
+                    const uint8_t c = Guest::Base[address + row + b];
+                    printf("%c", c >= 32 && c < 127 ? c : '.');
+                }
+                printf("\n");
+            }
+            at = *end == ',' ? end + 1 : end;
+        }
+        fflush(stdout);
+        return 0;
     }
 
     printf("\nEntering guest code at _xstart\n");

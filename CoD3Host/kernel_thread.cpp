@@ -93,6 +93,7 @@ namespace
         const uint32_t threadPointer =
             Guest::CreateThreadPointer(GetCurrentThreadId(), start.processor);
         ctx.r13.u32 = threadPointer;
+        Kernel::SetCurrentContext(&ctx);
         Kernel::RecordThreadPointer(GetCurrentThreadId(), threadPointer);
         Kernel::ArmWatchpoints();
         Scheduler::Attach(Guest::CurrentProcessor(ctx));
@@ -138,16 +139,30 @@ uint32_t Guest::AllocateStack(uint32_t size)
 {
     // Stacks come out of the top of the virtual region and grow down, away
     // from the heap that grows up from the bottom.
+    //
+    // The main thread's stack is the megabyte ending at StackBase, and it is
+    // not handed out here: the first stack this gives out has to begin
+    // below it. It used to begin at StackBase itself, which gave the first
+    // thread the title created the main thread's own stack, byte for byte,
+    // and every thread after it a slice of the same megabyte. Two threads
+    // pushing frames over each other's is what all the corruption looked
+    // like: a list head of 1, an object of 0x20, a menu element of null,
+    // each a value one thread had left where the other kept a pointer.
+    //
+    // A page is left uncommitted between stacks so that one running off its
+    // end is reported as a commit outside every allocation rather than
+    // read back by its neighbour.
     static std::mutex mutex;
-    static uint32_t next = Guest::StackBase;
+    static uint32_t next = Guest::StackBase - Guest::StackSize;
+    constexpr uint32_t Gap = 0x10000;
 
     std::lock_guard<std::mutex> lock(mutex);
 
     size = (size + 0xFFFF) & ~0xFFFFu;
-    if (next < Guest::VirtualHeapBase + size)
+    if (next < Guest::VirtualHeapBase + size + Gap)
         return 0;
 
-    next -= size;
+    next -= size + Gap;
     if (VirtualAlloc(Guest::Ptr(next), size, MEM_COMMIT, PAGE_READWRITE) == nullptr)
         return 0;
 

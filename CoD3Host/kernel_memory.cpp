@@ -71,6 +71,19 @@ namespace
     }
 }
 
+// Physical memory for this runtime's own use: the same allocator the title's
+// physical allocations come from, so nothing here can land on top of one of
+// those, committed and cleared.
+uint32_t Guest::AllocatePhysical(uint32_t size)
+{
+    std::lock_guard<std::mutex> lock(g_allocatorMutex);
+    const uint32_t address = Take(Align(size, LargePage), LargePage, true);
+    if (address == 0) return 0;
+    if (VirtualAlloc(Guest::Ptr(address), Align(size, LargePage), MEM_COMMIT, PAGE_READWRITE) != nullptr)
+        memset(Guest::Ptr(address), 0, Align(size, LargePage));
+    return address;
+}
+
 // NTSTATUS NtAllocateVirtualMemory(PVOID* base, SIZE_T* size, ULONG type,
 //                                  ULONG protect, ULONG unknown)
 PPC_FUNC(__imp__NtAllocateVirtualMemory)

@@ -9,6 +9,7 @@
 // handles as a normal case rather than an error.
 
 #include "kernel.h"
+#include "sampler.h"
 #include <atomic>
 #include "input.h"
 
@@ -361,7 +362,39 @@ PPC_FUNC(__imp__XamLoaderSetLaunchData)  { ctx.r3.u32 = X_ERROR_SUCCESS; }
 PPC_FUNC(__imp__XamLoaderLaunchTitle)
 {
     Kernel::CountImport("XamLoaderLaunchTitle");
-    printf("\nThe game asked to launch another title. Shutting down.\n");
+
+    // Which title, and from where. A path of nothing is the dashboard, and a
+    // title that asks for the dashboard has usually just decided that
+    // something is fatally wrong: the call chain says what.
+    printf("\nThe game asked to launch another title");
+    if (ctx.r3.u32 != 0)
+    {
+        char path[256] = {};
+        for (size_t i = 0; i + 1 < sizeof(path); i++)
+        {
+            path[i] = char(Guest::Base[ctx.r3.u32 + i]);
+            if (path[i] == 0) break;
+        }
+        printf(": \"%s\"", path);
+    }
+    else
+    {
+        printf(": the dashboard");
+    }
+    printf(", flags 0x%08X, from 0x%08X.\n", ctx.r4.u32, uint32_t(ctx.lr));
+    {
+        uint32_t functions[12] = {};
+        const int count = Sampler::FunctionsOnStack(functions, 12);
+        if (count > 0)
+        {
+            printf("  guest call chain, innermost first:");
+            for (int i = 0; i < count; i++)
+                printf("%ssub_%08X", i == 0 ? " " : " <- ", functions[i]);
+            printf("\n");
+        }
+    }
+    Kernel::ReportRecentCalls(GetCurrentThreadId());
+    printf("Shutting down.\n");
     fflush(stdout);
     Guest::Shutdown();
     Kernel::Exit(0);

@@ -77,6 +77,21 @@ namespace
     thread_local PPCContext* t_commandContext = nullptr;
     thread_local uint32_t t_commandStackTop = 0;
 
+    // Whether the command thread is inside the title's interrupt handler,
+    // and since when. The handler is guest code run in the middle of the
+    // command stream, and if it blocks, on a lock a render thread holds
+    // while that thread waits for the GPU, the stream stops with it and the
+    // title reports the GPU hung. The ring report below says so.
+    std::atomic<bool> g_inHandler{ false };
+    std::atomic<int64_t> g_handlerSince{ 0 };
+    std::atomic<uint32_t> g_commandThreadId{ 0 };
+
+    int64_t NowMilliseconds()
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+
     // The handler itself, on the command thread's context, as the given CPU.
     void RunInterruptHandler(PPCFunc* routine, uint32_t cpu)
     {
@@ -106,7 +121,10 @@ namespace
             fflush(stdout);
         }
 
+        g_handlerSince.store(NowMilliseconds());
+        g_inHandler.store(true);
         routine(context, Guest::Base);
+        g_inHandler.store(false);
     }
 
     void CommandThread()
@@ -123,7 +141,9 @@ namespace
         // Reachable from the command processor, so an interrupt packet can
         // run the handler the moment it is decoded.
         t_commandContext = &ctx;
+        Kernel::SetCurrentContext(&ctx);
         t_commandStackTop = stackTop;
+        g_commandThreadId.store(GetCurrentThreadId());
         Gpu::SetInterruptRaiser([](uint32_t cpuMask) {
             VideoState& video = Video();
             const uint32_t callback = video.interruptCallback.load();
@@ -275,6 +295,7 @@ namespace
         alignas(0x40) PPCContext ctx{};
         ctx.r13.u32 = Guest::CreateThreadPointer(GetCurrentThreadId());
         ctx.fpscr.loadFromHost();
+        Kernel::SetCurrentContext(&ctx);
 
         auto nextFrame = std::chrono::steady_clock::now();
         while (video.running.load(std::memory_order_acquire))
@@ -356,6 +377,36 @@ namespace
                 printf("ring: write pointer %u, read pointer %u, size %u dwords\n",
                     Gpu::WritePointer(), video.readPointer.load(),
                     video.ringBufferSize.load() / 4);
+
+                // What sits at the read pointer when it is behind the write
+                // pointer: the packet the command processor has not taken.
+                {
+                    const uint32_t ringAt = video.ringBuffer.load();
+                    const uint32_t dwords = video.ringBufferSize.load() / 4;
+                    const uint32_t read = video.readPointer.load();
+                    const uint32_t write = Gpu::WritePointer();
+                    if (ringAt != 0 && dwords != 0 && read != write)
+                    {
+                        printf("  at the read pointer:");
+                        for (uint32_t i = 0; i < 12; i++)
+                        {
+                            const uint32_t at = (read + i) % dwords;
+                            printf(" %08X", Guest::Read32(Guest::Base,
+                                Guest::PhysicalAlias(ringAt) + at * 4));
+                        }
+                        printf("\n");
+                    }
+                }
+                if (g_inHandler.load())
+                {
+                    const int64_t held = NowMilliseconds() - g_handlerSince.load();
+                    if (held > 500)
+                    {
+                        printf("cp: inside the title's graphics interrupt handler for %.1f s; "
+                               "the stream is stopped behind it\n", held / 1000.0);
+                        Kernel::ReportRecentCalls(g_commandThreadId.load());
+                    }
+                }
 
                 // The write back block and the fields around the ring
                 // description. Which field the render thread compares against
@@ -576,17 +627,25 @@ PPC_FUNC(__imp__VdCallGraphicsNotificationRoutines) {}
 PPC_FUNC(__imp__VdGetSystemCommandBuffer)
 {
     Kernel::CountImport("VdGetSystemCommandBuffer");
-    // A scratch buffer the title writes system packets into. It is never read,
-    // so any committed guest memory will do.
-    static uint32_t buffer = 0;
-    if (buffer == 0)
+    // Two addresses in physical memory: the system command buffer, and the
+    // block of GPU state the driver keeps beside it. The kernel hands back
+    // two pointers into the area it reserves for the GPU near the top of RAM,
+    // and the driver works relative to both. This used to answer the second
+    // one with zero, and the driver then wrote its fences and state relative
+    // to zero: a fence to physical 0x100, which is where the title had put
+    // its job queue, and a corrupt job descriptor from then on. The two are
+    // laid out the way the kernel lays them out, sixteen bytes apart, in a
+    // block nothing else is given.
+    static uint32_t block = 0;
+    if (block == 0)
     {
-        buffer = Guest::AllocateStack(64u << 10);
-        if (buffer != 0) buffer -= (64u << 10);   // AllocateStack returns the top
+        block = Guest::AllocatePhysical(64u << 10);
+        printf("video: system command buffer at 0x%08X\n", block);
+        fflush(stdout);
     }
 
-    if (ctx.r3.u32 != 0) Guest::Write32(base, ctx.r3.u32, buffer);
-    if (ctx.r4.u32 != 0) Guest::Write32(base, ctx.r4.u32, 0);
+    if (ctx.r3.u32 != 0) Guest::Write32(base, ctx.r3.u32, block + 0x900);
+    if (ctx.r4.u32 != 0) Guest::Write32(base, ctx.r4.u32, block + 0x910);
 }
 
 // VOID VdInitializeScalerCommandBuffer(...)
@@ -622,7 +681,7 @@ PPC_FUNC(__imp__VdSwap)
     {
         printf("video: VdSwap arguments r3..r10:");
         for (int i = 3; i <= 10; i++)
-            printf(" %08X", (&ctx.r0)[i].u32);
+            printf(" %08X", Kernel::Register(ctx, i));
         printf("\n");
         const uint32_t buffer = ctx.r3.u32;
         if (buffer != 0)
@@ -642,7 +701,7 @@ PPC_FUNC(__imp__VdSwap)
         // the swap to do beyond changing the picture.
         for (int reg = 5; reg <= 9; reg++)
         {
-            const uint32_t at = (&ctx.r0)[reg].u32;
+            const uint32_t at = Kernel::Register(ctx, reg);
             if (at < 0x10000 || at >= 0xC0000000) continue;
             printf("video:   r%d 0x%08X ->", reg, at);
             for (int i = 0; i < 8; i++) printf(" %08X", Guest::Read32(base, at + i * 4));
