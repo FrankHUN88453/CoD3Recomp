@@ -10,6 +10,7 @@
 #include "scheduler.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <map>
@@ -120,6 +121,20 @@ namespace
 
     // Turns a guest path into a host path. Returns an empty path when the
     // device is not one this runtime serves.
+    // A film or its sound track, by extension.
+    bool LooksLikeFilm(const std::string& guestPath)
+    {
+        static const char* const extensions[] = { ".wmv", ".wma" };
+        for (const char* extension : extensions)
+        {
+            const size_t length = strlen(extension);
+            if (guestPath.size() < length) continue;
+            if (_stricmp(guestPath.c_str() + guestPath.size() - length, extension) == 0)
+                return true;
+        }
+        return false;
+    }
+
     fs::path Resolve(std::string guestPath, bool forWriting)
     {
         std::replace(guestPath.begin(), guestPath.end(), '\\', '/');
@@ -249,6 +264,26 @@ PPC_FUNC(__imp__NtCreateFile)
     if (hostPath.empty())
     {
         printf("file: no device for %s\n", guestPath.c_str());
+        ctx.r3.u32 = X_STATUS_OBJECT_NAME_NOT_FOUND;
+        return;
+    }
+
+    // The intro films, unless asked for.
+    //
+    // The player opens them and its picture never starts: its decoder thread
+    // waits on a D3D worker that is never woken, and the title sits on the
+    // first frame polling. Until that is understood the films are reported
+    // absent, which the title handles the way it handles a missing film and
+    // goes to its menu. COD3_FILMS=1 in the environment lets them through.
+    if (!writing && LooksLikeFilm(guestPath) && getenv("COD3_FILMS") == nullptr)
+    {
+        static std::atomic<int> announced{ 0 };
+        if (announced.fetch_add(1) == 0)
+        {
+            printf("file: the intro films are skipped; set COD3_FILMS=1 to play them\n");
+            fflush(stdout);
+        }
+        LogOpen(guestPath, "skipped");
         ctx.r3.u32 = X_STATUS_OBJECT_NAME_NOT_FOUND;
         return;
     }

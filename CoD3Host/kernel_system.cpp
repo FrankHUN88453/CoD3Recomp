@@ -11,6 +11,7 @@
 #include "scheduler.h"
 #include <chrono>
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -510,8 +511,37 @@ PPC_FUNC(__imp__DbgPrint)
     // here knows the conversions the format string asks for. Printing the
     // format itself still says what the title is reporting.
     const std::string format = GuestString(base, ctx.r3.u32);
+
+    // At most a few hundred lines a second. The driver's report of a hung
+    // GPU walks a list of indirect buffers and prints each one, and when the
+    // list is corrupt that is three million lines of "0x0 0x0", an 800 MB
+    // log, and a title that spends its time inside printf rather than
+    // running. What it says is still kept; how often is not its call.
+    static std::atomic<uint64_t> printed{ 0 };
+    static std::atomic<uint64_t> dropped{ 0 };
+    static auto second = std::chrono::steady_clock::now();
+    static std::atomic<uint32_t> thisSecond{ 0 };
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - second >= std::chrono::seconds(1))
+        {
+            const uint32_t lost = thisSecond.exchange(0);
+            second = now;
+            if (lost > 300)
+                printf("guest: (%u more lines from the title this second were not printed)\n",
+                    lost - 300);
+        }
+    }
     if (!format.empty())
-        printf("guest: %s", format.c_str());
+    {
+        if (thisSecond.fetch_add(1) < 300)
+        {
+            printf("guest: %s", format.c_str());
+            printed.fetch_add(1, std::memory_order_relaxed);
+        }
+        else
+            dropped.fetch_add(1, std::memory_order_relaxed);
+    }
     ctx.r3.u32 = X_STATUS_SUCCESS;
 }
 

@@ -42,6 +42,7 @@ namespace Gpu
     {
         uint64_t packets = 0;
         uint64_t registerWrites = 0;
+        uint64_t filler = 0;          // type 0 packets from register zero, skipped
         uint64_t draws = 0;
         uint64_t swaps = 0;
         uint64_t unknown = 0;

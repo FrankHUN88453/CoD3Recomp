@@ -379,6 +379,9 @@ namespace
     std::mutex g_fenceTargetMutex;
     std::map<uint32_t, uint64_t> g_fenceTargets;
 
+    // Which path a register write is coming by, for the report below.
+    thread_local const char* t_writeSource = "unknown";
+
     // Interrupts the command stream has asked for and nobody has raised yet.
     std::atomic<uint32_t> g_pendingInterrupts{ 0 };
 
@@ -582,6 +585,7 @@ namespace
         }
         else
         {
+            t_writeSource = "a conditional write";
             Gpu::WriteRegister(
                 Gpu::ApertureBase + (writeAddress & 0xFFFF) * 4, writeValue);
         }
@@ -625,6 +629,7 @@ namespace
 void Mmio::Store32(uint32_t address, uint32_t value)
 {
     ReportOnce("write", address, value);
+    t_writeSource = "the CPU through the aperture";
 
     // Through the same door the command stream uses. This used to drop the
     // value straight into the register map, which is fine for most registers
@@ -712,7 +717,7 @@ void Gpu::WriteRegister(uint32_t address, uint32_t value)
             if (index == 0x1DD && value != 0 &&
                 ((value & 0xFFFF) != 0 || value >= 0x20000000u))
             {
-                printf("gpu: that is not a block address; the stream is out of step\n");
+                printf("gpu: that is not a block address; it came by %s\n", t_writeSource);
                 PrintRecent();
             }
             fflush(stdout);
@@ -780,6 +785,7 @@ namespace
     // The indirect buffer packet most recently followed, raw, for reports.
     thread_local uint32_t t_lastIndirectAddress = 0;
     thread_local uint32_t t_lastIndirectSize = 0;
+    thread_local uint32_t t_lastIndirectSizeAt = 0;   // guest address of the size word
 
     // The whole walk shares one deadline. Almost every draw in this title's
     // stream is inside an indirect buffer, so a budget that only covered the
@@ -868,6 +874,16 @@ uint32_t Gpu::ProcessRing(uint32_t ringBase, uint32_t ringSizeDwords,
                 }
             }
 
+            // Padding, as in the buffers below: a write from register zero
+            // is skipped whole.
+            if (baseRegister == 0)
+            {
+                local.filler++;
+                length = 1 + count;
+            }
+            else
+            {
+            t_writeSource = "a type 0 packet in the ring";
             for (uint32_t i = 0; i < count; i++)
             {
                 const uint32_t value = ReadDword(cursor + 1 + i);
@@ -876,6 +892,7 @@ uint32_t Gpu::ProcessRing(uint32_t ringBase, uint32_t ringSizeDwords,
             }
             local.registerWrites += count;
             length = 1 + count;
+            }
         }
         else if (type == 2)
         {
@@ -948,6 +965,7 @@ uint32_t Gpu::ProcessRing(uint32_t ringBase, uint32_t ringSizeDwords,
                 const uint32_t targetDwords = ReadDword(cursor + 2) & 0xFFFFF;
                 t_lastIndirectAddress = target;
                 t_lastIndirectSize = ReadDword(cursor + 2);
+                t_lastIndirectSizeAt = ringBase + ((cursor + 2) % ringSizeDwords) * 4;
                 ExecuteBuffer(Guest::PhysicalAlias(target), targetDwords, local, 1);
                 break;
             }
@@ -1085,7 +1103,7 @@ namespace
                 // The scratch block address was seen taking a packet header as
                 // its value, which is a stream read out of step: the packet
                 // before this one was sized wrong, and these are its tail.
-                if ((baseRegister < 0x100 && count > 64) || (baseRegister >= 0x1C0 && baseRegister + count > 0x1DC && baseRegister < 0x200))
+                if (baseRegister != 0 && baseRegister >= 0x1C0 && baseRegister + count > 0x1DC && baseRegister < 0x200)
                 {
                     static std::atomic<int> announced{ 0 };
                     if (announced.fetch_add(1) < 20)
@@ -1108,6 +1126,8 @@ namespace
                         for (uint32_t i = 0; i < 12 && i < dwords; i++)
                             printf(" %08X", Guest::Read32(Guest::Base, base + i * 4));
                         printf("\n");
+                        if (baseRegister < 0x100 && count > 64)
+                        {
                         // Is the CPU still writing this buffer? If the words
                         // here change while the command processor waits, the
                         // buffer was submitted before it was finished, or
@@ -1118,8 +1138,20 @@ namespace
                             uint32_t before[6];
                             for (int i = 0; i < 6; i++)
                                 before[i] = Guest::Read32(Guest::Base, base + (at + i) * 4);
-                            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-                            printf("  twenty milliseconds later, dwords %u..%u read:", at, at + 5);
+                            // Up to half a second, polling: if the words fill in
+                            // while this waits, the buffer was being written as
+                            // it was being read, and how long it took says how
+                            // far behind the command processor ought to run.
+                            int waitedMs = 0;
+                            for (; waitedMs < 500; waitedMs += 5)
+                            {
+                                bool any = false;
+                                for (int i = 0; i < 6; i++)
+                                    if (Guest::Read32(Guest::Base, base + (at + i) * 4) != before[i]) any = true;
+                                if (any) break;
+                                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                            }
+                            printf("  after %d ms, dwords %u..%u read:", waitedMs, at, at + 5);
                             bool changed = false;
                             for (int i = 0; i < 6; i++)
                             {
@@ -1128,6 +1160,17 @@ namespace
                                 if (now != before[i]) changed = true;
                             }
                             printf("%s\n", changed ? "  (CHANGED: the CPU was still writing)" : "  (unchanged)");
+
+                            // And the size word of the packet that brought us
+                            // here: a size that changes after the fact is a
+                            // packet that was read before it was finished.
+                            if (t_lastIndirectSizeAt != 0)
+                                printf("  the indirect buffer's size word at 0x%08X now reads 0x%08X "
+                                       "(was 0x%08X when followed)\n",
+                                    t_lastIndirectSizeAt,
+                                    Guest::Read32(Guest::Base, t_lastIndirectSizeAt),
+                                    t_lastIndirectSize);
+                        }
                         }
                         const uint32_t from = cursor > 72 ? cursor - 72 : 0;
                         printf("  the buffer from dword %u:", from);
@@ -1141,6 +1184,29 @@ namespace
                     }
                 }
 
+                // A write starting at register zero is padding.
+                //
+                // The driver fills the unused tail of a command buffer with
+                // zero words, and a zero word is a type 0 packet that writes
+                // one value to register zero. It also submits the buffer at
+                // its allocated length rather than its filled length, so past
+                // the padding the walk reaches whatever the allocator put next:
+                // here a table of shader constants beginning with 1.0f, which
+                // as a header is a type 0 write of 16257 registers from zero.
+                // Carried out, that put the constants into the command
+                // processor's own registers, scratch block address included,
+                // and every "GPU is hung" the driver reported followed from
+                // it. Nothing legitimate writes a run of registers from zero;
+                // the driver evidently relies on the hardware ignoring it, and
+                // so does this. The words are consumed and nothing is written.
+                if (baseRegister == 0)
+                {
+                    local.filler++;
+                    length = 1 + count;
+                }
+                else
+                {
+                t_writeSource = "a type 0 packet in an indirect buffer";
                 for (uint32_t i = 0; i < count; i++)
                 {
                     if (cursor + 1 + i >= dwords) break;
@@ -1150,6 +1216,7 @@ namespace
                 }
                 local.registerWrites += count;
                 length = 1 + count;
+                }
             }
             else if (type == 2)
             {
@@ -1242,6 +1309,7 @@ namespace
                 {
                     t_lastIndirectAddress = Guest::Read32(Guest::Base, base + (cursor + 1) * 4);
                     t_lastIndirectSize = Guest::Read32(Guest::Base, base + (cursor + 2) * 4);
+                    t_lastIndirectSizeAt = base + (cursor + 2) * 4;
                     ExecuteBuffer(
                         Guest::PhysicalAlias(t_lastIndirectAddress),
                         t_lastIndirectSize & 0xFFFFF,

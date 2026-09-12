@@ -312,7 +312,32 @@ namespace
                     ctx.r1.u32 = stackTop - 0x100;
                     ctx.r3.u32 = 0;   // source: vertical blank
                     ctx.r4.u32 = video.interruptContext.load();
+
+                    // What the vertical blank does to the swap flag.
+                    //
+                    // The handler's vertical blank path counts down a word in
+                    // its context and, when that reaches zero, clears the
+                    // second word of the scratch block: the flag the stream
+                    // waits on after every swap. Printing the countdown and the
+                    // flag around each call says whether the countdown is ever
+                    // armed, and if so whether the clear happens.
+                    const uint32_t context = ctx.r4.u32;
+                    const uint32_t block = Gpu::ReadRegister(Gpu::ApertureBase + 0x1DD * 4) & ~3u;
+                    const uint32_t countdownBefore = context ? Guest::Read32(Guest::Base, context + 15132) : 0;
+                    const uint32_t flagBefore = block ? Guest::Read32(Guest::Base, Guest::PhysicalAlias(block + 4)) : 0;
+
                     routine(ctx, Guest::Base);
+
+                    static std::atomic<int> announced{ 0 };
+                    if (block != 0 && (flagBefore != 0 || countdownBefore != 0) &&
+                        announced.fetch_add(1) < 24)
+                    {
+                        printf("vblank: countdown %u -> %u, swap flag %u -> %u, status 0x%08X\n",
+                            countdownBefore, Guest::Read32(Guest::Base, context + 15132),
+                            flagBefore, Guest::Read32(Guest::Base, Guest::PhysicalAlias(block + 4)),
+                            Gpu::ReadRegister(Gpu::RegisterInterruptStatus));
+                        fflush(stdout);
+                    }
                 }
             }
 
@@ -609,6 +634,20 @@ PPC_FUNC(__imp__VdSwap)
         }
         printf("video:   ring write pointer register reads %u\n",
             Gpu::WritePointer());
+
+        // What the stack arguments point at. On the console VdSwap is the
+        // kernel's, and a kernel call that takes four pointers into the
+        // caller's stack is writing results into them or reading a request
+        // out of them; either way the words there say what the driver expects
+        // the swap to do beyond changing the picture.
+        for (int reg = 5; reg <= 9; reg++)
+        {
+            const uint32_t at = (&ctx.r0)[reg].u32;
+            if (at < 0x10000 || at >= 0xC0000000) continue;
+            printf("video:   r%d 0x%08X ->", reg, at);
+            for (int i = 0; i < 8; i++) printf(" %08X", Guest::Read32(base, at + i * 4));
+            printf("\n");
+        }
         fflush(stdout);
     }
 

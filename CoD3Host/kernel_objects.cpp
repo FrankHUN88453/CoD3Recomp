@@ -438,6 +438,22 @@ PPC_FUNC(__imp__NtPulseEvent)
     // arrives afterwards.
     object->pulses++;
     SetSignalState(*object, 0);
+
+    // How many that was. A pulse that finds nobody waiting is lost, on the
+    // console as here, and a job system that relies on one being caught is
+    // exactly where a run goes quiet with its workers asleep.
+    {
+        int waiting = 0;
+        for (const auto& entry : g_blocked)
+            if (entry.second.object == ctx.r3.u32) waiting++;
+        static std::atomic<int> announced{ 0 };
+        if (announced.fetch_add(1) < 120)
+        {
+            printf("pulse: 0x%08X from 0x%08X released %d waiter%s\n",
+                ctx.r3.u32, uint32_t(ctx.lr), waiting, waiting == 1 ? "" : "s");
+            fflush(stdout);
+        }
+    }
     ctx.r3.u32 = X_STATUS_SUCCESS;
 }
 
@@ -970,6 +986,11 @@ void Kernel::ReportWaitTraffic()
         if (!who.empty()) printf("   waiting for a thread: %s", who.c_str());
         printf("\n");
     }
+
+    // And what each of them was doing, since a thread that appears to be
+    // waiting on a lock it holds is either a report out of date or a wait
+    // that took a path this runtime does not expect.
+    Kernel::ReportRecentCalls();
 
     printf("\n");
     printf("synchronisation traffic so far:\n");
