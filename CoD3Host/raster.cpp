@@ -488,9 +488,13 @@ namespace
         const uint32_t height = ((word2 >> 13) & 0x1FFF) + 1;
 
         // 6 is four bytes a texel; 18, 19 and 20 are the block compressed
-        // forms, which is what most of a menu is made of.
+        // forms, which is what most of a menu is made of. 2 is one byte a
+        // texel: the films arrive as three of those, the luma plane and the
+        // two chroma planes, which the title's own pixel shader turns into
+        // colour.
         const bool compressed = (format == 18 || format == 19 || format == 20);
-        if (format != 6 && !compressed)
+        const bool oneByte = (format == 2);
+        if (format != 6 && !compressed && !oneByte)
         {
             context.textureNeeded = true;
             ReportOnce("unhandled texture format", format);
@@ -562,6 +566,16 @@ namespace
                 out.v[1] = colour.g;
                 out.v[2] = colour.b;
                 out.v[3] = alpha;
+            }
+            else if (oneByte)
+            {
+                const uint32_t offset = tiled
+                    ? Edram::TiledOffset(uint32_t(tx), uint32_t(ty), pitch, 0)
+                    : (uint32_t(ty) * pitch + uint32_t(tx));
+                const float value = Guest::Base[Guest::PhysicalAlias(base) + offset] / 255.0f;
+                // The one component in every lane, so whichever the shader's
+                // swizzle picks is the texel.
+                out.v[0] = out.v[1] = out.v[2] = out.v[3] = value;
             }
             else
             {
@@ -769,7 +783,37 @@ namespace
         if (scalarMask != 0)
         {
             float result = 0;
-            if (!ApplyScalar(scalarOpcode, c, context.previousScalar, result))
+            bool handled = false;
+
+            // The two operand scalar forms, 42 to 47: one operand is a single
+            // component of a constant, the other a single component of a
+            // register, and the register's number is spread across the
+            // low bit of the opcode, the middle of the third swizzle and
+            // the third source's select bit. The film's colour conversion
+            // is written with these; nothing in the menus was.
+            if (scalarOpcode >= 42 && scalarOpcode <= 47)
+            {
+                const uint32_t reg2 = (scalarOpcode & 1) | (src3Swizzle & 0x3C)
+                                    | (uint32_t(src3Temporary) << 1);
+                const Vec4 constant = ReadConstant(context.pixel, src3Reg);
+                const Vec4 temporary = context.registers[reg2 & (MaxRegisters - 1)];
+                float x = constant.v[src3Swizzle & 3];
+                float y = temporary.v[(src3Swizzle >> 6) & 3];
+                if (src3Negate) x = -x;
+                switch (scalarOpcode)
+                {
+                case 42: case 43: result = x * y; break;
+                case 44: case 45: result = x + y; break;
+                default:          result = x - y; break;
+                }
+                handled = true;
+            }
+            else
+            {
+                handled = ApplyScalar(scalarOpcode, c, context.previousScalar, result);
+            }
+
+            if (!handled)
             {
                 ReportOnce("unhandled scalar opcode", scalarOpcode);
                 std::lock_guard<std::mutex> lock(g_statisticsMutex);

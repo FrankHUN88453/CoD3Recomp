@@ -498,7 +498,44 @@ PPC_FUNC(__imp__RtlNtStatusToDosError)
 {
     Kernel::CountImport("RtlNtStatusToDosError");
     const uint32_t status = ctx.r3.u32;
-    ctx.r3.u32 = (status == 0) ? 0 : 317;   // ERROR_MR_MID_NOT_FOUND
+
+    // The ones that matter are the ones the title branches on: pending is
+    // ERROR_IO_PENDING, which its overlapped file layer requires of every
+    // read it issues, and end of file, timeout and not found each have a
+    // meaning of their own. Anything unknown is what the console says for
+    // a status it has no mapping for.
+    switch (status)
+    {
+    case 0x00000000: ctx.r3.u32 = 0; break;       // success
+    case 0x00000102: ctx.r3.u32 = 258; break;     // timeout -> WAIT_TIMEOUT
+    case 0x00000103: ctx.r3.u32 = 997; break;     // pending -> ERROR_IO_PENDING
+    case 0x80000005: ctx.r3.u32 = 234; break;     // buffer overflow -> ERROR_MORE_DATA
+    case 0x80000006: ctx.r3.u32 = 18; break;      // no more files
+    case 0xC0000002: ctx.r3.u32 = 1; break;       // not implemented
+    case 0xC0000005: ctx.r3.u32 = 998; break;     // access violation -> NOACCESS
+    case 0xC0000008: ctx.r3.u32 = 6; break;       // invalid handle
+    case 0xC000000D: ctx.r3.u32 = 87; break;      // invalid parameter
+    case 0xC000000E: ctx.r3.u32 = 2; break;       // no such device
+    case 0xC000000F: ctx.r3.u32 = 2; break;       // no such file
+    case 0xC0000010: ctx.r3.u32 = 1; break;       // invalid device request
+    case 0xC0000011: ctx.r3.u32 = 38; break;      // end of file -> ERROR_HANDLE_EOF
+    case 0xC0000017: ctx.r3.u32 = 8; break;       // no memory
+    case 0xC0000022: ctx.r3.u32 = 5; break;       // access denied
+    case 0xC0000023: ctx.r3.u32 = 122; break;     // buffer too small
+    case 0xC0000033: ctx.r3.u32 = 123; break;     // object name invalid
+    case 0xC0000034: ctx.r3.u32 = 2; break;       // object name not found
+    case 0xC0000035: ctx.r3.u32 = 183; break;     // name collision
+    case 0xC0000039: ctx.r3.u32 = 161; break;     // path invalid
+    case 0xC000003A: ctx.r3.u32 = 3; break;       // path not found
+    case 0xC0000043: ctx.r3.u32 = 32; break;      // sharing violation
+    case 0xC000007F: ctx.r3.u32 = 112; break;     // disk full
+    case 0xC000009A: ctx.r3.u32 = 1450; break;    // insufficient resources
+    case 0xC00000BA: ctx.r3.u32 = 5; break;       // file is a directory
+    case 0xC00000BB: ctx.r3.u32 = 50; break;      // not supported
+    case 0xC0000101: ctx.r3.u32 = 145; break;     // directory not empty
+    case 0xC0000120: ctx.r3.u32 = 995; break;     // cancelled
+    default:         ctx.r3.u32 = 317; break;     // ERROR_MR_MID_NOT_FOUND
+    }
 }
 
 // --- Debug and shutdown ----------------------------------------------------

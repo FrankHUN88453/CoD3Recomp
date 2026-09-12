@@ -16,6 +16,8 @@
 #include <cstdio>
 #include <map>
 #include <mutex>
+#include <thread>
+#include <chrono>
 
 #include <Windows.h>
 
@@ -42,6 +44,17 @@ namespace
         // Where its thread pointer block is, so an affinity change can be
         // written into it.
         uint32_t threadPointer = 0;
+
+        // Parking. The film decoder's workers idle by suspending themselves
+        // and are resumed by whoever has work for them, with a flag of the
+        // title's own saying which state they are in. The flag is set
+        // before the suspend takes effect, so a resume can arrive in
+        // between, do nothing, and leave the worker asleep for good. The
+        // state here closes that: a resume that finds the thread not yet
+        // suspended is kept as a credit, and a self suspend that finds a
+        // credit spends it instead of sleeping.
+        bool parking = false;       // between deciding to suspend and suspending
+        int resumeCredits = 0;      // resumes that arrived early
 
         // Where this thread lives in guest memory.
         //
@@ -325,9 +338,32 @@ namespace
 PPC_FUNC(__imp__NtResumeThread)
 {
     Kernel::CountImport("NtResumeThread");
-    std::lock_guard<std::mutex> lock(g_threadsMutex);
-    GuestThread* thread = FindThread(ctx.r3.u32);
-    if (thread == nullptr)
+    HANDLE host = nullptr;
+    bool parking = false;
+    bool credited = false;
+    {
+        std::lock_guard<std::mutex> lock(g_threadsMutex);
+        GuestThread* thread = FindThread(ctx.r3.u32);
+        if (thread != nullptr)
+        {
+            host = thread->host;
+            parking = thread->parking;
+            if (parking)
+            {
+                thread->parking = false;
+            }
+            else if (thread->osId != 0 && thread->osId != GetCurrentThreadId())
+            {
+                // Not parking and, if it is not suspended either, the resume
+                // would be lost; the credit is spent by its next self suspend.
+                // A thread still suspended from its creation is resumed for
+                // real below and the credit taken back.
+                thread->resumeCredits++;
+                credited = true;
+            }
+        }
+    }
+    if (host == nullptr)
     {
         printf("thread: asked to resume 0x%08X, which is not a thread\n", ctx.r3.u32);
         fflush(stdout);
@@ -335,7 +371,24 @@ PPC_FUNC(__imp__NtResumeThread)
         return;
     }
 
-    const DWORD previous = ResumeThread(thread->host);
+    DWORD previous = ResumeThread(host);
+    if (parking)
+    {
+        // The thread said it was about to suspend; if it has not yet, the
+        // resume did nothing and is tried again until it has.
+        while (previous == 0)
+        {
+            std::this_thread::yield();
+            previous = ResumeThread(host);
+        }
+    }
+    else if (credited && previous != DWORD(-1) && previous != 0)
+    {
+        // It was suspended after all, so the resume counted; no credit.
+        std::lock_guard<std::mutex> lock(g_threadsMutex);
+        GuestThread* thread = FindThread(ctx.r3.u32);
+        if (thread != nullptr && thread->resumeCredits > 0) thread->resumeCredits--;
+    }
     if (ctx.r4.u32 != 0 && previous != DWORD(-1))
         Guest::Write32(base, ctx.r4.u32, previous);
     ctx.r3.u32 = X_STATUS_SUCCESS;
@@ -345,11 +398,69 @@ PPC_FUNC(__imp__NtResumeThread)
 PPC_FUNC(__imp__NtSuspendThread)
 {
     Kernel::CountImport("NtSuspendThread");
-    std::lock_guard<std::mutex> lock(g_threadsMutex);
-    GuestThread* thread = FindThread(ctx.r3.u32);
-    if (thread == nullptr) { ctx.r3.u32 = X_STATUS_INVALID_HANDLE; return; }
 
-    const DWORD previous = SuspendThread(thread->host);
+    // The handle is looked up under the lock and the suspension done without
+    // it. The film decoder's workers park themselves with this call and are
+    // resumed by the thread that has work for them; suspending with the
+    // lock held meant the parked thread took the thread table down with it,
+    // the resume that would have woken it blocked on that same lock, and
+    // every film stopped on its first frame with the runtime deadlocked.
+    HANDLE host = nullptr;
+    bool self = false;
+    bool spentCredit = false;
+    {
+        std::lock_guard<std::mutex> lock(g_threadsMutex);
+        GuestThread* thread = FindThread(ctx.r3.u32);
+        if (thread == nullptr) { ctx.r3.u32 = X_STATUS_INVALID_HANDLE; return; }
+        host = thread->host;
+        self = thread->osId == GetCurrentThreadId();
+        if (self)
+        {
+            if (thread->resumeCredits > 0)
+            {
+                thread->resumeCredits--;
+                spentCredit = true;
+            }
+            else
+            {
+                thread->parking = true;
+            }
+        }
+    }
+
+    DWORD previous;
+    static const bool noPark = getenv("COD3_NOPARK") != nullptr;
+    if (self && (spentCredit || noPark))
+    {
+        // A resume already came for this suspend: it is over before it began.
+        // COD3_NOPARK turns every self suspend into this, a yield instead of
+        // a sleep, to tell whether a stall is the parking at all.
+        if (noPark && !spentCredit)
+        {
+            std::lock_guard<std::mutex> lock(g_threadsMutex);
+            GuestThread* thread = FindThread(ctx.r3.u32);
+            if (thread != nullptr) thread->parking = false;
+            Scheduler::Release();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            Scheduler::Acquire();
+        }
+        previous = 0;
+    }
+    else if (self)
+    {
+        // Parking: the hardware thread is handed back for the duration,
+        // exactly as it is for a wait, and taken again on the way out.
+        Scheduler::Release();
+        previous = SuspendThread(GetCurrentThread());
+        Scheduler::Acquire();
+        std::lock_guard<std::mutex> lock(g_threadsMutex);
+        GuestThread* thread = FindThread(ctx.r3.u32);
+        if (thread != nullptr) thread->parking = false;
+    }
+    else
+    {
+        previous = SuspendThread(host);
+    }
     if (ctx.r4.u32 != 0 && previous != DWORD(-1))
         Guest::Write32(base, ctx.r4.u32, previous);
     ctx.r3.u32 = X_STATUS_SUCCESS;
@@ -359,17 +470,12 @@ PPC_FUNC(__imp__NtSuspendThread)
 PPC_FUNC(__imp__KeResumeThread)
 {
     Kernel::CountImport("KeResumeThread");
-    std::lock_guard<std::mutex> lock(g_threadsMutex);
-    GuestThread* thread = FindThread(ctx.r3.u32);
-    if (thread == nullptr)
-    {
-        // This is where a missing thread object shows up: the title passes the
-        // pointer it was given for the thread, and if that was never a real
-        // object the thread simply never starts.
-        printf("thread: asked to resume 0x%08X, which is not a thread\n", ctx.r3.u32);
-        fflush(stdout);
-    }
-    ctx.r3.u32 = (thread != nullptr) ? ResumeThread(thread->host) : 0;
+
+    // The same as NtResumeThread, by object rather than handle, and with the
+    // same care over a thread that is about to park: FindThread takes both.
+    ctx.r4.u32 = 0;
+    __imp__NtResumeThread(ctx, base);
+    ctx.r3.u32 = 0;
 }
 
 // KAFFINITY KeSetAffinityThread(void* thread, KAFFINITY affinity)

@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <cctype>
 #include <map>
 #include <atomic>
 
@@ -56,7 +57,25 @@ namespace
         uint64_t size = 0;
         std::string guestPath;
         bool writable = false;
+
+        // Opened for synchronous I/O (FILE_SYNCHRONOUS_IO_ALERT or NONALERT
+        // among the create options). Reads and writes on any other handle
+        // are asynchronous: the console's driver takes the request, answers
+        // STATUS_PENDING, and finishes it later through the status block,
+        // the event and the completion routine. The title's own file layer
+        // is built on exactly that: it issues overlapped reads and treats a
+        // ReadFile that returns TRUE, rather than FALSE with ERROR_IO_PENDING,
+        // as a failure. That is what stopped every film after its first
+        // block. Here the work is done at once and then reported the way
+        // the console reports it: pending, with everything already filled
+        // in for whoever comes to collect it.
+        bool synchronous = true;
     };
+
+    // The create options NtOpenFile passes in a register, for NtCreateFile,
+    // which takes them from the caller's stack.
+    thread_local bool t_optionsOverridden = false;
+    thread_local uint32_t t_optionsOverride = 0;
 
     std::mutex g_filesMutex;
 
@@ -239,6 +258,14 @@ PPC_FUNC(__imp__NtCreateFile)
     const uint32_t ioStatusBlock = ctx.r6.u32;
     const uint32_t createDisposition = ctx.r10.u32;
 
+    // The ninth argument is the first one past the registers: it sits in
+    // the caller's parameter save area, at 0x54 from its stack pointer.
+    const uint32_t createOptions = t_optionsOverridden
+        ? t_optionsOverride : Guest::Read32(base, ctx.r1.u32 + 0x54);
+    t_optionsOverridden = false;
+    constexpr uint32_t FileSynchronousIoAlert = 0x10;
+    constexpr uint32_t FileSynchronousIoNonAlert = 0x20;
+
     const std::string guestPath = ObjectName(base, objectAttributes);
     if (guestPath.empty())
     {
@@ -346,6 +373,7 @@ PPC_FUNC(__imp__NtCreateFile)
     file.size = static_cast<uint64_t>(size.QuadPart);
     file.guestPath = guestPath;
     file.writable = writing;
+    file.synchronous = (createOptions & (FileSynchronousIoAlert | FileSynchronousIoNonAlert)) != 0;
 
     const uint32_t handle = g_nextFileHandle;
     g_nextFileHandle += 4;
@@ -373,14 +401,35 @@ PPC_FUNC(__imp__NtOpenFile)
     // Same shape as NtCreateFile with FILE_OPEN, which is what the arguments
     // already mean here.
     const uint32_t shareAccess = ctx.r7.u32;
-    ctx.r10.u32 = 1;   // FILE_OPEN
     (void)shareAccess;
+    t_optionsOverridden = true;
+    t_optionsOverride = ctx.r8.u32;   // openOptions
+    ctx.r10.u32 = 1;   // FILE_OPEN
     __imp__NtCreateFile(ctx, base);
 }
 
 // NTSTATUS NtReadFile(HANDLE handle, HANDLE event, APC*, void*,
 //                     IO_STATUS_BLOCK* status, void* buffer, ULONG length,
 //                     LARGE_INTEGER* offset)
+namespace
+{
+    // COD3_TRACEFILE names part of a guest path; every read of a file whose
+    // path contains it is printed with its offset, length and outcome.
+    bool TracedFile(const std::string& guestPath)
+    {
+        static const std::string needle = []() {
+            const char* text = getenv("COD3_TRACEFILE");
+            std::string value = text != nullptr ? text : "";
+            for (char& c : value) c = char(tolower(uint8_t(c)));
+            return value;
+        }();
+        if (needle.empty()) return false;
+        std::string lower = guestPath;
+        for (char& c : lower) c = char(tolower(uint8_t(c)));
+        return lower.find(needle) != std::string::npos;
+    }
+}
+
 PPC_FUNC(__imp__NtReadFile)
 {
     Kernel::CountImportOn("NtReadFile", ctx.r3.u32);
@@ -434,7 +483,16 @@ PPC_FUNC(__imp__NtReadFile)
             Guest::Write32(base, ioStatusBlock + 0, X_STATUS_END_OF_FILE);
             Guest::Write32(base, ioStatusBlock + 4, 0);
         }
-        ctx.r3.u32 = X_STATUS_END_OF_FILE;
+        if (TracedFile(file.guestPath))
+        {
+            printf("trace: read %u at %llu of %s: past the end (size %llu)\n",
+                length, (unsigned long long)file.position, file.guestPath.c_str(),
+                (unsigned long long)file.size);
+            fflush(stdout);
+        }
+        if (apcRoutine != 0)
+            Kernel::QueueApc(apcRoutine, apcContext, ioStatusBlock, X_STATUS_END_OF_FILE, 0);
+        ctx.r3.u32 = (apcRoutine != 0 || !file.synchronous) ? X_STATUS_PENDING : X_STATUS_END_OF_FILE;
         return;
     }
 
@@ -484,6 +542,15 @@ PPC_FUNC(__imp__NtReadFile)
         Guest::Write32(base, ioStatusBlock + 4, read);
     }
     ctx.r3.u32 = finalStatus;
+    if (TracedFile(file.guestPath))
+    {
+        Kernel::StartKernelTrace();
+        printf("trace: read %u of %u at %llu of %s into 0x%08X, status 0x%08X%s%s, from 0x%08X\n",
+            read, length, (unsigned long long)(file.position - read), file.guestPath.c_str(),
+            buffer, finalStatus, completionEvent != 0 ? ", event" : "",
+            apcRoutine != 0 ? ", apc" : "", uint32_t(ctx.lr));
+        fflush(stdout);
+    }
 
     // A read that named a completion routine is asynchronous as far as the
     // title is concerned, however quickly the bytes actually arrived. It gets
@@ -492,6 +559,13 @@ PPC_FUNC(__imp__NtReadFile)
     if (apcRoutine != 0)
     {
         Kernel::QueueApc(apcRoutine, apcContext, ioStatusBlock, finalStatus, read);
+        ctx.r3.u32 = X_STATUS_PENDING;
+    }
+    else if (!file.synchronous)
+    {
+        // An asynchronous handle: the status block already holds the
+        // outcome and the event, if any, is signalled on the way out, so
+        // the title finds the read finished the moment it looks.
         ctx.r3.u32 = X_STATUS_PENDING;
     }
 }
@@ -532,7 +606,8 @@ PPC_FUNC(__imp__NtWriteFile)
         Guest::Write32(base, ioStatusBlock + 0, X_STATUS_SUCCESS);
         Guest::Write32(base, ioStatusBlock + 4, written);
     }
-    ctx.r3.u32 = X_STATUS_SUCCESS;
+    if (ctx.r4.u32 != 0) Kernel::SignalHandle(ctx.r4.u32);   // the completion event
+    ctx.r3.u32 = file.synchronous ? X_STATUS_SUCCESS : X_STATUS_PENDING;
 }
 
 // NTSTATUS NtQueryInformationFile(HANDLE, IO_STATUS_BLOCK*, void* info,
@@ -814,6 +889,12 @@ void Kernel::ReportFileReads()
     }
     printf("\n");
     fflush(stdout);
+}
+
+bool Kernel::IsFileHandle(uint32_t handle)
+{
+    std::lock_guard<std::mutex> lock(g_filesMutex);
+    return Files().find(handle) != Files().end();
 }
 
 bool Kernel::CloseFileHandle(uint32_t handle)

@@ -547,6 +547,10 @@ PPC_FUNC(__imp__NtWaitForSingleObjectEx)
     struct Resume { ~Resume() { Scheduler::Acquire(); } } resume;
     Kernel::DeliverApcs(ctx, ctx.r5.u32 != 0);
     const uint32_t handle = ctx.r3.u32;
+
+    // A file handle is signalled when its last I/O has finished, which every
+    // I/O here has by the time the call returns.
+    if (Kernel::IsFileHandle(handle)) { ctx.r3.u32 = X_STATUS_SUCCESS; return; }
     CountWait(handle, uint32_t(ctx.lr));
     const uint32_t timeoutPtr = ctx.r6.u32;
 

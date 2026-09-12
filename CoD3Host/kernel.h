@@ -52,6 +52,10 @@ namespace Kernel
 
     bool CloseFileHandle(uint32_t handle);
 
+    // Whether a handle is a file. A wait on one is a wait for its I/O to
+    // finish, and here that has always already happened.
+    bool IsFileHandle(uint32_t handle);
+
     // Bytes actually read, per file, and a report of the busiest ones.
     void CountFileRead(const std::string& guestPath, uint32_t bytes);
     void ReportFileReads();
@@ -106,6 +110,19 @@ namespace Kernel
     // until you know which object each wait was on.
     void CountImportOn(const char* name, uint32_t subject);
     void ReportImports();
+
+    // Begins the kernel call trace COD3_TRACEKERNEL asks for, if it does.
+    void StartKernelTrace();
+
+    // A thread that prints every host thread's stack once the vertical
+    // blank counter has stopped moving: what a hang looks like from inside.
+    void StartWatchdog();
+
+    // Set by a thread while it unwinds another thread's stack from a copy of
+    // its registers. A fault during that is a stale register, not a guest
+    // error, and the fault handler leaves it to the unwinder's own handler.
+    void SetUnwinding(bool unwinding);
+    bool IsUnwinding();
 
     // Text the title formatted for itself, which is the closest thing it has
     // to telling this runtime what it is doing.

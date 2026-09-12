@@ -566,3 +566,12 @@ void Kernel::ReportGuestText(const std::string& text)
     printf("game: %s\n", line.c_str());
     fflush(stdout);
 }
+
+// A value probe for temporarily instrumented recompiled code: prints a tag
+// and a register once per call, so a chain of direct calls inside the title
+// can say which of them returned the failure.
+void CoD3TraceValue(const char* tag, uint32_t value)
+{
+    printf("probe: %s = 0x%08X\n", tag, value);
+    fflush(stdout);
+}

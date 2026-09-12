@@ -36,6 +36,7 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <vector>
 #include <mutex>
 
 #include <Windows.h>
@@ -104,6 +105,7 @@ namespace
     constexpr uint32_t OpImLoad          = 0x27;
     constexpr uint32_t OpImLoadImmediate = 0x2B;
     constexpr uint32_t OpSetConstant     = 0x2D;
+    constexpr uint32_t OpLoadAluConstant = 0x2F;
     constexpr uint32_t OpInvalidateState = 0x3B;
     constexpr uint32_t OpWaitRegMem      = 0x3C;
     constexpr uint32_t OpIndirectBuffer  = 0x3F;
@@ -130,6 +132,7 @@ namespace
         case OpImLoad:          return "IM_LOAD";
         case OpImLoadImmediate: return "IM_LOAD_IMMEDIATE";
         case OpSetConstant:     return "SET_CONSTANT";
+        case OpLoadAluConstant: return "LOAD_ALU_CONSTANT";
         case OpDrawIndx2:       return "DRAW_INDX_2";
         case OpInvalidateState: return "INVALIDATE_STATE";
         case OpWaitRegMem:      return "WAIT_REG_MEM";
@@ -527,6 +530,28 @@ namespace
             }
             std::this_thread::yield();
         }
+    }
+
+    // LOAD_ALU_CONSTANT copies registers from memory: the address of the
+    // values, then which block they belong in and where in it they start,
+    // then how many. The films set their pixel shader's colour matrix this
+    // way, where everything else in the title writes constants inline.
+    void LoadConstantsFromMemory(uint32_t address, uint32_t offsetAndType, uint32_t count)
+    {
+        uint32_t index = offsetAndType & 0x7FF;
+        switch (offsetAndType >> 16)
+        {
+        case 0:  index += 0x4000; break;   // ALU constants
+        case 1:  index += 0x4800; break;   // fetch constants
+        case 2:  index += 0x2000; break;   // boolean constants
+        case 3:  index += 0x2200; break;   // loop constants
+        default: return;
+        }
+        count &= 0xFFF;
+        const uint32_t source = Guest::PhysicalAlias(address & ~3u);
+        t_writeSource = "a LOAD_ALU_CONSTANT packet";
+        for (uint32_t i = 0; i < count; i++)
+            Gpu::WriteRegister(Gpu::ApertureBase + (index + i) * 4, Guest::Read32(Guest::Base, source + i * 4));
     }
 
     // COND_WRITE polls a register or memory until a condition holds and then
@@ -930,6 +955,10 @@ uint32_t Gpu::ProcessRing(uint32_t ringBase, uint32_t ringSizeDwords,
             case OpImLoad:
                 DecodeShaderLoadIndirect(ReadDword(cursor + 1), ReadDword(cursor + 2));
                 break;
+            case OpLoadAluConstant:
+                LoadConstantsFromMemory(ReadDword(cursor + 1), ReadDword(cursor + 2),
+                                        ReadDword(cursor + 3));
+                break;
             case OpEventWriteShd:
                 WriteFence(ReadDword(cursor + 1), ReadDword(cursor + 2),
                            ReadDword(cursor + 3));
@@ -1279,6 +1308,13 @@ namespace
                         Guest::Read32(Guest::Base, base + (cursor + 1) * 4),
                         Guest::Read32(Guest::Base, base + (cursor + 2) * 4));
                 }
+                else if (opcode == OpLoadAluConstant && cursor + 3 < dwords)
+                {
+                    LoadConstantsFromMemory(
+                        Guest::Read32(Guest::Base, base + (cursor + 1) * 4),
+                        Guest::Read32(Guest::Base, base + (cursor + 2) * 4),
+                        Guest::Read32(Guest::Base, base + (cursor + 3) * 4));
+                }
                 else if (opcode == OpWaitRegMem && cursor + 4 < dwords)
                 {
                     WaitForValue(
@@ -1411,9 +1447,54 @@ void Mmio::CallIndirect(PPCContext& ctx, uint8_t* base, uint32_t address)
                         address < PPC_CODE_BASE + PPC_CODE_SIZE)
         ? PPC_LOOKUP_FUNC(base, address) : nullptr;
 
+    // COD3_TRACECALL names a call site by its return address, in hex, and
+    // every distinct target called from it is printed once with the first
+    // three arguments: which method a virtual call goes to, in other words.
+    // Several sites may be named, separated by commas. The value the call
+    // returns is printed too, which for a chain of initialisations that each
+    // run only if the last succeeded says which one failed.
+    static const std::vector<uint32_t> traced = []() {
+        std::vector<uint32_t> sites;
+        const char* text = getenv("COD3_TRACECALL");
+        for (const char* at = text; at != nullptr && *at != 0;)
+        {
+            char* end = nullptr;
+            const uint32_t site = uint32_t(strtoul(at, &end, 16));
+            if (end == at) break;
+            sites.push_back(site);
+            at = *end == ',' ? end + 1 : end;
+        }
+        return sites;
+    }();
+    bool tracing = false;
+    for (uint32_t site : traced) tracing |= (site == uint32_t(ctx.lr));
+    if (tracing)
+    {
+        static std::mutex mutex;
+        static std::map<uint64_t, int> targets;
+        std::lock_guard<std::mutex> lock(mutex);
+        if (targets[(uint64_t(ctx.lr) << 32) | address]++ >= 3) tracing = false;
+    }
+    if (tracing)
+    {
+        printf("trace: call from 0x%08X to 0x%08X with r3 0x%08X, r4 0x%08X, r5 0x%08X",
+            uint32_t(ctx.lr), address, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32);
+        uint32_t functions[12] = {};
+        const int count = Sampler::FunctionsOnStack(functions, 12);
+        for (int i = 1; i < count; i++) printf("%s%08X", i == 1 ? "  <- " : " ", functions[i]);
+        printf("\n");
+        fflush(stdout);
+    }
+
     if (routine != nullptr)
     {
+        const uint32_t site = uint32_t(ctx.lr);
         routine(ctx, base);
+        if (tracing)
+        {
+            printf("trace: call from 0x%08X to 0x%08X returned 0x%08X\n", site, address, ctx.r3.u32);
+            fflush(stdout);
+        }
         return;
     }
 

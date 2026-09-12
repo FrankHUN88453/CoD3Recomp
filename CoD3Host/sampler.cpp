@@ -68,34 +68,65 @@ namespace
 
     // Unwinds without debug symbols, using the exception tables the linker
     // already puts in the image.
+    //
+    // The thread is suspended only for as long as it takes to copy its
+    // registers, and is running again before the unwind starts. The unwind
+    // looks up function entries, and that lookup takes a lock inside ntdll
+    // which the suspended thread can be holding, in the middle of an
+    // exception dispatch of its own: the sampler then waits for a thread
+    // that cannot run until the sampler lets it, and the whole runtime
+    // stops behind the pair of them. Walking a copy of the registers while
+    // the thread runs on reads a stack that may be changing under it, which
+    // costs at worst one wrong sample, and never a deadlock.
+    // The unwind proper, in a function of its own with no C++ objects so it
+    // can sit inside a structured exception handler: a stale register from
+    // a thread that has moved on can point anywhere.
+    void UnwindFrames(CONTEXT* context, uint32_t* frames, int& count, int limit)
+    {
+        __try
+        {
+            for (int depth = 0; depth < 64 && count < limit; depth++)
+            {
+                const uint32_t guest = GuestFunctionAt(static_cast<uintptr_t>(context->Rip));
+                if (guest != 0)
+                {
+                    // Collapse the long runs of one function calling itself
+                    // that a deep guest call chain produces.
+                    if (count == 0 || frames[count - 1] != guest) frames[count++] = guest;
+                }
+
+                DWORD64 imageBase = 0;
+                PRUNTIME_FUNCTION entry = RtlLookupFunctionEntry(context->Rip, &imageBase, nullptr);
+                if (entry == nullptr) break;
+
+                void* handlerData = nullptr;
+                DWORD64 establisherFrame = 0;
+                RtlVirtualUnwind(UNW_FLAG_NHANDLER, imageBase, context->Rip, entry,
+                    context, &handlerData, &establisherFrame, nullptr);
+                if (context->Rip == 0) break;
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            // The snapshot was stale; what was collected before it went
+            // wrong is still a sample.
+        }
+    }
+
     void WalkStack(HANDLE thread, uint32_t* frames, int& count, int limit)
     {
         count = 0;
 
         CONTEXT context{};
         context.ContextFlags = CONTEXT_FULL;
-        if (!GetThreadContext(thread, &context)) return;
+        if (SuspendThread(thread) == DWORD(-1)) return;
+        const BOOL captured = GetThreadContext(thread, &context);
+        ResumeThread(thread);
+        if (!captured) return;
 
-        for (int depth = 0; depth < 64 && count < limit; depth++)
-        {
-            const uint32_t guest = GuestFunctionAt(static_cast<uintptr_t>(context.Rip));
-            if (guest != 0)
-            {
-                // Collapse the long runs of one function calling itself that a
-                // deep guest call chain produces.
-                if (count == 0 || frames[count - 1] != guest) frames[count++] = guest;
-            }
-
-            DWORD64 imageBase = 0;
-            PRUNTIME_FUNCTION entry = RtlLookupFunctionEntry(context.Rip, &imageBase, nullptr);
-            if (entry == nullptr) break;
-
-            void* handlerData = nullptr;
-            DWORD64 establisherFrame = 0;
-            RtlVirtualUnwind(UNW_FLAG_NHANDLER, imageBase, context.Rip, entry,
-                &context, &handlerData, &establisherFrame, nullptr);
-            if (context.Rip == 0) break;
-        }
+        Kernel::SetUnwinding(true);
+        UnwindFrames(&context, frames, count, limit);
+        Kernel::SetUnwinding(false);
     }
 
     void SampleOnce()
@@ -130,9 +161,7 @@ namespace
                 uint32_t frames[10] = {};
                 int count = 0;
 
-                if (SuspendThread(thread.handle) == DWORD(-1)) break;
                 WalkStack(thread.handle, frames, count, 10);
-                ResumeThread(thread.handle);
 
                 if (count == 0) { outside++; }
                 else

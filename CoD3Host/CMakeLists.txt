@@ -46,6 +46,7 @@ add_executable(CoD3 WIN32
     "input.cpp"
     "audio_out.cpp"
     "parallel.cpp"
+    "watchdog.cpp"
     "resources/CoD3.rc")
 
 # A console application: setup is interactive and the import trap has to be
@@ -57,6 +58,7 @@ target_link_libraries(CoD3 PRIVATE
     XenonUtils      # XEX parsing, reused so the loader matches the recompiler
     ole32           # IFileOpenDialog
     winmm           # sound out
+    dbghelp         # the watchdog's stack walks
     shell32)
 
 target_compile_definitions(CoD3 PRIVATE
@@ -67,3 +69,9 @@ target_compile_definitions(CoD3 PRIVATE
 # kernel_stubs.cpp is one line per import and will shrink as imports get
 # implemented; the unused parameter warnings there are not interesting.
 target_compile_options(CoD3 PRIVATE -Wno-unused-parameter)
+
+# Debug information for the host alone, so the watchdog can name the
+# functions on a stuck thread's stack. The recompiled library stays as it
+# is: its symbols would be gigabytes and say nothing a guest address does not.
+target_compile_options(CoD3 PRIVATE -g -gcodeview)
+target_link_options(CoD3 PRIVATE /DEBUG)

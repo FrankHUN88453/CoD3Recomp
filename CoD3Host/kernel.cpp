@@ -54,9 +54,17 @@ namespace
         }
     }
 
+    thread_local bool t_unwinding = false;
+
     LONG CALLBACK GuestFaultHandler(EXCEPTION_POINTERS* info)
     {
         const auto* record = info->ExceptionRecord;
+
+        // A sampler or the watchdog walking a running thread's stack from a
+        // snapshot of its registers can read through a stale pointer. That
+        // is theirs to catch, not a guest fault.
+        if (t_unwinding && record->ExceptionCode != EXCEPTION_SINGLE_STEP)
+            return EXCEPTION_CONTINUE_SEARCH;
 
         // A hardware watch fires as a single step. The processor has already
         // done the write, so reporting and continuing is all that is wanted.
@@ -841,8 +849,50 @@ namespace
     std::map<uint32_t, History> g_histories;
 }
 
+namespace
+{
+    // COD3_TRACEKERNEL=N prints the next N kernel calls, every thread, with
+    // the return address, from the moment Kernel::StartKernelTrace is called:
+    // the whole conversation between the title and the kernel over a short
+    // stretch, which is how a player that gives up in a few milliseconds
+    // says why.
+    std::atomic<int> g_kernelTraceLeft{ 0 };
+}
+
+void Kernel::StartKernelTrace()
+{
+    const char* text = getenv("COD3_TRACEKERNEL");
+    if (text == nullptr) return;
+    int expected = 0;
+    const int count = int(strtol(text, nullptr, 10));
+    if (count > 0 && g_kernelTraceLeft.compare_exchange_strong(expected, count))
+    {
+        printf("k: tracing the next %d kernel calls\n", count);
+        fflush(stdout);
+    }
+}
+
 void Kernel::CountImportOn(const char* name, uint32_t subject)
 {
+    if (g_kernelTraceLeft.load(std::memory_order_relaxed) > 0 &&
+        strstr(name, "CriticalSection") == nullptr &&   // thousands a second, all alike
+        !(subject == 0x100 && (name[2] == 'W' || name[2] == 'R')) &&   // the job lock, polled
+        g_kernelTraceLeft.fetch_sub(1) > 0)
+    {
+        const PPCContext* context = CurrentContext();
+        printf("k: %5u %s(0x%08X) from 0x%08X", GetCurrentThreadId(), name, subject,
+            context != nullptr ? uint32_t(context->lr) : 0u);
+        // A dispatcher object in guest memory: its header says its type and
+        // its signal state, which is what a wait that never ends is about.
+        if (name[0] == 'K' && name[1] == 'e' && subject >= 0x10000u && subject < 0xC0000000u)
+            printf("  [%08X %08X]", Guest::Read32(Guest::Base, subject),
+                Guest::Read32(Guest::Base, subject + 4));
+        uint32_t functions[14] = {};
+        const int count = Sampler::FunctionsOnStack(functions, 14);
+        for (int i = 1; i < count; i++) printf("%s%08X", i == 1 ? "  <- " : " ", functions[i]);
+        printf("\n");
+    }
+
     // Every kernel call is a place a thread can hand its hardware thread over.
     // Putting the check here rather than in a handful of chosen imports is what
     // makes the sharing actually happen: a thread that only ever calls one
@@ -890,6 +940,9 @@ void Kernel::DumpRequested()
     }
     fflush(stdout);
 }
+
+void Kernel::SetUnwinding(bool unwinding) { t_unwinding = unwinding; }
+bool Kernel::IsUnwinding() { return t_unwinding; }
 
 void Kernel::SetCurrentContext(PPCContext* context)
 {

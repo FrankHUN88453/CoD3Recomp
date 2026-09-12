@@ -20,6 +20,7 @@
 #include <thread>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <map>
 #include <mutex>
 
@@ -34,6 +35,23 @@ namespace
 
     std::mutex g_audioMutex;
     std::map<uint32_t, bool> g_contexts;   // address -> enabled
+
+    // COD3_XMATRACE prints every call on the codec with its context and
+    // arguments, which is the only way to see how a title paces a stream.
+    bool XmaTrace()
+    {
+        static const bool on = getenv("COD3_XMATRACE") != nullptr;
+        return on;
+    }
+    void Trace(const char* name, const PPCContext& ctx)
+    {
+        if (!XmaTrace()) return;
+        static std::atomic<int> count{ 0 };
+        if (count.fetch_add(1) >= 400) return;
+        printf("xma: %s(0x%08X, 0x%08X, 0x%08X) from 0x%08X\n",
+            name, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, uint32_t(ctx.lr));
+        fflush(stdout);
+    }
 
     // Where each context's description lives, as the title handed it over.
     std::map<uint32_t, uint32_t> g_initialisers;
@@ -163,7 +181,7 @@ uint64_t Kernel::AudioCallbacks() { return g_callbacks.load(); }
 
 // X_RESULT XMACreateContext(ULONG* contextOut, ...)
 PPC_FUNC(__imp__XMACreateContext)
-{
+{ Trace("XMACreateContext", ctx);
     Kernel::CountImport("XMACreateContext");
     std::lock_guard<std::mutex> lock(g_audioMutex);
 
@@ -181,7 +199,7 @@ PPC_FUNC(__imp__XMACreateContext)
 
 // X_RESULT XMAReleaseContext(ULONG context)
 PPC_FUNC(__imp__XMAReleaseContext)
-{
+{ Trace("XMAReleaseContext", ctx);
     Kernel::CountImport("XMAReleaseContext");
     std::lock_guard<std::mutex> lock(g_audioMutex);
     g_contexts.erase(ctx.r3.u32);
@@ -196,7 +214,7 @@ PPC_FUNC(__imp__XMAReleaseContext)
 // data is and where the decoded samples are to go, so nothing downstream could
 // work without it.
 PPC_FUNC(__imp__XMAInitializeContext)
-{
+{ Trace("XMAInitializeContext", ctx);
     Kernel::CountImport("XMAInitializeContext");
 
     const uint32_t context = ctx.r3.u32;
@@ -207,7 +225,7 @@ PPC_FUNC(__imp__XMAInitializeContext)
 
     {
         static std::atomic<int> announced{ 0 };
-        if (announced.fetch_add(1) < 3 && parameters != 0)
+        if ((announced.fetch_add(1) < 3 || XmaTrace()) && parameters != 0)
         {
             printf("xma: context 0x%08X described from 0x%08X:\n  ",
                 context, parameters);
@@ -231,7 +249,7 @@ PPC_FUNC(__imp__XMAInitializeContext)
 
 // X_RESULT XMAEnableContext(ULONG context)
 PPC_FUNC(__imp__XMAEnableContext)
-{
+{ Trace("XMAEnableContext", ctx);
     Kernel::CountImport("XMAEnableContext");
 
     // What the title put in the context before asking for it to be decoded.
@@ -263,7 +281,7 @@ PPC_FUNC(__imp__XMAEnableContext)
 
 // X_RESULT XMADisableContext(ULONG context, BOOL wait)
 PPC_FUNC(__imp__XMADisableContext)
-{
+{ Trace("XMADisableContext", ctx);
     Kernel::CountImport("XMADisableContext");
     std::lock_guard<std::mutex> lock(g_audioMutex);
     g_contexts[ctx.r3.u32] = false;
@@ -275,11 +293,11 @@ PPC_FUNC(__imp__XMADisableContext)
 // clear the flag. Reporting every input as already consumed and every output
 // as never ready keeps it feeding the decoder without ever blocking on one.
 
-PPC_FUNC(__imp__XMAIsInputBuffer0Valid)  { ctx.r3.u32 = 0; }
-PPC_FUNC(__imp__XMAIsInputBuffer1Valid)  { ctx.r3.u32 = 0; }
+PPC_FUNC(__imp__XMAIsInputBuffer0Valid)  { Trace("XMAIsInputBuffer0Valid", ctx); ctx.r3.u32 = 0; }
+PPC_FUNC(__imp__XMAIsInputBuffer1Valid)  { Trace("XMAIsInputBuffer1Valid", ctx); ctx.r3.u32 = 0; }
 // Whether there is decoded audio waiting. There is, and it is silent.
 PPC_FUNC(__imp__XMAIsOutputBufferValid)
-{
+{ Trace("XMAIsOutputBufferValid", ctx);
     std::lock_guard<std::mutex> lock(g_audioMutex);
 
     auto enabled = g_contexts.find(ctx.r3.u32);
@@ -307,26 +325,26 @@ PPC_FUNC(__imp__XMAIsOutputBufferValid)
     ctx.r3.u32 = (decoder.writeOffset != decoder.readOffset) ? 1u : 0u;
 }
 
-PPC_FUNC(__imp__XMASetInputBuffer0Valid) { ctx.r3.u32 = X_ERROR_SUCCESS; }
-PPC_FUNC(__imp__XMASetInputBuffer1Valid) { ctx.r3.u32 = X_ERROR_SUCCESS; }
-PPC_FUNC(__imp__XMASetOutputBufferValid) { ctx.r3.u32 = X_ERROR_SUCCESS; }
+PPC_FUNC(__imp__XMASetInputBuffer0Valid) { Trace("XMASetInputBuffer0Valid", ctx); ctx.r3.u32 = X_ERROR_SUCCESS; }
+PPC_FUNC(__imp__XMASetInputBuffer1Valid) { Trace("XMASetInputBuffer1Valid", ctx); ctx.r3.u32 = X_ERROR_SUCCESS; }
+PPC_FUNC(__imp__XMASetOutputBufferValid) { Trace("XMASetOutputBufferValid", ctx); ctx.r3.u32 = X_ERROR_SUCCESS; }
 
-PPC_FUNC(__imp__XMAGetInputBufferReadOffset)  { ctx.r3.u32 = 0; }
+PPC_FUNC(__imp__XMAGetInputBufferReadOffset)  { Trace("XMAGetInputBufferReadOffset", ctx); ctx.r3.u32 = 0; }
 PPC_FUNC(__imp__XMAGetOutputBufferReadOffset)
-{
+{ Trace("XMAGetOutputBufferReadOffset", ctx);
     std::lock_guard<std::mutex> lock(g_audioMutex);
     ctx.r3.u32 = DecoderFor(base, ctx.r3.u32).readOffset;
 }
 
 PPC_FUNC(__imp__XMAGetOutputBufferWriteOffset)
-{
+{ Trace("XMAGetOutputBufferWriteOffset", ctx);
     std::lock_guard<std::mutex> lock(g_audioMutex);
     ctx.r3.u32 = DecoderFor(base, ctx.r3.u32).writeOffset;
 }
 
-PPC_FUNC(__imp__XMASetInputBufferReadOffset)  { ctx.r3.u32 = X_ERROR_SUCCESS; }
+PPC_FUNC(__imp__XMASetInputBufferReadOffset)  { Trace("XMASetInputBufferReadOffset", ctx); ctx.r3.u32 = X_ERROR_SUCCESS; }
 PPC_FUNC(__imp__XMASetOutputBufferReadOffset)
-{
+{ Trace("XMASetOutputBufferReadOffset", ctx);
     std::lock_guard<std::mutex> lock(g_audioMutex);
     Decoder& decoder = DecoderFor(base, ctx.r3.u32);
     if (decoder.outputBlocks != 0) decoder.readOffset = ctx.r4.u32 % decoder.outputBlocks;

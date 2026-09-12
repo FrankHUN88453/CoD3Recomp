@@ -279,6 +279,7 @@ int Run(int argc, char** argv)
     Scheduler::Attach(Guest::CurrentProcessor(ctx));
     Kernel::RegisterEntryThread();
     Sampler::Start(10);
+    Kernel::StartWatchdog();
 
     // Whatever ends this process, say so. A run that simply stops says nothing
     // about whether the title asked to quit or something ended it.
