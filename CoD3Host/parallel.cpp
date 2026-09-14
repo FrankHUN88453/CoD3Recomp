@@ -5,14 +5,22 @@
 #include <cstdio>
 #include <atomic>
 #include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
 
 namespace
 {
-    // The batch in flight. Workers take pieces from it with one atomic add
+    // A batch of pieces. Workers take pieces from it with one atomic add
     // each, so handing out a piece costs nothing worth measuring.
+    //
+    // Each call makes a batch of its own and never changes it, and a worker
+    // holds on to the one it was woken for. That is what keeps a worker
+    // that is late leaving one batch from taking pieces of the next with
+    // that batch's end or grain: the pieces then came out a different size
+    // from the count the caller was waiting on, and the wait either never
+    // ended or ended early with rows still being drawn.
     struct Batch
     {
         const std::function<void(int, int)>* work = nullptr;
@@ -20,13 +28,13 @@ namespace
         int end = 0;
         int grain = 1;
         std::atomic<int> pending{ 0 };   // pieces taken and not yet finished
-        std::atomic<int> generation{ 0 };
     };
 
     std::mutex g_mutex;
     std::condition_variable g_wake;
     std::condition_variable g_done;
-    Batch g_batch;
+    std::shared_ptr<Batch> g_current;    // the batch workers are woken for
+    uint64_t g_generation = 0;
     std::atomic<bool> g_quit{ false };
     std::vector<std::thread> g_threads;
     int g_width = 1;
@@ -51,18 +59,20 @@ namespace
 
     void Worker()
     {
-        int seen = 0;
+        uint64_t seen = 0;
         for (;;)
         {
+            std::shared_ptr<Batch> batch;
             {
                 std::unique_lock<std::mutex> lock(g_mutex);
                 g_wake.wait(lock, [&] {
-                    return g_quit.load() || g_batch.generation.load() != seen;
+                    return g_quit.load() || g_generation != seen;
                 });
                 if (g_quit.load()) return;
-                seen = g_batch.generation.load();
+                seen = g_generation;
+                batch = g_current;
             }
-            Drain(g_batch);
+            if (batch) Drain(*batch);
         }
     }
 
@@ -109,30 +119,34 @@ void Parallel::For(int begin, int end, int grain,
     std::lock_guard<std::mutex> own(owner);
 
     const int pieces = (rows + grain - 1) / grain;
-    g_batch.work = &work;
-    g_batch.end = end;
-    g_batch.grain = grain;
+    auto batch = std::make_shared<Batch>();
+    batch->work = &work;
+    batch->end = end;
+    batch->grain = grain;
     // The count of pieces goes in before the first piece is offered, so a
     // worker that takes one can never finish it before it was counted.
-    g_batch.pending.store(pieces, std::memory_order_relaxed);
-    g_batch.next.store(begin, std::memory_order_release);
+    batch->pending.store(pieces, std::memory_order_relaxed);
+    batch->next.store(begin, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lock(g_mutex);
-        g_batch.generation.fetch_add(1, std::memory_order_release);
+        g_current = batch;
+        g_generation++;
         g_wake.notify_all();
     }
 
-    Drain(g_batch);
+    Drain(*batch);
 
     std::unique_lock<std::mutex> lock(g_mutex);
     while (!g_done.wait_for(lock, std::chrono::seconds(2),
-               [] { return g_batch.pending.load(std::memory_order_acquire) == 0; }))
+               [&] { return batch->pending.load(std::memory_order_acquire) == 0; }))
     {
         // Two seconds with pieces outstanding and nobody working on them
         // is not a slow piece; it is the count and the work disagreeing.
         printf("parallel: waiting on %d of %d pieces, rows %d to %d in %d, next %d\n",
-            g_batch.pending.load(), pieces, begin, end, grain, g_batch.next.load());
+            batch->pending.load(), pieces, begin, end, grain, batch->next.load());
         fflush(stdout);
     }
-    g_batch.work = nullptr;
+    // Every piece is done, so no worker will call the work again; the batch
+    // itself lives on until the last worker holding it lets go.
+    if (g_current == batch) g_current.reset();
 }

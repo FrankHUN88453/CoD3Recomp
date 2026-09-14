@@ -503,7 +503,10 @@ void Window::SetFrontBuffer(uint32_t address, uint32_t width, uint32_t height)
     g_frontBufferWidth.store(width);
     g_frontBufferHeight.store(height);
 
-    if (previous != address)
+    // The first few: the title flips between two buffers every frame, and
+    // one line a frame is a log of nothing else.
+    static std::atomic<int> announced{ 0 };
+    if (previous != address && announced.fetch_add(1) < 6)
     {
         printf("window: front buffer at 0x%08X, %ux%u\n", address, width, height);
         fflush(stdout);

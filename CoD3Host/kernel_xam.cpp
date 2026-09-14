@@ -14,6 +14,8 @@
 #include "input.h"
 
 #include <cstdio>
+#include <mutex>
+#include <vector>
 #include <cstring>
 
 #include <Windows.h>
@@ -66,6 +68,13 @@ PPC_FUNC(__imp__XamUserGetName)
 PPC_FUNC(__imp__XamUserGetXUID)
 {
     Kernel::CountImport("XamUserGetXUID");
+    static std::atomic<int> announced{ 0 };
+    if (announced.fetch_add(1) < 20)
+    {
+        printf("xam: XamUserGetXUID(user %u, type 0x%X) from 0x%08X\n",
+            ctx.r3.u32, ctx.r4.u32, uint32_t(ctx.lr));
+        fflush(stdout);
+    }
     if (ctx.r3.u32 != SignedInUser || ctx.r5.u32 == 0)
     {
         ctx.r3.u32 = X_ERROR_NO_SUCH_USER;
@@ -84,6 +93,18 @@ PPC_FUNC(__imp__XamUserReadProfileSettings)
     const uint32_t settingCount = ctx.r7.u32;
     const uint32_t sizePtr = ctx.r9.u32;
     const uint32_t buffer = ctx.r10.u32;
+    static std::atomic<int> announced{ 0 };
+    if (announced.fetch_add(1) < 12)
+    {
+        printf("xam: XamUserReadProfileSettings(title 0x%08X, user %u, xuids %u/0x%08X, %u settings:",
+            ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, settingCount);
+        for (uint32_t i = 0; i < settingCount && i < 16 && ctx.r8.u32 != 0; i++)
+            printf(" %08X", Guest::Read32(base, ctx.r8.u32 + i * 4));
+        printf(", size %u, buffer 0x%08X, overlapped 0x%08X) from 0x%08X\n",
+            sizePtr != 0 ? Guest::Read32(base, sizePtr) : 0, buffer,
+            Guest::Read32(base, ctx.r1.u32 + 0x54), uint32_t(ctx.lr));
+        fflush(stdout);
+    }
 
     // The reply is a header followed by one entry per requested setting. Each
     // entry is madeup of an id, a type, and a value union; 24 bytes covers it.
@@ -237,11 +258,33 @@ PPC_FUNC(__imp__XamInputSetState)
 
 // --- Notifications ---------------------------------------------------------
 
+// The notifications the dashboard sends a title, queued for it to collect.
+//
+// A title learns who is signed in from a notification, not by asking: the
+// dashboard sends XN_SYS_SIGNINCHANGED when a profile signs in, and the
+// title's handler then reads the sign-in state and marks the user present.
+// With no notification ever arriving this title never asked, so the player
+// was never signed in as far as it knew: the profile was never read, and
+// starting a game stopped at "you are not signed in". The listener is
+// handed that notification, for the one user this runtime signs in, as
+// soon as it is created.
+namespace
+{
+    constexpr uint32_t XN_SYS_SIGNINCHANGED = 0x0000000A;
+
+    struct Notification { uint32_t id, parameter; };
+    std::mutex g_notifyMutex;
+    std::vector<Notification> g_notifications;
+}
+
 // HANDLE XamNotifyCreateListener(ULONGLONG areas)
 PPC_FUNC(__imp__XamNotifyCreateListener)
 {
     Kernel::CountImport("XamNotifyCreateListener");
-    // A handle the title can hold but that never produces anything.
+    {
+        std::lock_guard<std::mutex> lock(g_notifyMutex);
+        g_notifications.push_back({ XN_SYS_SIGNINCHANGED, 1u << SignedInUser });
+    }
     ctx.r3.u32 = 0x000F0001;
 }
 
@@ -249,9 +292,28 @@ PPC_FUNC(__imp__XamNotifyCreateListener)
 PPC_FUNC(__imp__XNotifyGetNext)
 {
     Kernel::CountImport("XNotifyGetNext");
-    if (ctx.r5.u32 != 0) Guest::Write32(base, ctx.r5.u32, 0);
-    if (ctx.r6.u32 != 0) Guest::Write32(base, ctx.r6.u32, 0);
-    ctx.r3.u32 = 0;   // no notification waiting
+    const uint32_t wanted = ctx.r4.u32;
+    Notification next{ 0, 0 };
+    bool found = false;
+    {
+        std::lock_guard<std::mutex> lock(g_notifyMutex);
+        for (auto it = g_notifications.begin(); it != g_notifications.end(); ++it)
+        {
+            if (wanted != 0 && it->id != wanted) continue;
+            next = *it;
+            g_notifications.erase(it);
+            found = true;
+            break;
+        }
+    }
+    if (ctx.r5.u32 != 0) Guest::Write32(base, ctx.r5.u32, next.id);
+    if (ctx.r6.u32 != 0) Guest::Write32(base, ctx.r6.u32, next.parameter);
+    if (found)
+    {
+        printf("xam: notification 0x%08X (0x%08X) collected\n", next.id, next.parameter);
+        fflush(stdout);
+    }
+    ctx.r3.u32 = found ? 1 : 0;
 }
 
 // --- Memory the dashboard lends the title ----------------------------------
@@ -299,10 +361,10 @@ PPC_FUNC(__imp__XamContentCreateEnumerator)
     ctx.r3.u32 = X_ERROR_NOT_FOUND;
 }
 
-PPC_FUNC(__imp__XamContentCreateEx)   { ctx.r3.u32 = X_ERROR_NOT_FOUND; }
-PPC_FUNC(__imp__XamContentClose)      { ctx.r3.u32 = X_ERROR_SUCCESS; }
-PPC_FUNC(__imp__XamContentDelete)     { ctx.r3.u32 = X_ERROR_NOT_FOUND; }
-PPC_FUNC(__imp__XamContentGetCreator) { ctx.r3.u32 = X_ERROR_NOT_FOUND; }
+PPC_FUNC(__imp__XamContentCreateEx) { Kernel::CountImport("XamContentCreateEx"); ctx.r3.u32 = X_ERROR_NOT_FOUND; }
+PPC_FUNC(__imp__XamContentClose) { Kernel::CountImport("XamContentClose"); ctx.r3.u32 = X_ERROR_SUCCESS; }
+PPC_FUNC(__imp__XamContentDelete) { Kernel::CountImport("XamContentDelete"); ctx.r3.u32 = X_ERROR_NOT_FOUND; }
+PPC_FUNC(__imp__XamContentGetCreator) { Kernel::CountImport("XamContentGetCreator"); ctx.r3.u32 = X_ERROR_NOT_FOUND; }
 
 // X_RESULT XamEnumerate(HANDLE, flags, buffer, size, itemsReturned*, overlapped)
 PPC_FUNC(__imp__XamEnumerate)
@@ -316,11 +378,11 @@ PPC_FUNC(__imp__XamEnumerate)
 // Every one answers as if the user dismissed it. A title normally treats that
 // as a valid outcome and carries on.
 
-PPC_FUNC(__imp__XamShowSigninUI)          { ctx.r3.u32 = X_ERROR_SUCCESS; }
-PPC_FUNC(__imp__XamShowDeviceSelectorUI)  { ctx.r3.u32 = X_ERROR_NOT_FOUND; }
-PPC_FUNC(__imp__XamShowMessageBoxUI)      { ctx.r3.u32 = X_ERROR_SUCCESS; }
-PPC_FUNC(__imp__XamShowMessageBoxUIEx)    { ctx.r3.u32 = X_ERROR_SUCCESS; }
-PPC_FUNC(__imp__XamShowMarketplaceUI)     { ctx.r3.u32 = X_ERROR_SUCCESS; }
+PPC_FUNC(__imp__XamShowSigninUI) { Kernel::CountImport("XamShowSigninUI"); ctx.r3.u32 = X_ERROR_SUCCESS; }
+PPC_FUNC(__imp__XamShowDeviceSelectorUI) { Kernel::CountImport("XamShowDeviceSelectorUI"); ctx.r3.u32 = X_ERROR_NOT_FOUND; }
+PPC_FUNC(__imp__XamShowMessageBoxUI) { Kernel::CountImport("XamShowMessageBoxUI"); ctx.r3.u32 = X_ERROR_SUCCESS; }
+PPC_FUNC(__imp__XamShowMessageBoxUIEx) { Kernel::CountImport("XamShowMessageBoxUIEx"); ctx.r3.u32 = X_ERROR_SUCCESS; }
+PPC_FUNC(__imp__XamShowMarketplaceUI) { Kernel::CountImport("XamShowMarketplaceUI"); ctx.r3.u32 = X_ERROR_SUCCESS; }
 
 PPC_FUNC(__imp__XamShowDirtyDiscErrorUI)
 {
@@ -334,9 +396,9 @@ PPC_FUNC(__imp__XamShowDirtyDiscErrorUI)
 
 // --- Gamer tiles -----------------------------------------------------------
 
-PPC_FUNC(__imp__XamParseGamerTileKey)   { ctx.r3.u32 = X_ERROR_FUNCTION_FAILED; }
-PPC_FUNC(__imp__XamReadTileToTexture)   { ctx.r3.u32 = X_ERROR_FUNCTION_FAILED; }
-PPC_FUNC(__imp__XamWriteGamerTile)      { ctx.r3.u32 = X_ERROR_FUNCTION_FAILED; }
+PPC_FUNC(__imp__XamParseGamerTileKey) { Kernel::CountImport("XamParseGamerTileKey"); ctx.r3.u32 = X_ERROR_FUNCTION_FAILED; }
+PPC_FUNC(__imp__XamReadTileToTexture) { Kernel::CountImport("XamReadTileToTexture"); ctx.r3.u32 = X_ERROR_FUNCTION_FAILED; }
+PPC_FUNC(__imp__XamWriteGamerTile) { Kernel::CountImport("XamWriteGamerTile"); ctx.r3.u32 = X_ERROR_FUNCTION_FAILED; }
 
 // --- Title lifetime --------------------------------------------------------
 
@@ -356,8 +418,8 @@ PPC_FUNC(__imp__XamLoaderGetLaunchDataSize)
     ctx.r3.u32 = X_ERROR_NOT_FOUND;   // nothing launched us with data
 }
 
-PPC_FUNC(__imp__XamLoaderGetLaunchData)  { ctx.r3.u32 = X_ERROR_NOT_FOUND; }
-PPC_FUNC(__imp__XamLoaderSetLaunchData)  { ctx.r3.u32 = X_ERROR_SUCCESS; }
+PPC_FUNC(__imp__XamLoaderGetLaunchData) { Kernel::CountImport("XamLoaderGetLaunchData"); ctx.r3.u32 = X_ERROR_NOT_FOUND; }
+PPC_FUNC(__imp__XamLoaderSetLaunchData) { Kernel::CountImport("XamLoaderSetLaunchData"); ctx.r3.u32 = X_ERROR_SUCCESS; }
 
 PPC_FUNC(__imp__XamLoaderLaunchTitle)
 {
@@ -411,6 +473,24 @@ PPC_FUNC(__imp__XamLoaderTerminateTitle)
 
 // --- Cross process messages ------------------------------------------------
 
-PPC_FUNC(__imp__XMsgInProcessCall)   { ctx.r3.u32 = X_ERROR_FUNCTION_FAILED; }
-PPC_FUNC(__imp__XMsgStartIORequest)  { ctx.r3.u32 = X_ERROR_FUNCTION_FAILED; }
-PPC_FUNC(__imp__XMsgStartIORequestEx){ ctx.r3.u32 = X_ERROR_FUNCTION_FAILED; }
+// X_RESULT XMsgInProcessCall(ULONG app, ULONG message, void* arg1, void* arg2)
+PPC_FUNC(__imp__XMsgInProcessCall)
+{
+    Kernel::CountImport("XMsgInProcessCall");
+    static std::atomic<int> announced{ 0 };
+    if (announced.fetch_add(1) < 20)
+    {
+        printf("xam: XMsgInProcessCall(app 0x%X, message 0x%X, 0x%08X, 0x%08X) from 0x%08X", 
+            ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, uint32_t(ctx.lr));
+        if (ctx.r5.u32 != 0)
+        {
+            printf("  arg1:");
+            for (int i = 0; i < 6; i++) printf(" %08X", Guest::Read32(base, ctx.r5.u32 + i * 4));
+        }
+        printf("\n");
+        fflush(stdout);
+    }
+    ctx.r3.u32 = X_ERROR_FUNCTION_FAILED;
+}
+PPC_FUNC(__imp__XMsgStartIORequest) { Kernel::CountImport("XMsgStartIORequest"); ctx.r3.u32 = X_ERROR_FUNCTION_FAILED; }
+PPC_FUNC(__imp__XMsgStartIORequestEx) { Kernel::CountImport("XMsgStartIORequestEx"); ctx.r3.u32 = X_ERROR_FUNCTION_FAILED; }

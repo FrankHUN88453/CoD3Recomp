@@ -1,4 +1,5 @@
 #include "input.h"
+#include "kernel.h"
 #include "window.h"
 
 #include <algorithm>
@@ -6,6 +7,8 @@
 #include <chrono>
 #include <cstdio>
 #include <mutex>
+#include <string>
+#include <vector>
 
 #include <Windows.h>
 
@@ -179,6 +182,78 @@ namespace
         return holding;
     }
 
+    // Presses from a script, for driving the title without anyone at the
+    // keyboard: COD3_PAD="5:start 8:a 9:down 10:a" presses each button at
+    // that many seconds from the start, for a quarter of a second. Names
+    // are start back a b x y up down left right ls rs; a plus joins
+    // several ("10:down+a"), and the seconds can have a decimal.
+    struct ScriptedPress { double at; uint16_t buttons; };
+    std::vector<ScriptedPress> g_script;
+    bool g_scriptParsed = false;
+    std::chrono::steady_clock::time_point g_scriptStart;
+
+    uint16_t ButtonNamed(const std::string& name)
+    {
+        static const std::pair<const char*, uint16_t> names[] = {
+            { "start", PadStart }, { "back", PadBack }, { "a", PadA }, { "b", PadB },
+            { "x", PadX }, { "y", PadY }, { "up", PadUp }, { "down", PadDown },
+            { "left", PadLeft }, { "right", PadRight },
+            { "ls", PadLeftShoulder }, { "rs", PadRightShoulder },
+        };
+        for (const auto& entry : names) if (name == entry.first) return entry.second;
+        return 0;
+    }
+
+    uint16_t ScriptedButtons()
+    {
+        if (!g_scriptParsed)
+        {
+            g_scriptParsed = true;
+            g_scriptStart = std::chrono::steady_clock::now();
+            if (const char* text = getenv("COD3_PAD"))
+            {
+                std::string all(text);
+                size_t at = 0;
+                while (at < all.size())
+                {
+                    const size_t end = all.find(' ', at);
+                    const std::string item = all.substr(at, end == std::string::npos ? std::string::npos : end - at);
+                    at = end == std::string::npos ? all.size() : end + 1;
+                    const size_t colon = item.find(':');
+                    if (colon == std::string::npos) continue;
+                    ScriptedPress press{ atof(item.substr(0, colon).c_str()), 0 };
+                    std::string rest = item.substr(colon + 1);
+                    size_t from = 0;
+                    while (from <= rest.size())
+                    {
+                        const size_t plus = rest.find('+', from);
+                        press.buttons |= ButtonNamed(rest.substr(from, plus == std::string::npos ? std::string::npos : plus - from));
+                        if (plus == std::string::npos) break;
+                        from = plus + 1;
+                    }
+                    g_script.push_back(press);
+                }
+                printf("input: %zu scripted presses from COD3_PAD\n", g_script.size());
+            }
+        }
+        if (g_script.empty()) return 0;
+        const double seconds = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - g_scriptStart).count();
+        uint16_t buttons = 0;
+        for (const ScriptedPress& press : g_script)
+        {
+            if (seconds >= press.at && seconds < press.at + 0.25)
+            {
+                buttons |= press.buttons;
+                // A press is where something is about to happen, so the
+                // kernel trace, if one was asked for, starts here.
+                static const ScriptedPress* traced = nullptr;
+                if (traced != &press) { traced = &press; Kernel::StartKernelTrace(); }
+            }
+        }
+        return buttons;
+    }
+
     // The keyboard and mouse stand in for a pad. Only while the title's own
     // window is in front, so typing anywhere else is not taken as input.
     Input::Pad ReadKeyboard()
@@ -288,6 +363,7 @@ namespace
         // plugged in and untouched used to silence the keyboard completely,
         // which looks exactly like input not working at all.
         Input::Pad pad = ReadKeyboard();
+        pad.buttons |= ScriptedButtons();
         if (g_getState != nullptr)
         {
             XInputState state{};

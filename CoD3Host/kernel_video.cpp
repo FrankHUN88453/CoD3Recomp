@@ -467,27 +467,27 @@ namespace
                                 Guest::PhysicalAlias(ringAt) + ((read + i) % dwords) * 4));
                         printf("\n");
 
-                        // The title's indirect buffer pool and the fence it
-                        // waits on before reusing part of it: the device's
-                        // fields at 0x34AC.. and the write-back block's words.
-                        const uint32_t device = video.interruptContext.load();
-                        if (device != 0)
-                        {
-                            const uint32_t blockAt = Guest::Read32(Guest::Base, device + 0x2A10);
-                            printf("  ib pool: base %08X end %08X min %08X at %08X lap %u start %08X limit %08X | gpu %08X lap %u\n",
-                                Guest::Read32(Guest::Base, device + 0x34AC), Guest::Read32(Guest::Base, device + 0x34B0),
-                                Guest::Read32(Guest::Base, device + 0x34B4), Guest::Read32(Guest::Base, device + 0x34B8),
-                                Guest::Read32(Guest::Base, device + 0x34BC), Guest::Read32(Guest::Base, device + 0x34C0),
-                                Guest::Read32(Guest::Base, device + 0x34C4), Guest::Read32(Guest::Base, device + 0x3290),
-                                Guest::Read32(Guest::Base, device + 0x3294));
-                            if (blockAt != 0)
-                            {
-                                printf("  write back block %08X:", blockAt);
-                                for (uint32_t i = 0; i < 8; i++)
-                                    printf(" %08X", Guest::Read32(Guest::Base, Guest::PhysicalAlias(blockAt) + i * 4));
-                                printf("\n");
-                            }
-                        }
+                    }
+                }
+                // The title's indirect buffer pool and the fence it
+                // waits on before reusing part of it: the device's
+                // fields at 0x34AC.. and the write-back block's words.
+                const uint32_t device = video.interruptContext.load();
+                if (device != 0)
+                {
+                    const uint32_t blockAt = Guest::Read32(Guest::Base, device + 0x2A10);
+                    printf("  ib pool: base %08X end %08X min %08X at %08X lap %u start %08X limit %08X | gpu %08X lap %u\n",
+                        Guest::Read32(Guest::Base, device + 0x34AC), Guest::Read32(Guest::Base, device + 0x34B0),
+                        Guest::Read32(Guest::Base, device + 0x34B4), Guest::Read32(Guest::Base, device + 0x34B8),
+                        Guest::Read32(Guest::Base, device + 0x34BC), Guest::Read32(Guest::Base, device + 0x34C0),
+                        Guest::Read32(Guest::Base, device + 0x34C4), Guest::Read32(Guest::Base, device + 0x3290),
+                        Guest::Read32(Guest::Base, device + 0x3294));
+                    if (blockAt != 0)
+                    {
+                        printf("  write back block %08X:", blockAt);
+                        for (uint32_t i = 0; i < 8; i++)
+                            printf(" %08X", Guest::Read32(Guest::Base, Guest::PhysicalAlias(blockAt) + i * 4));
+                        printf("\n");
                     }
                 }
                 if (g_inHandler.load())

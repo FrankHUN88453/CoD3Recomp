@@ -98,7 +98,7 @@ namespace
     // Early file activity says more about where a boot is stuck than anything
     // else, so the first requests are reported whether they succeed or not.
     std::atomic<int> g_logged{ 0 };
-    constexpr int LogLimit = 60;
+    constexpr int LogLimit = 400;
 
     void LogOpen(const std::string& guestPath, const char* result)
     {
