@@ -64,6 +64,21 @@ namespace
         if (SymFromAddr(process, pc, &displacement, symbol))
         {
             printf(" %s+0x%llx", symbol->Name, (unsigned long long)displacement);
+            // The line, for the runtime's own code: a profile by symbol says
+            // which function, and a lambda the size of the pixel loop needs
+            // more than that.
+            IMAGEHLP_LINE64 line{};
+            line.SizeOfStruct = sizeof(line);
+            DWORD lineDisplacement = 0;
+            if (SymGetLineFromAddr64(process, pc, &lineDisplacement, &line))
+            {
+                const char* file = strrchr(line.FileName, '\\');
+                printf("@%s:%lu", file != nullptr ? file + 1 : line.FileName, line.LineNumber);
+            }
+            // And the address within the module, for llvm-symbolizer, which
+            // knows what was inlined where and this does not.
+            if (const DWORD64 module = SymGetModuleBase64(process, pc))
+                printf("@+%llx", (unsigned long long)(pc - module));
             return;
         }
         const DWORD64 module = SymGetModuleBase64(process, pc);
@@ -111,7 +126,7 @@ namespace
         static bool symbols = false;
         if (!symbols)
         {
-            SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+            SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
             symbols = SymInitialize(process, nullptr, TRUE) != FALSE;
         }
 

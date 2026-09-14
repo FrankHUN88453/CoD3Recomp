@@ -49,6 +49,36 @@ namespace
     inline __m128 Load(const Vec4& value) { return _mm_load_ps(value.v); }
     inline void Store(Vec4& value, __m128 m) { _mm_store_ps(value.v, m); }
 
+    // A stored pixel or texel, alpha red green blue in the word, to and
+    // from lanes of red, green, blue and alpha in nought to one. The word's
+    // bytes in memory are blue, green, red, alpha; widening them gives lanes
+    // in that order and one shuffle puts them right.
+    inline __m128 UnpackLanes(uint32_t value)
+    {
+        const __m128i bytes = _mm_cvtepu8_epi32(_mm_cvtsi32_si128(int(value)));
+        const __m128i ordered = _mm_shuffle_epi32(bytes, _MM_SHUFFLE(3, 0, 1, 2));
+        return _mm_mul_ps(_mm_cvtepi32_ps(ordered), _mm_set1_ps(1.0f / 255.0f));
+    }
+
+    // The same without the scale to nought to one, for the bilinear filter:
+    // the filter is linear, so the four taps are mixed as they are and the
+    // result scaled once.
+    inline __m128 UnpackLanesRaw(uint32_t value)
+    {
+        const __m128i bytes = _mm_cvtepu8_epi32(_mm_cvtsi32_si128(int(value)));
+        return _mm_cvtepi32_ps(_mm_shuffle_epi32(bytes, _MM_SHUFFLE(3, 0, 1, 2)));
+    }
+
+    inline uint32_t PackLanes(__m128 colour)
+    {
+        const __m128 clamped = _mm_min_ps(_mm_set1_ps(1.0f),
+                                          _mm_max_ps(_mm_setzero_ps(), colour));
+        const __m128i ints = _mm_cvtps_epi32(_mm_mul_ps(clamped, _mm_set1_ps(255.0f)));
+        const __m128i ordered = _mm_shuffle_epi32(ints, _MM_SHUFFLE(3, 0, 1, 2));
+        const __m128i halves = _mm_packus_epi32(ordered, ordered);
+        return uint32_t(_mm_cvtsi128_si32(_mm_packus_epi16(halves, halves)));
+    }
+
     std::function<void()> ReportSkips;
     std::mutex g_statisticsMutex;
     Raster::Statistics g_statistics;
@@ -162,6 +192,14 @@ namespace
         bool fetch = false;
         uint32_t d0 = 0, d1 = 0, d2 = 0;
         DecodedAlu alu;
+
+        // A texture fetch's destination swizzle as the permute vector and
+        // the lane masks the blend instructions take: which lanes become
+        // nought, which one, and which keep what the register held.
+        alignas(16) int32_t fetchPermute[4] = { 0, 1, 2, 3 };
+        alignas(16) uint32_t fetchZero[4] = {};
+        alignas(16) uint32_t fetchOne[4] = {};
+        alignas(16) uint32_t fetchKeep[4] = {};
     };
 
     struct Program
@@ -174,6 +212,19 @@ namespace
         uint32_t registersUsed = 1;
         bool valid = false;
     };
+
+    void DecodeFetchSwizzle(DecodedStep& step)
+    {
+        const uint32_t swizzle = step.d1 & 0xFFF;
+        for (uint32_t k = 0; k < 4; k++)
+        {
+            const uint32_t selector = (swizzle >> (k * 3)) & 7;
+            step.fetchPermute[k] = selector < 4 ? int32_t(selector) : 0;
+            step.fetchZero[k] = (selector == 4 || selector == 6) ? 0xFFFFFFFFu : 0u;
+            step.fetchOne[k] = (selector == 5) ? 0xFFFFFFFFu : 0u;
+            step.fetchKeep[k] = (selector == 7) ? 0xFFFFFFFFu : 0u;
+        }
+    }
 
     DecodedSource DecodeSource(uint32_t reg, bool temporary, uint32_t swizzle, bool negate)
     {
@@ -289,6 +340,7 @@ namespace
                 step.d2 = words[slot * 3 + 2];
                 step.fetch = slot < program.isFetch.size() && program.isFetch[slot];
                 if (!step.fetch) step.alu = DecodeAlu(step.d0, step.d1, step.d2);
+                else DecodeFetchSwizzle(step);
                 program.steps.push_back(step);
             }
             if (opcode == 2 || opcode == 4 || opcode == 6) break;
@@ -798,13 +850,7 @@ namespace
         ty = std::min(int(texture.height) - 1, std::max(0, ty));
 
         if (texture.image != nullptr)
-        {
-            const uint32_t value = texture.image[size_t(ty) * texture.width + uint32_t(tx)];
-            const __m128i bytes = _mm_set_epi32(
-                int((value >> 24) & 0xFF), int(value & 0xFF),
-                int((value >> 8) & 0xFF), int((value >> 16) & 0xFF));
-            return _mm_mul_ps(_mm_cvtepi32_ps(bytes), _mm_set1_ps(1.0f / 255.0f));
-        }
+            return UnpackLanes(texture.image[size_t(ty) * texture.width + uint32_t(tx)]);
         if (texture.format == 6)
         {
             const uint32_t offset = texture.tiled
@@ -872,13 +918,17 @@ namespace
         return _mm_set_ps(alpha, colour.b, colour.g, colour.r);
     }
 
-    void RunTextureFetch(Context& context, uint32_t d0, uint32_t d1, uint32_t d2)
+    void RunTextureFetch(Context& context, const DecodedStep& step)
     {
+        const uint32_t d0 = step.d0;
         const uint32_t slot = (d0 >> 20) & 0x1F;
         const uint32_t sourceReg = (d0 >> 5) & 0x3F;
         const uint32_t destReg = (d0 >> 12) & 0x3F;
 
-        const TextureDesc& texture = DescribeTexture(slot);
+        // The slot was described when the draw started, on the command
+        // thread; a pixel only looks it up.
+        const TextureDesc& texture = g_textures[slot].decoded
+            ? g_textures[slot] : DescribeTexture(slot);
         if (!texture.usable)
         {
             context.textureNeeded = true;
@@ -889,11 +939,19 @@ namespace
         const Vec4& coordinates = context.registers[sourceReg & (MaxRegisters - 1)];
         const float u = coordinates.v[0] * float(texture.width);
         const float v = coordinates.v[1] * float(texture.height);
+        const int maxX = int(texture.width) - 1;
+        const int maxY = int(texture.height) - 1;
+        auto ClampX = [maxX](int t) { return t < 0 ? 0 : (t > maxX ? maxX : t); };
+        auto ClampY = [maxY](int t) { return t < 0 ? 0 : (t > maxY ? maxY : t); };
 
         __m128 sampled;
         if (!texture.bilinear)
         {
-            sampled = Texel(texture, int(std::floor(u)), int(std::floor(v)));
+            const int tx = ClampX(int(std::floor(u)));
+            const int ty = ClampY(int(std::floor(v)));
+            sampled = texture.image != nullptr
+                ? UnpackLanes(texture.image[size_t(ty) * texture.width + uint32_t(tx)])
+                : Texel(texture, tx, ty);
         }
         else
         {
@@ -901,51 +959,62 @@ namespace
             // distance to the centres either side of the sample point.
             const float fu = u - 0.5f;
             const float fv = v - 0.5f;
-            const int x0 = int(std::floor(fu));
-            const int y0 = int(std::floor(fv));
+            const int x0 = _mm_cvtss_si32(_mm_floor_ss(_mm_setzero_ps(), _mm_set_ss(fu)));
+            const int y0 = _mm_cvtss_si32(_mm_floor_ss(_mm_setzero_ps(), _mm_set_ss(fv)));
             const __m128 ax = _mm_set1_ps(fu - float(x0));
             const __m128 ay = _mm_set1_ps(fv - float(y0));
+            const int cx0 = ClampX(x0), cx1 = ClampX(x0 + 1);
+            const int cy0 = ClampY(y0), cy1 = ClampY(y0 + 1);
 
-            const __m128 t00 = Texel(texture, x0, y0);
-            const __m128 t10 = Texel(texture, x0 + 1, y0);
-            const __m128 t01 = Texel(texture, x0, y0 + 1);
-            const __m128 t11 = Texel(texture, x0 + 1, y0 + 1);
+            __m128 t00, t10, t01, t11;
+            __m128 scale = _mm_set1_ps(1.0f);
+            if (texture.image != nullptr)
+            {
+                const uint32_t* row0 = texture.image + size_t(cy0) * texture.width;
+                const uint32_t* row1 = texture.image + size_t(cy1) * texture.width;
+                t00 = UnpackLanesRaw(row0[cx0]);
+                t10 = UnpackLanesRaw(row0[cx1]);
+                t01 = UnpackLanesRaw(row1[cx0]);
+                t11 = UnpackLanesRaw(row1[cx1]);
+                scale = _mm_set1_ps(1.0f / 255.0f);
+            }
+            else
+            {
+                t00 = Texel(texture, cx0, cy0);
+                t10 = Texel(texture, cx1, cy0);
+                t01 = Texel(texture, cx0, cy1);
+                t11 = Texel(texture, cx1, cy1);
+            }
 
             const __m128 top = _mm_add_ps(t00, _mm_mul_ps(_mm_sub_ps(t10, t00), ax));
             const __m128 bottom = _mm_add_ps(t01, _mm_mul_ps(_mm_sub_ps(t11, t01), ax));
-            sampled = _mm_add_ps(top, _mm_mul_ps(_mm_sub_ps(bottom, top), ay));
+            sampled = _mm_mul_ps(_mm_add_ps(top, _mm_mul_ps(_mm_sub_ps(bottom, top), ay)), scale);
         }
 
         // The instruction rearranges the components on the way into the
-        // register, the same way an arithmetic source does.
-        const uint32_t swizzle = d1 & 0xFFF;
+        // register, the same way an arithmetic source does: the permutation
+        // and the lanes that become nought, one or stay as they were.
         Vec4& destination = context.registers[destReg & (MaxRegisters - 1)];
-        alignas(16) float lanes[4];
-        _mm_store_ps(lanes, sampled);
-        for (uint32_t i = 0; i < 4; i++)
-        {
-            const uint32_t selector = (swizzle >> (i * 3)) & 7;
-            switch (selector)
-            {
-            case 0: case 1: case 2: case 3:
-                destination.v[i] = lanes[selector]; break;
-            case 4: destination.v[i] = 0.0f; break;
-            case 5: destination.v[i] = 1.0f; break;
-            case 7: break;
-            default: destination.v[i] = 0.0f; break;
-            }
-        }
-        (void)d2;
+        __m128 result = _mm_permutevar_ps(sampled,
+            _mm_load_si128(reinterpret_cast<const __m128i*>(step.fetchPermute)));
+        result = _mm_blendv_ps(result, _mm_setzero_ps(),
+            _mm_load_ps(reinterpret_cast<const float*>(step.fetchZero)));
+        result = _mm_blendv_ps(result, _mm_set1_ps(1.0f),
+            _mm_load_ps(reinterpret_cast<const float*>(step.fetchOne)));
+        result = _mm_blendv_ps(result, Load(destination),
+            _mm_load_ps(reinterpret_cast<const float*>(step.fetchKeep)));
+        Store(destination, result);
     }
 
-    void RunFetch(Context& context, uint32_t d0, uint32_t d1, uint32_t d2)
+    void RunFetch(Context& context, const DecodedStep& step)
     {
+        const uint32_t d0 = step.d0, d1 = step.d1, d2 = step.d2;
         const uint32_t opcode = d0 & 0x1F;
         const uint32_t destReg = (d0 >> 12) & 0x3F;
 
         if (opcode == 1)
         {
-            RunTextureFetch(context, d0, d1, d2);
+            RunTextureFetch(context, step);
             return;
         }
         if (opcode != 0) { ReportOnce("unhandled fetch opcode", opcode); return; }
@@ -1127,7 +1196,13 @@ namespace
                 const uint32_t d2 = program.words[slot * 3 + 2];
 
                 if (slot < program.isFetch.size() && program.isFetch[slot])
-                    RunFetch(context, d0, d1, d2);
+                {
+                    DecodedStep step;
+                    step.fetch = true;
+                    step.d0 = d0; step.d1 = d1; step.d2 = d2;
+                    DecodeFetchSwizzle(step);
+                    RunFetch(context, step);
+                }
                 else
                     RunAlu(context, d0, d1, d2);
 
@@ -1297,7 +1372,7 @@ namespace
     {
         for (const DecodedStep& step : program.steps)
         {
-            if (step.fetch) RunFetch(context, step.d0, step.d1, step.d2);
+            if (step.fetch) RunFetch(context, step);
             else RunAluFast(context, step.alu);
             if (context.textureNeeded) return;
         }
@@ -1412,6 +1487,52 @@ namespace
         case 4:  return dest - source;
         default: return source + dest;
         }
+    }
+
+    // The same, on lanes of red, green, blue and alpha. A factor that names
+    // the alpha broadcasts it; one that names the channel is the lane itself,
+    // which for the alpha lane is the alpha, so the colour factors serve the
+    // three colour lanes and the alpha factors the fourth.
+    inline __m128 FactorLanes(uint32_t which, __m128 source, __m128 dest)
+    {
+        const __m128 one = _mm_set1_ps(1.0f);
+        switch (which)
+        {
+        case 0:  return _mm_setzero_ps();
+        case 1:  return one;
+        case 4:  return source;
+        case 5:  return _mm_sub_ps(one, source);
+        case 6:  return _mm_shuffle_ps(source, source, _MM_SHUFFLE(3, 3, 3, 3));
+        case 7:  return _mm_sub_ps(one, _mm_shuffle_ps(source, source, _MM_SHUFFLE(3, 3, 3, 3)));
+        case 8:  return dest;
+        case 9:  return _mm_sub_ps(one, dest);
+        case 10: return _mm_shuffle_ps(dest, dest, _MM_SHUFFLE(3, 3, 3, 3));
+        case 11: return _mm_sub_ps(one, _mm_shuffle_ps(dest, dest, _MM_SHUFFLE(3, 3, 3, 3)));
+        default: return one;
+        }
+    }
+
+    inline __m128 CombineLanes(uint32_t function, __m128 source, __m128 dest)
+    {
+        switch (function)
+        {
+        case 1:  return _mm_sub_ps(source, dest);
+        case 2:  return _mm_min_ps(source, dest);
+        case 3:  return _mm_max_ps(source, dest);
+        case 4:  return _mm_sub_ps(dest, source);
+        default: return _mm_add_ps(source, dest);
+        }
+    }
+
+    inline __m128 BlendLanes(const Blend& blend, __m128 colour, __m128 behind)
+    {
+        const __m128 rgb = CombineLanes(blend.function,
+            _mm_mul_ps(colour, FactorLanes(blend.sourceFactor, colour, behind)),
+            _mm_mul_ps(behind, FactorLanes(blend.destFactor, colour, behind)));
+        const __m128 alpha = CombineLanes(blend.alphaFunction,
+            _mm_mul_ps(colour, FactorLanes(blend.sourceAlphaFactor, colour, behind)),
+            _mm_mul_ps(behind, FactorLanes(blend.destAlphaFactor, colour, behind)));
+        return _mm_blend_ps(rgb, alpha, 0x8);
     }
 
     uint32_t Pack8888(const Vec4& colour)
@@ -1544,6 +1665,35 @@ namespace
         std::atomic<uint64_t> written{ 0 };
         std::atomic<bool> missing{ false };
 
+        // What every pixel of the triangle shares, worked out once.
+        //
+        // The weights are linear across a row, so each is its value at the
+        // first column plus a step times the column: one fused multiply-add
+        // a weight, and no error piling up along the row. The attributes are
+        // interpolated already divided by w, as vectors, so a register is
+        // three multiplies and two adds rather than a loop of scalars.
+        const float dw0dx = (by - cy) * inverseArea;
+        const float dw1dx = (cy - ay) * inverseArea;
+        const uint32_t registersUsed = pixelProgram.registersUsed;
+        alignas(16) __m128 pa[MaxInterpolators], pb[MaxInterpolators], pc[MaxInterpolators];
+        for (uint32_t i = 0; i < registersUsed; i++)
+        {
+            pa[i] = _mm_mul_ps(Load(a.interpolants[i]), _mm_set1_ps(a.inverseW));
+            pb[i] = _mm_mul_ps(Load(b.interpolants[i]), _mm_set1_ps(b.inverseW));
+            pc[i] = _mm_mul_ps(Load(c.interpolants[i]), _mm_set1_ps(c.inverseW));
+        }
+
+        // Where a pixel's samples sit in EDRAM. A sample row is a run of
+        // tiles, each a run of TileWidth samples, so along a row a sample's
+        // offset is the row's base plus its tile's and its place in the tile;
+        // the tile row and the row within the tile are fixed for the row.
+        uint32_t* const edram = Edram::Data();
+        const uint32_t capacity = Edram::Capacity();
+        const uint32_t pitchSamples = surface.pitch * surface.samplesX;
+        const uint32_t tilesPerRow = pitchSamples / Edram::TileWidth;
+        const uint32_t samplesX = surface.samplesX;
+        const uint32_t samplesY = surface.samplesY;
+
         auto rows = [&](int firstRow, int lastRow)
         {
         Context context;
@@ -1553,16 +1703,57 @@ namespace
         for (int y = firstRow; y < lastRow; y++)
         {
             if (missing.load(std::memory_order_relaxed)) break;
-            for (int x = minX; x <= maxX; x++)
-            {
-                const float px = float(x);
-                const float py = float(y);
+            const float py = float(y);
+            const float px0 = float(minX);
 
+            // The weights at the first column of the row.
+            const float w0Start = ((bx - px0) * (cy - py) - (by - py) * (cx - px0)) * inverseArea;
+            const float w1Start = ((cx - px0) * (ay - py) - (cy - py) * (ax - px0)) * inverseArea;
+
+            // The EDRAM row bases of this pixel row's sample rows, and
+            // whether every sample the row can touch is inside EDRAM, so
+            // that the writes below need no check each.
+            uint32_t rowBase[4];
+            for (uint32_t j = 0; j < samplesY; j++)
+            {
+                const uint32_t sampleY = uint32_t(y) * samplesY + j;
+                rowBase[j] = surface.baseTile * Edram::TileDwords
+                           + (sampleY / Edram::TileHeight) * tilesPerRow * Edram::TileDwords
+                           + (sampleY % Edram::TileHeight) * Edram::TileWidth;
+            }
+            const uint32_t rowDelta = samplesY > 1 ? rowBase[1] - rowBase[0] : 0;
+            const uint32_t lastSample = rowBase[samplesY - 1]
+                + ((uint32_t(maxX) * samplesX) / Edram::TileWidth) * Edram::TileDwords
+                + Edram::TileWidth;
+            const bool rowSafe = lastSample < capacity;
+
+            // The columns the row covers, from where each weight crosses
+            // nought: a weight that grows along the row starts the span, one
+            // that shrinks ends it. Widened by a pixel each side so that the
+            // test below, kept for exactness, decides the edges.
+            float spanStart = float(minX), spanEnd = float(maxX);
+            bool empty = false;
+            auto Bound = [&](float start, float slope)
+            {
+                if (slope > 0.0f) spanStart = std::max(spanStart, float(minX) - start / slope);
+                else if (slope < 0.0f) spanEnd = std::min(spanEnd, float(minX) - start / slope);
+                else if (start < 0.0f) empty = true;
+            };
+            Bound(w0Start, dw0dx);
+            Bound(w1Start, dw1dx);
+            Bound(1.0f - w0Start - w1Start, -(dw0dx + dw1dx));
+            if (empty || spanStart > spanEnd + 2.0f) continue;
+            const int xStart = std::max(minX, int(std::floor(spanStart)) - 1);
+            const int xEnd = std::min(maxX, int(std::ceil(spanEnd)) + 1);
+
+            for (int x = xStart; x <= xEnd; x++)
+            {
                 // Barycentric weights. A pixel is covered when all three have
                 // the same sign as the triangle's own area.
-                float w0 = ((bx - px) * (cy - py) - (by - py) * (cx - px)) * inverseArea;
-                float w1 = ((cx - px) * (ay - py) - (cy - py) * (ax - px)) * inverseArea;
-                float w2 = 1.0f - w0 - w1;
+                const float along = float(x - minX);
+                const float w0 = w0Start + dw0dx * along;
+                const float w1 = w1Start + dw1dx * along;
+                const float w2 = 1.0f - w0 - w1;
                 if (w0 < 0.0f || w1 < 0.0f || w2 < 0.0f) continue;
 
                 // Interpolation is done in a space where it is linear, which
@@ -1572,44 +1763,52 @@ namespace
                 const float oneOverW = a.inverseW * w0 + b.inverseW * w1
                                      + c.inverseW * w2;
                 if (oneOverW <= 0.0f) continue;
-                const float perspective = 1.0f / oneOverW;
+                const __m128 perspective = _mm_set1_ps(1.0f / oneOverW);
+                const __m128 vw0 = _mm_set1_ps(w0);
+                const __m128 vw1 = _mm_set1_ps(w1);
+                const __m128 vw2 = _mm_set1_ps(w2);
 
-                for (uint32_t i = 0; i < pixelProgram.registersUsed; i++)
-                    for (int k = 0; k < 4; k++)
-                        context.registers[i].v[k] = perspective *
-                            (a.interpolants[i].v[k] * a.inverseW * w0 +
-                             b.interpolants[i].v[k] * b.inverseW * w1 +
-                             c.interpolants[i].v[k] * c.inverseW * w2);
+                for (uint32_t i = 0; i < registersUsed; i++)
+                {
+                    const __m128 sum = _mm_add_ps(_mm_add_ps(
+                        _mm_mul_ps(pa[i], vw0), _mm_mul_ps(pb[i], vw1)), _mm_mul_ps(pc[i], vw2));
+                    Store(context.registers[i], _mm_mul_ps(sum, perspective));
+                }
 
                 context.textureNeeded = false;
                 RunPixel(pixelProgram, context);
                 if (context.textureNeeded) { missing.store(true); break; }
 
-                Vec4 colour = context.exports[0];
+                // The samples this pixel covers: the first one's offset, and
+                // the rest at fixed distances from it.
+                const uint32_t sampleX = uint32_t(x) * samplesX;
+                const uint32_t tileX = sampleX / Edram::TileWidth;
+                const uint32_t inTile = sampleX - tileX * Edram::TileWidth;
+                const uint32_t first = rowBase[0] + tileX * Edram::TileDwords + inTile;
+
+                __m128 colour = Load(context.exports[0]);
                 if (blend.needed)
                 {
-                    const Vec4 behind =
-                        Unpack8888(ReadPixel(surface, uint32_t(x), uint32_t(y)));
-                    Vec4 mixed;
-                    for (int k = 0; k < 3; k++)
-                    {
-                        const float source = colour.v[k] * Factor(blend.sourceFactor,
-                            colour.v[k], colour.v[3], behind.v[k], behind.v[3]);
-                        const float dest = behind.v[k] * Factor(blend.destFactor,
-                            colour.v[k], colour.v[3], behind.v[k], behind.v[3]);
-                        mixed.v[k] = Combine(blend.function, source, dest);
-                    }
-                    const float sourceAlpha = colour.v[3] * Factor(
-                        blend.sourceAlphaFactor, colour.v[3], colour.v[3],
-                        behind.v[3], behind.v[3]);
-                    const float destAlpha = behind.v[3] * Factor(
-                        blend.destAlphaFactor, colour.v[3], colour.v[3],
-                        behind.v[3], behind.v[3]);
-                    mixed.v[3] = Combine(blend.alphaFunction, sourceAlpha, destAlpha);
-                    colour = mixed;
+                    const uint32_t behind = first < capacity ? edram[first] : 0u;
+                    colour = BlendLanes(blend, colour, UnpackLanes(behind));
                 }
 
-                WritePixel(surface, uint32_t(x), uint32_t(y), Pack8888(colour));
+                const uint32_t packed = PackLanes(colour);
+                if (rowSafe && samplesX == 1)
+                {
+                    // The usual surface: one sample across, two down.
+                    edram[first] = packed;
+                    if (samplesY > 1) edram[first + rowDelta] = packed;
+                }
+                else
+                {
+                    for (uint32_t j = 0; j < samplesY; j++)
+                    {
+                        const uint32_t at = rowBase[j] + tileX * Edram::TileDwords + inTile;
+                        for (uint32_t i = 0; i < samplesX; i++)
+                            if (at + i < capacity) edram[at + i] = packed;
+                    }
+                }
                 writtenHere++;
             }
         }
