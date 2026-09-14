@@ -31,6 +31,7 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <condition_variable>
 #include <thread>
 
 #include <Windows.h>
@@ -40,10 +41,17 @@ namespace
     struct VideoState
     {
         std::atomic<bool> running{ false };
+
+        // Where the command thread waits for work and what wakes it.
+        std::mutex submitMutex;
+        std::condition_variable submitted;
+        std::atomic<uint64_t> submissions{ 0 };
+
         std::atomic<uint32_t> ringBuffer{ 0 };
         std::atomic<uint32_t> ringBufferSize{ 0 };
         std::atomic<uint32_t> readPointerWriteBack{ 0 };
         std::atomic<uint32_t> readPointer{ 0 };
+        std::atomic<uint64_t> swaps{ 0 };           // VdSwap calls: frames
         std::atomic<uint32_t> gpuIdentifier{ 0 };
         std::atomic<uint32_t> interruptCallback{ 0 };
         std::atomic<uint64_t> interruptsRaised{ 0 };
@@ -144,6 +152,13 @@ namespace
         Kernel::SetCurrentContext(&ctx);
         t_commandStackTop = stackTop;
         g_commandThreadId.store(GetCurrentThreadId());
+        Gpu::SetSubmitHook([]() {
+            VideoState& v = Video();
+            v.submissions.fetch_add(1, std::memory_order_release);
+            std::lock_guard<std::mutex> lock(v.submitMutex);
+            v.submitted.notify_one();
+        });
+        uint64_t seenSubmissions = 0;
         Gpu::SetInterruptRaiser([](uint32_t cpuMask) {
             VideoState& video = Video();
             const uint32_t callback = video.interruptCallback.load();
@@ -195,6 +210,17 @@ namespace
                 video.readPointer.store(consumed);
                 Gpu::WriteRegister(Gpu::ApertureBase + 0x710, consumed);
                 worked = consumed != before;
+
+                // The read pointer, published where the driver asked for it
+                // (VdEnableRingBufferRPtrWriteBack: word fifteen of the
+                // write-back block). The ring writer checks it before every
+                // packet it writes, and it is the only thing the writer
+                // checks at the wrap: with nothing ever published there the
+                // wrap looked like the GPU still reading from the start of
+                // the ring, and the title sat out its five second "GPU is
+                // hung" timeout on every lap of the ring.
+                if (const uint32_t at = video.readPointerWriteBack.load())
+                    Guest::WritePhysical32(at & ~3u, consumed);
 
                 // Packets waiting that the walk did not take. Once is a
                 // deadline; a thousand times in a row is the walk refusing
@@ -294,7 +320,17 @@ namespace
                 }
             }
 
-            if (!worked) std::this_thread::sleep_for(std::chrono::microseconds(200));
+            // Nothing done: wait for the title to move the write pointer,
+            // or a millisecond, whichever is first. The write pointer is
+            // read again before waiting because a submission between the
+            // walk and here would otherwise be sat on for that millisecond.
+            if (!worked)
+            {
+                std::unique_lock<std::mutex> lock(video.submitMutex);
+                if (video.submissions.load(std::memory_order_acquire) == seenSubmissions)
+                    video.submitted.wait_for(lock, std::chrono::milliseconds(1));
+                seenSubmissions = video.submissions.load(std::memory_order_acquire);
+            }
         }
     }
 
@@ -416,6 +452,43 @@ namespace
                         }
                         printf("\n");
                     }
+                    else if (ringAt != 0 && dwords != 0 && read + 1 >= dwords)
+                    {
+                        // The pointers at the very end of the ring: what the
+                        // last packets before the wrap were, and what sits at
+                        // the start.
+                        printf("  behind the pointer:");
+                        for (uint32_t i = 8; i >= 1; i--)
+                            printf(" %08X", Guest::Read32(Guest::Base,
+                                Guest::PhysicalAlias(ringAt) + ((read + dwords - i) % dwords) * 4));
+                        printf("  | at the pointer and after:");
+                        for (uint32_t i = 0; i < 6; i++)
+                            printf(" %08X", Guest::Read32(Guest::Base,
+                                Guest::PhysicalAlias(ringAt) + ((read + i) % dwords) * 4));
+                        printf("\n");
+
+                        // The title's indirect buffer pool and the fence it
+                        // waits on before reusing part of it: the device's
+                        // fields at 0x34AC.. and the write-back block's words.
+                        const uint32_t device = video.interruptContext.load();
+                        if (device != 0)
+                        {
+                            const uint32_t blockAt = Guest::Read32(Guest::Base, device + 0x2A10);
+                            printf("  ib pool: base %08X end %08X min %08X at %08X lap %u start %08X limit %08X | gpu %08X lap %u\n",
+                                Guest::Read32(Guest::Base, device + 0x34AC), Guest::Read32(Guest::Base, device + 0x34B0),
+                                Guest::Read32(Guest::Base, device + 0x34B4), Guest::Read32(Guest::Base, device + 0x34B8),
+                                Guest::Read32(Guest::Base, device + 0x34BC), Guest::Read32(Guest::Base, device + 0x34C0),
+                                Guest::Read32(Guest::Base, device + 0x34C4), Guest::Read32(Guest::Base, device + 0x3290),
+                                Guest::Read32(Guest::Base, device + 0x3294));
+                            if (blockAt != 0)
+                            {
+                                printf("  write back block %08X:", blockAt);
+                                for (uint32_t i = 0; i < 8; i++)
+                                    printf(" %08X", Guest::Read32(Guest::Base, Guest::PhysicalAlias(blockAt) + i * 4));
+                                printf("\n");
+                            }
+                        }
+                    }
                 }
                 if (g_inHandler.load())
                 {
@@ -510,9 +583,12 @@ namespace
                 Gpu::ReportPolling();
                 if (frame >= 600) Kernel::ReportWaitTraffic();
                 const Gpu::Statistics gpu = Gpu::Stats();
-                printf("[%4llus] frames %llu  files %llu (%.1f MB read)  threads %llu  "
+                static uint64_t swapsBefore = 0;
+                const uint64_t swaps = video.swaps.load();
+                printf("[%4llus] fps %llu  frames %llu  files %llu (%.1f MB read)  threads %llu  "
                        "allocated %.1f MB  audio %llu  packets %llu  draws %llu\n",
                     (unsigned long long)(frame / 60),
+                    (unsigned long long)(swaps - swapsBefore),
                     (unsigned long long)frame,
                     (unsigned long long)stats.filesOpened.load(),
                     stats.fileBytesRead.load() / 1048576.0,
@@ -521,6 +597,7 @@ namespace
                     (unsigned long long)stats.audioFrames.load(),
                     (unsigned long long)gpu.packets,
                     (unsigned long long)gpu.draws);
+                swapsBefore = swaps;
                 fflush(stdout);
             }
 
@@ -615,9 +692,11 @@ PPC_FUNC(__imp__VdEnableRingBufferRPtrWriteBack)
     Kernel::CountImport("VdEnableRingBufferRPtrWriteBack");
     printf("video: read pointer write back at 0x%08X, block size %u\n",
         ctx.r3.u32, ctx.r4.u32);
-    // The address where the GPU is expected to publish how far it has read.
-    // The video thread keeps this equal to the write pointer.
+    // The address where the GPU is expected to publish how far it has read,
+    // in dwords. The command thread writes its read pointer there after
+    // every walk of the ring.
     Video().readPointerWriteBack.store(ctx.r3.u32);
+    Guest::WritePhysical32(ctx.r3.u32 & ~3u, Video().readPointer.load());
 }
 
 // VOID VdSetSystemCommandBufferGpuIdentifierAddress(ULONG address)
@@ -683,8 +762,7 @@ PPC_FUNC(__imp__VdSwap)
     // VdSwap is where the title hands over a finished frame. Its arguments
     // name the buffer, so the first few are reported in full: that address is
     // what the window would present if anything had rendered into it.
-    static std::atomic<uint64_t> swaps{ 0 };
-    const uint64_t count = swaps.fetch_add(1) + 1;
+    const uint64_t count = Video().swaps.fetch_add(1) + 1;
     // The fourth argument points at the texture fetch constant that describes
     // the front buffer: its address, its size and its format. That is the one
     // piece of information the window needs to show a real frame, so it is

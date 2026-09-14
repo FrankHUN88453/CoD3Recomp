@@ -594,6 +594,126 @@ namespace
         fflush(stdout);
     }
 
+    // Block compressed textures decoded whole, once.
+    //
+    // Sampling a compressed texture meant decoding its block for every
+    // texel read, four texels a sample, and that was two thirds of the time
+    // in a frame of the title screen. Each texture is decoded to a word a
+    // texel the first time a draw samples it and read as an array after.
+    // The compressed data is looked at again on each use, a few hundred
+    // bytes spread across it, so a texture the title has since replaced
+    // at the same address is decoded afresh rather than shown stale.
+    struct DecodedTexture
+    {
+        uint32_t width = 0, height = 0, format = 0, pitch = 0;
+        bool tiled = false;
+        uint64_t fingerprint = 0;
+        std::vector<uint32_t> texels;
+    };
+    std::mutex g_decodedMutex;
+    std::map<uint32_t, DecodedTexture> g_decoded;   // by guest address
+    size_t g_decodedBytes = 0;
+
+    uint64_t Fingerprint(const uint8_t* data, size_t bytes)
+    {
+        uint64_t hash = 1469598103934665603ull;
+        const size_t step = bytes > 4096 ? bytes / 4096 : 1;
+        for (size_t at = 0; at < bytes; at += step)
+            hash = (hash ^ data[at]) * 1099511628211ull;
+        return hash ^ bytes;
+    }
+
+    uint32_t PackTexel(const Rgba& colour, float alpha)
+    {
+        auto Byte = [](float v) { return uint32_t(std::min(255.0f, std::max(0.0f, v * 255.0f + 0.5f))); };
+        return (Byte(alpha) << 24) | (Byte(colour.r) << 16) | (Byte(colour.g) << 8) | Byte(colour.b);
+    }
+
+    const uint32_t* DecodeWhole(uint32_t base, uint32_t width, uint32_t height,
+                                uint32_t pitch, uint32_t format, bool tiled)
+    {
+        const uint32_t blockBytes = (format == 18) ? 8u : 16u;
+        const uint32_t blockShift = (format == 18) ? 3u : 4u;
+        const uint32_t blocksAcross = pitch / 4;
+        const uint32_t blocksDown = (height + 3) / 4;
+        const size_t compressedBytes = size_t(blocksAcross) * blocksDown * blockBytes;
+        if (blocksAcross == 0 || compressedBytes > (64u << 20)) return nullptr;
+
+        const uint8_t* data = Guest::Base + Guest::PhysicalAlias(base);
+        const uint64_t fingerprint = Fingerprint(data, compressedBytes);
+
+        std::lock_guard<std::mutex> lock(g_decodedMutex);
+        DecodedTexture& entry = g_decoded[base];
+        if (!entry.texels.empty() && entry.width == width && entry.height == height &&
+            entry.format == format && entry.pitch == pitch && entry.tiled == tiled &&
+            entry.fingerprint == fingerprint)
+            return entry.texels.data();
+
+        // Room: a gigabyte of decoded textures is where everything is let go
+        // and decoded again as it is needed.
+        if (g_decodedBytes > (1024u << 20))
+        {
+            for (auto& other : g_decoded) if (&other.second != &entry) other.second.texels.clear();
+            g_decodedBytes = 0;
+        }
+
+        g_decodedBytes -= entry.texels.size() * 4;
+        entry.width = width; entry.height = height; entry.format = format;
+        entry.pitch = pitch; entry.tiled = tiled; entry.fingerprint = fingerprint;
+        entry.texels.assign(size_t(width) * height, 0u);
+        g_decodedBytes += entry.texels.size() * 4;
+
+        uint32_t* out = entry.texels.data();
+        const uint32_t guestBase = Guest::PhysicalAlias(base);
+        auto rows = [&](int firstBlockRow, int lastBlockRow)
+        {
+            for (uint32_t blockY = uint32_t(firstBlockRow); blockY < uint32_t(lastBlockRow); blockY++)
+            {
+                for (uint32_t blockX = 0; blockX < (width + 3) / 4; blockX++)
+                {
+                    const uint32_t blockOffset = tiled
+                        ? Edram::TiledOffset(blockX, blockY, blocksAcross, blockShift)
+                        : (blockY * blocksAcross + blockX) * blockBytes;
+                    const uint32_t block = guestBase + blockOffset;
+                    for (uint32_t inY = 0; inY < 4; inY++)
+                    {
+                        const uint32_t ty = blockY * 4 + inY;
+                        if (ty >= height) break;
+                        for (uint32_t inX = 0; inX < 4; inX++)
+                        {
+                            const uint32_t tx = blockX * 4 + inX;
+                            if (tx >= width) break;
+                            bool transparent = false;
+                            Rgba colour;
+                            float alpha = 1.0f;
+                            if (format == 18)
+                            {
+                                colour = DecodeColourBlock(block, inX, inY, true, transparent);
+                                if (transparent) alpha = 0.0f;
+                            }
+                            else if (format == 19)
+                            {
+                                const uint32_t index = inY * 4 + inX;
+                                const uint32_t byte = BlockByte(block, index / 2);
+                                const uint32_t nibble = (index & 1) ? (byte >> 4) : (byte & 0xF);
+                                alpha = nibble / 15.0f;
+                                colour = DecodeColourBlock(block + 8, inX, inY, false, transparent);
+                            }
+                            else
+                            {
+                                alpha = DecodeAlphaBlock(block, inX, inY);
+                                colour = DecodeColourBlock(block + 8, inX, inY, false, transparent);
+                            }
+                            out[size_t(ty) * width + tx] = PackTexel(colour, alpha);
+                        }
+                    }
+                }
+            }
+        };
+        Parallel::For(0, int(blocksDown), 8, rows);
+        return out;
+    }
+
     // The description of a texture slot, decoded from its fetch constant the
     // first time a draw samples it and reused for every texel after.
     const TextureDesc& DescribeTexture(uint32_t slot)
@@ -656,7 +776,14 @@ namespace
                      decoded.width > 8192 || decoded.height > 8192)
                 ReportOnce("texture size makes no sense", decoded.width);
             else
+            {
                 decoded.usable = true;
+                if (compressed)
+                {
+                    decoded.image = DecodeWhole(base, decoded.width, decoded.height,
+                                                decoded.pitch, decoded.format, decoded.tiled);
+                }
+            }
         }
         decoded.decoded = true;
         texture = decoded;
@@ -1551,6 +1678,14 @@ void Raster::Draw(uint32_t initiator, uint32_t indexBase, uint32_t indexWord)
     const Program& vertexProgram = CachedProgram(false);
     const Program& pixelProgram = CachedProgram(true);
     if (!vertexProgram.valid || !pixelProgram.valid) { Skip("no shader program bound"); return; }
+
+    // Every texture the pixel program samples, described now, on this
+    // thread: describing one decodes a compressed texture across the pool,
+    // and a pool thread asking for that in the middle of a triangle would
+    // wait on itself.
+    for (const DecodedStep& step : pixelProgram.steps)
+        if (step.fetch && (step.d0 & 0x1F) == 1)
+            DescribeTexture((step.d0 >> 20) & 0x1F);
 
     // With no index buffer the indices are simply nought upwards; with one,
     // they are read from memory at the width the initiator states.

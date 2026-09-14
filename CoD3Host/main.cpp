@@ -12,6 +12,8 @@
 #include <vector>
 
 #include <Windows.h>
+#include <timeapi.h>
+#pragma comment(lib, "winmm.lib")
 
 namespace fs = std::filesystem;
 
@@ -280,6 +282,11 @@ int Run(int argc, char** argv)
     Kernel::RegisterEntryThread();
     Sampler::Start(10);
     Kernel::StartWatchdog();
+
+    // A millisecond timer, for the vertical blank and every wait with a
+    // timeout: the default is fifteen, and a runtime built out of short
+    // sleeps runs at whatever the timer allows.
+    timeBeginPeriod(1);
 
     // Whatever ends this process, say so. A run that simply stops says nothing
     // about whether the title asked to quit or something ended it.

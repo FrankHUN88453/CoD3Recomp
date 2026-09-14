@@ -703,9 +703,17 @@ uint32_t Gpu::ReadRegister(uint32_t address)
     return found != g_registers.end() ? found->second : 0;
 }
 
+namespace
+{
+    void (*g_submitHook)() = nullptr;
+}
+
+void Gpu::SetSubmitHook(void (*hook)()) { g_submitHook = hook; }
+
 void Gpu::WriteRegister(uint32_t address, uint32_t value)
 {
     uint32_t mirrorTo = 0;
+    if (address == RegisterWritePointer && g_submitHook != nullptr) g_submitHook();
     {
         std::lock_guard<std::mutex> lock(g_registerMutex);
         g_registers[address] = value;

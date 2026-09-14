@@ -54,6 +54,11 @@ namespace Gpu
     // pointer. The budget matters because the work behind a packet is done in
     // software here: without it, one busy buffer stops the vertical blank from
     // happening at all and the whole title slows to the rate this can draw.
+    // Called, without any lock held, whenever the title moves the ring's
+    // write pointer: the command thread waits on this rather than sleeping
+    // and polling, so a submission is picked up at once.
+    void SetSubmitHook(void (*hook)());
+
     uint32_t ProcessRing(uint32_t ringBase, uint32_t ringSizeDwords,
                          uint32_t readPointer, uint32_t writePointer,
                          uint32_t budgetMicroseconds = 0);
