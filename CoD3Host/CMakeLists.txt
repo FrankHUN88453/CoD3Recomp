@@ -74,4 +74,8 @@ target_compile_options(CoD3 PRIVATE -Wno-unused-parameter)
 # functions on a stuck thread's stack. The recompiled library stays as it
 # is: its symbols would be gigabytes and say nothing a guest address does not.
 target_compile_options(CoD3 PRIVATE -g -gcodeview)
+
+# The rasteriser is the one place the instruction set matters: its shader
+# interpreter permutes lanes with AVX and blends with SSE4.1.
+set_source_files_properties(raster.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
 target_link_options(CoD3 PRIVATE /DEBUG)

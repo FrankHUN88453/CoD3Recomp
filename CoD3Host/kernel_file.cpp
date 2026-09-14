@@ -70,6 +70,12 @@ namespace
         // the console reports it: pending, with everything already filled
         // in for whoever comes to collect it.
         bool synchronous = true;
+
+        // The file's contents served from memory instead of the handle, when
+        // this is not empty: the title's default.cfg with the lines from
+        // CoD3.cfg beside the executable appended, so console variables can
+        // be set without touching the game's own files.
+        std::vector<uint8_t> overlay;
     };
 
     // The create options NtOpenFile passes in a register, for NtCreateFile,
@@ -233,9 +239,71 @@ namespace
     }
 }
 
+namespace
+{
+    fs::path g_extraConfig;   // CoD3.cfg beside the executable
+
+    // default.cfg is the first script the title runs, so lines appended to
+    // it are console commands run at start up: com_maxfps and the like.
+    // CoD3.cfg beside the executable holds them, one a line, and is made
+    // with a first line if it does not exist so the place is obvious.
+    std::vector<uint8_t> ConfigOverlay(HANDLE original, const std::string& guestPath)
+    {
+        std::string lower = guestPath;
+        for (char& c : lower) c = char(tolower(uint8_t(c)));
+        if (lower.size() < 18 || lower.compare(lower.size() - 18, 18, "config\\default.cfg") != 0)
+            return {};
+
+        std::error_code ec;
+        if (!fs::exists(g_extraConfig, ec))
+        {
+            FILE* made = _wfopen(g_extraConfig.c_str(), L"wb");
+            if (made != nullptr)
+            {
+                fputs("// Console commands run after the title's own default.cfg, one a line.\n"
+                      "seta com_maxfps 60\n", made);
+                fclose(made);
+            }
+        }
+
+        std::vector<uint8_t> extra;
+        if (FILE* file = _wfopen(g_extraConfig.c_str(), L"rb"))
+        {
+            uint8_t buffer[4096];
+            size_t got;
+            while ((got = fread(buffer, 1, sizeof(buffer), file)) > 0)
+                extra.insert(extra.end(), buffer, buffer + got);
+            fclose(file);
+        }
+        if (extra.empty()) return {};
+
+        std::vector<uint8_t> combined;
+        LARGE_INTEGER size{};
+        GetFileSizeEx(original, &size);
+        combined.resize(size_t(size.QuadPart));
+        LARGE_INTEGER zero{};
+        SetFilePointerEx(original, zero, nullptr, FILE_BEGIN);
+        DWORD read = 0;
+        if (!combined.empty())
+            ReadFile(original, combined.data(), DWORD(combined.size()), &read, nullptr);
+        combined.resize(read);
+        combined.push_back('\n');
+        combined.insert(combined.end(), extra.begin(), extra.end());
+        combined.push_back('\n');
+
+        int lines = 0;
+        for (uint8_t c : extra) if (c == '\n') lines++;
+        printf("config: %d lines from %s appended to default.cfg\n", lines,
+            g_extraConfig.string().c_str());
+        fflush(stdout);
+        return combined;
+    }
+}
+
 void Kernel::InitializeFileSystem(const fs::path& exeDirectory)
 {
     g_savesRoot = exeDirectory / "saves";
+    g_extraConfig = exeDirectory / "CoD3.cfg";
     std::error_code ec;
     fs::create_directories(g_savesRoot, ec);
 }
@@ -374,6 +442,11 @@ PPC_FUNC(__imp__NtCreateFile)
     file.guestPath = guestPath;
     file.writable = writing;
     file.synchronous = (createOptions & (FileSynchronousIoAlert | FileSynchronousIoNonAlert)) != 0;
+    if (!writing && !directory)
+    {
+        file.overlay = ConfigOverlay(host, guestPath);
+        if (!file.overlay.empty()) file.size = file.overlay.size();
+    }
 
     const uint32_t handle = g_nextFileHandle;
     g_nextFileHandle += 4;
@@ -496,18 +569,28 @@ PPC_FUNC(__imp__NtReadFile)
         return;
     }
 
-    LARGE_INTEGER position;
-    position.QuadPart = static_cast<LONGLONG>(file.position);
-    SetFilePointerEx(file.handle, position, nullptr, FILE_BEGIN);
-
-    // Straight into guest memory: file data is bytes, so there is no byte
-    // order to correct. The guest interprets the big endian contents itself.
     DWORD read = 0;
-    const BOOL ok = ReadFile(file.handle, Guest::Ptr(buffer), length, &read, nullptr);
-    if (!ok)
+    if (!file.overlay.empty())
     {
-        ctx.r3.u32 = X_STATUS_END_OF_FILE;
-        return;
+        const uint64_t available = file.overlay.size() - file.position;
+        read = DWORD(std::min<uint64_t>(length, available));
+        memcpy(Guest::Ptr(buffer), file.overlay.data() + file.position, read);
+    }
+    else
+    {
+        LARGE_INTEGER position;
+        position.QuadPart = static_cast<LONGLONG>(file.position);
+        SetFilePointerEx(file.handle, position, nullptr, FILE_BEGIN);
+
+        // Straight into guest memory: file data is bytes, so there is no
+        // byte order to correct. The guest interprets the big endian
+        // contents itself.
+        const BOOL ok = ReadFile(file.handle, Guest::Ptr(buffer), length, &read, nullptr);
+        if (!ok)
+        {
+            ctx.r3.u32 = X_STATUS_END_OF_FILE;
+            return;
+        }
     }
 
     file.position += read;

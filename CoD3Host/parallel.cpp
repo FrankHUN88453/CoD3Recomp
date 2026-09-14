@@ -1,6 +1,8 @@
 #include "parallel.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
@@ -123,6 +125,14 @@ void Parallel::For(int begin, int end, int grain,
     Drain(g_batch);
 
     std::unique_lock<std::mutex> lock(g_mutex);
-    g_done.wait(lock, [] { return g_batch.pending.load(std::memory_order_acquire) == 0; });
+    while (!g_done.wait_for(lock, std::chrono::seconds(2),
+               [] { return g_batch.pending.load(std::memory_order_acquire) == 0; }))
+    {
+        // Two seconds with pieces outstanding and nobody working on them
+        // is not a slow piece; it is the count and the work disagreeing.
+        printf("parallel: waiting on %d of %d pieces, rows %d to %d in %d, next %d\n",
+            g_batch.pending.load(), pieces, begin, end, grain, g_batch.next.load());
+        fflush(stdout);
+    }
     g_batch.work = nullptr;
 }

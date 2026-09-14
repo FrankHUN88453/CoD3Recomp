@@ -11,10 +11,12 @@
 #include "kernel.h"
 #include "gpu.h"
 #include "edram.h"
+#include "parallel.h"
 #include "window.h"
 
 #include <atomic>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <mutex>
 #include <vector>
@@ -22,6 +24,19 @@
 namespace
 {
     std::vector<uint32_t> g_edram(Edram::SizeDwords, 0u);
+
+    // The scale in force and the one the window last asked for.
+    std::atomic<uint32_t> g_scale{ 1 };
+    std::atomic<uint32_t> g_requestedScale{ 1 };
+
+    // The large copies of resolved surfaces, keyed by physical address.
+    struct ShadowImage
+    {
+        uint32_t width = 0, height = 0;
+        std::vector<uint32_t> pixels;
+    };
+    std::mutex g_shadowMutex;
+    std::map<uint32_t, ShadowImage> g_shadows;
 
     std::mutex g_statisticsMutex;
     Edram::Statistics g_statistics;
@@ -101,6 +116,24 @@ namespace
 
 uint32_t* Edram::Data() { return g_edram.data(); }
 
+uint32_t Edram::Scale() { return g_scale.load(std::memory_order_relaxed); }
+uint32_t Edram::Capacity() { return uint32_t(g_edram.size()); }
+
+void Edram::RequestScale(uint32_t scale)
+{
+    if (scale < 1) scale = 1;
+    if (scale > 4) scale = 4;
+    g_requestedScale.store(scale);
+}
+
+Edram::Shadow Edram::ShadowFor(uint32_t physicalAddress)
+{
+    std::lock_guard<std::mutex> lock(g_shadowMutex);
+    auto found = g_shadows.find(physicalAddress & 0x1FFFFFFFu);
+    if (found == g_shadows.end() || found->second.pixels.empty()) return Shadow{};
+    return Shadow{ found->second.width, found->second.height, found->second.pixels.data() };
+}
+
 Edram::Statistics Edram::Stats()
 {
     std::lock_guard<std::mutex> lock(g_statisticsMutex);
@@ -178,9 +211,12 @@ void Edram::Resolve()
     const uint32_t height = y1 - y0;
     if (width > 4096 || height > 4096) return;
 
-    const uint32_t surfacePitch = surfaceInfo & 0x3FFF;
+    // Everything on the EDRAM side is at the scale the frame was drawn at;
+    // the destination in the title's memory stays the size it expects.
+    const uint32_t scale = g_scale.load();
+    const uint32_t surfacePitch = (surfaceInfo & 0x3FFF) * scale;
     const uint32_t msaa = (surfaceInfo >> 16) & 3;
-    const uint32_t colorBaseTile = colorInfo & 0xFFF;
+    const uint32_t colorBaseTile = (colorInfo & 0xFFF) * scale * scale;
     if (surfacePitch == 0) return;
 
     const uint32_t destPitch = destPitchWord & 0x3FFF;
@@ -218,58 +254,123 @@ void Edram::Resolve()
     const uint32_t pitchSamples = surfacePitch * samplesX;
     const uint32_t sampleSelect = (control >> 4) & 7;
 
-    uint64_t written = 0;
-    uint64_t nonZero = 0;
+    std::atomic<uint64_t> written{ 0 };
+    std::atomic<uint64_t> nonZero{ 0 };
 
     if (command != 3)   // null: clear only, nothing is copied
     {
-        for (uint32_t y = 0; y < height; y++)
+        // The rows across every core. Each texel is written once, through
+        // the window the GPU and the presenter read it back through: this
+        // used to write every alias of the physical address, four stores to
+        // four distant pages a texel, and the resolve was the largest single
+        // cost of a frame.
+        uint8_t* destination = Guest::Base + Guest::PhysicalAlias(destBase);
+
+        // The large picture, one texel per scaled sample position, kept for
+        // the window and for anything that draws with this surface as a
+        // texture. Built here and swapped in under the lock when complete.
+        const uint32_t largeWidth = width * scale;
+        const uint32_t largeHeight = height * scale;
+        std::vector<uint32_t> large(size_t(largeWidth) * largeHeight);
+
+        auto rows = [&](int firstRow, int lastRow)
         {
-            for (uint32_t x = 0; x < width; x++)
+            uint64_t writtenHere = 0, nonZeroHere = 0;
+            for (uint32_t y = uint32_t(firstRow); y < uint32_t(lastRow); y++)
             {
-                const uint32_t sx = (x0 + x) * samplesX;
-                const uint32_t sy = (y0 + y) * samplesY;
-
-                // Gather the samples this pixel is made of, then combine them
-                // the way the copy control asks for.
-                uint32_t samples[4];
-                uint32_t count = 0;
-                for (uint32_t j = 0; j < samplesY; j++)
+                for (uint32_t x = 0; x < largeWidth; x++)
                 {
-                    for (uint32_t i = 0; i < samplesX; i++)
+                    const uint32_t sx = (x0 * scale + x) * samplesX;
+                    const uint32_t sy = (y0 * scale + y) * samplesY;
+
+                    // Gather the samples this pixel is made of, then combine
+                    // them the way the copy control asks for.
+                    uint32_t samples[4];
+                    uint32_t count = 0;
+                    for (uint32_t j = 0; j < samplesY; j++)
                     {
-                        const uint32_t offset =
-                            SampleOffset(sx + i, sy + j, pitchSamples, colorBaseTile);
-                        samples[count++] = offset < SizeDwords ? g_edram[offset] : 0u;
+                        for (uint32_t i = 0; i < samplesX; i++)
+                        {
+                            const uint32_t offset =
+                                SampleOffset(sx + i, sy + j, pitchSamples, colorBaseTile);
+                            samples[count++] = offset < g_edram.size() ? g_edram[offset] : 0u;
+                        }
                     }
-                }
 
-                uint32_t value = samples[0];
-                if (count > 1)
-                {
-                    if (sampleSelect < count)
+                    uint32_t value = samples[0];
+                    if (count > 1)
                     {
-                        value = samples[sampleSelect];
+                        if (sampleSelect < count)
+                        {
+                            value = samples[sampleSelect];
+                        }
+                        else
+                        {
+                            // The average of the samples, all four byte lanes
+                            // at once: the shared bits plus half the differing
+                            // ones, which is exact for two and a rounding away
+                            // for four.
+                            auto Average = [](uint32_t a, uint32_t b) {
+                                return (a & b) + (((a ^ b) & 0xFEFEFEFEu) >> 1);
+                            };
+                            value = Average(samples[0], samples[1]);
+                            if (count == 4)
+                                value = Average(value, Average(samples[2], samples[3]));
+                        }
+                    }
+
+                    if (value != 0) nonZeroHere++;
+                    writtenHere++;
+                    large[size_t(y) * largeWidth + x] = value;
+                }
+            }
+            written.fetch_add(writtenHere, std::memory_order_relaxed);
+            nonZero.fetch_add(nonZeroHere, std::memory_order_relaxed);
+        };
+        Parallel::For(0, int(largeHeight), 16, rows);
+
+        // The title's copy at its own size: each of its texels is the
+        // average of the scale by scale block behind it, so a scaled frame
+        // it reads back is a filtered one rather than a sampled one.
+        auto small = [&](int firstRow, int lastRow)
+        {
+            for (uint32_t y = uint32_t(firstRow); y < uint32_t(lastRow); y++)
+            {
+                for (uint32_t x = 0; x < width; x++)
+                {
+                    uint32_t value;
+                    if (scale == 1)
+                    {
+                        value = large[size_t(y) * largeWidth + x];
                     }
                     else
                     {
-                        // An average of the samples, one byte lane at a time.
                         uint32_t sum[4] = { 0, 0, 0, 0 };
-                        for (uint32_t s = 0; s < count; s++)
-                            for (int lane = 0; lane < 4; lane++)
-                                sum[lane] += (samples[s] >> (lane * 8)) & 0xFF;
+                        for (uint32_t j = 0; j < scale; j++)
+                            for (uint32_t i = 0; i < scale; i++)
+                            {
+                                const uint32_t texel = large[size_t(y * scale + j) * largeWidth + x * scale + i];
+                                for (int lane = 0; lane < 4; lane++)
+                                    sum[lane] += (texel >> (lane * 8)) & 0xFF;
+                            }
+                        const uint32_t n = scale * scale;
                         value = 0;
                         for (int lane = 0; lane < 4; lane++)
-                            value |= ((sum[lane] / count) & 0xFF) << (lane * 8);
+                            value |= ((sum[lane] / n) & 0xFF) << (lane * 8);
                     }
+                    const uint32_t swapped = __builtin_bswap32(value);
+                    memcpy(destination + Offset(x, y, destPitch), &swapped, 4);
                 }
-
-                if (value != 0) nonZero++;
-                written++;
-
-                const uint32_t address = destBase + Offset(x, y, destPitch);
-                Guest::WritePhysical32(address, value);
             }
+        };
+        Parallel::For(0, int(height), 16, small);
+
+        {
+            std::lock_guard<std::mutex> lock(g_shadowMutex);
+            ShadowImage& shadow = g_shadows[destBase & 0x1FFFFFFFu];
+            shadow.width = largeWidth;
+            shadow.height = largeHeight;
+            shadow.pixels.swap(large);
         }
     }
 
@@ -278,14 +379,35 @@ void Edram::Resolve()
     if (colorClear)
     {
         const uint32_t clearValue = Reg(0x2320);
-        for (uint32_t y = 0; y < height * samplesY; y++)
+        auto rows = [&](int firstRow, int lastRow)
         {
-            for (uint32_t x = 0; x < width * samplesX; x++)
+            for (uint32_t y = uint32_t(firstRow); y < uint32_t(lastRow); y++)
             {
-                const uint32_t offset = SampleOffset(
-                    (x0 * samplesX) + x, (y0 * samplesY) + y, pitchSamples, colorBaseTile);
-                if (offset < SizeDwords) g_edram[offset] = clearValue;
+                for (uint32_t x = 0; x < width * scale * samplesX; x++)
+                {
+                    const uint32_t offset = SampleOffset(
+                        (x0 * scale * samplesX) + x, (y0 * scale * samplesY) + y,
+                        pitchSamples, colorBaseTile);
+                    if (offset < g_edram.size()) g_edram[offset] = clearValue;
+                }
             }
+        };
+        Parallel::For(0, int(height * scale * samplesY), 32, rows);
+    }
+
+    // A new scale takes effect between frames: here, once this frame's
+    // picture is out. EDRAM grows to a scale's worth of the console's ten
+    // megabytes; what it held is not needed after a resolve with a clear.
+    {
+        const uint32_t requested = g_requestedScale.load();
+        if (requested != scale)
+        {
+            g_edram.assign(size_t(SizeDwords) * requested * requested, 0u);
+            g_scale.store(requested);
+            printf("edram: resolution scale %u, %ux%u, %.1f MB of EDRAM\n", requested,
+                width * requested, height * requested,
+                double(g_edram.size()) * 4.0 / (1024.0 * 1024.0));
+            fflush(stdout);
         }
     }
 
@@ -293,8 +415,8 @@ void Edram::Resolve()
         std::lock_guard<std::mutex> lock(g_statisticsMutex);
         g_statistics.resolves++;
         if (colorClear) g_statistics.clears++;
-        g_statistics.texelsWritten += written;
-        g_statistics.texelsNonZero += nonZero;
+        g_statistics.texelsWritten += written.load();
+        g_statistics.texelsNonZero += nonZero.load();
         g_statistics.lastDestination = destBase;
         g_statistics.lastWidth = width;
         g_statistics.lastHeight = height;

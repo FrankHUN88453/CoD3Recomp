@@ -195,6 +195,26 @@ namespace
                 video.readPointer.store(consumed);
                 Gpu::WriteRegister(Gpu::ApertureBase + 0x710, consumed);
                 worked = consumed != before;
+
+                // Packets waiting that the walk did not take. Once is a
+                // deadline; a thousand times in a row is the walk refusing
+                // them, and the header it stopped at says why.
+                static int refused = 0;
+                const uint32_t write = Gpu::WritePointer();
+                if (!worked && write != consumed && lockedDwords != 0)
+                {
+                    if (++refused == 1000)
+                    {
+                        const uint32_t at = Guest::PhysicalAlias(lockedRing) + (consumed % lockedDwords) * 4;
+                        printf("cp: %u dwords waiting at ring dword %u were not taken a thousand "
+                               "times running; header there 0x%08X, next 0x%08X 0x%08X\n",
+                            (write + lockedDwords - consumed) % lockedDwords, consumed,
+                            Guest::Read32(Guest::Base, at), Guest::Read32(Guest::Base, at + 4),
+                            Guest::Read32(Guest::Base, at + 8));
+                        fflush(stdout);
+                    }
+                }
+                else refused = 0;
             }
 
             // The driver's write-back block, checked for the fill pattern.

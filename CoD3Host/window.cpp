@@ -18,6 +18,7 @@
 #include "gpu.h"
 #include "edram.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -30,8 +31,25 @@
 
 namespace
 {
+    // The window opens at 720p, which is what the console put on screen,
+    // and the picture fills it at 16 by 9 whatever size it is made. The
+    // frame behind it is drawn at a whole multiple of the title's 1040 by
+    // 624 chosen from the window's height, so a window on a 4K screen gets
+    // a frame drawn at that size rather than a small one stretched.
+    // COD3_SCALE=N pins the multiple, 1 to 4.
     constexpr int Width = 1280;
     constexpr int Height = 720;
+
+    uint32_t ScaleForHeight(int clientHeight)
+    {
+        static const int pinned = []() {
+            const char* text = getenv("COD3_SCALE");
+            return text != nullptr ? int(strtol(text, nullptr, 10)) : 0;
+        }();
+        if (pinned >= 1) return uint32_t(std::min(pinned, 4));
+        const int scale = (clientHeight + 312) / 624;   // nearest whole multiple
+        return uint32_t(std::max(1, std::min(scale, 4)));
+    }
 
     std::atomic<bool> g_running{ false };
     std::atomic<HWND> g_window{ nullptr };
@@ -131,16 +149,39 @@ namespace
     // buffers from another thread: when the size changed in between, the
     // bitmap was described with one height and filled with another, which slid
     // the picture up the window and wrapped the rest around to the top.
+    // The size of what CopyFrontBuffer last put in g_pixels, which at a
+    // resolution scale is not the size the title thinks its frame is.
+    uint32_t g_copiedWidth = 0;
+    uint32_t g_copiedHeight = 0;
+
     bool CopyFrontBuffer(uint32_t& outWidth, uint32_t& outHeight)
     {
         const uint32_t address = g_frontBuffer.load();
         if (address == 0) return false;
+
+        // The frame at the resolution scale, when the resolve kept one.
+        {
+            const Edram::Shadow shadow = Edram::ShadowFor(address);
+            if (shadow.pixels != nullptr)
+            {
+                outWidth = shadow.width;
+                outHeight = shadow.height;
+                g_copiedWidth = shadow.width;
+                g_copiedHeight = shadow.height;
+                g_pixels.assign(shadow.pixels, shadow.pixels + size_t(shadow.width) * shadow.height);
+                bool anything = false;
+                for (uint32_t value : g_pixels) if (value != 0) { anything = true; break; }
+                return anything;
+            }
+        }
 
         const uint32_t width = g_frontBufferWidth.load();
         const uint32_t height = g_frontBufferHeight.load();
         if (width == 0 || height == 0 || width > 4096 || height > 4096) return false;
         outWidth = width;
         outHeight = height;
+        g_copiedWidth = width;
+        g_copiedHeight = height;
 
         uint32_t pitch = g_frontBufferPitch.load();
         if (pitch < width) pitch = width;
@@ -184,9 +225,9 @@ namespace
         char name[512];
         snprintf(name, sizeof(name), "%s-%02d.bmp", path, (counter / 120) % 24);
 
-        const int width = int(g_frontBufferWidth.load());
-        const int height = int(g_frontBufferHeight.load());
-        if (width <= 0 || height <= 0) return;
+        const int width = int(g_copiedWidth);
+        const int height = int(g_copiedHeight);
+        if (width <= 0 || height <= 0 || g_pixels.size() < size_t(width) * height) return;
 
         BITMAPFILEHEADER file{};
         BITMAPINFOHEADER info{};
@@ -315,6 +356,10 @@ namespace
             const int drawX = (width - drawWidth) / 2;
             const int drawY = (height - drawHeight) / 2;
 
+            // The next frame is drawn at the multiple this window's height
+            // asks for.
+            Edram::RequestScale(ScaleForHeight(height));
+
             // Drawn into a bitmap of its own and put on screen in one move, so
             // nothing can ever be caught half updated.
             HDC memory = CreateCompatibleDC(dc);
@@ -328,11 +373,20 @@ namespace
                          static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
             }
 
-            SetStretchBltMode(memory, HALFTONE);
-            SetBrushOrgEx(memory, 0, 0, nullptr);
-            StretchDIBits(memory, drawX, drawY, drawWidth, drawHeight,
-                0, 0, int(sourceWidth), int(sourceHeight),
-                g_pixels.data(), &info, DIB_RGB_COLORS, SRCCOPY);
+            if (drawWidth == int(sourceWidth) && drawHeight == int(sourceHeight))
+            {
+                // One to one: a plain copy, no filtering to soften anything.
+                SetDIBitsToDevice(memory, drawX, drawY, sourceWidth, sourceHeight,
+                    0, 0, 0, sourceHeight, g_pixels.data(), &info, DIB_RGB_COLORS);
+            }
+            else
+            {
+                SetStretchBltMode(memory, HALFTONE);
+                SetBrushOrgEx(memory, 0, 0, nullptr);
+                StretchDIBits(memory, drawX, drawY, drawWidth, drawHeight,
+                    0, 0, int(sourceWidth), int(sourceHeight),
+                    g_pixels.data(), &info, DIB_RGB_COLORS, SRCCOPY);
+            }
 
             DrawRate(memory);
 

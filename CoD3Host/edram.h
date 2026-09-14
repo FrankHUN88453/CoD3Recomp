@@ -24,6 +24,32 @@ namespace Edram
 
     uint32_t* Data();
 
+    // Resolution scale.
+    //
+    // The title renders 1040 by 624 and the console scaled that to the
+    // screen. Here the rasteriser can draw every surface at a whole multiple
+    // of that instead: positions, scissors, pitches and tile bases are all
+    // multiplied by the scale, EDRAM grows to hold the result, and the
+    // resolve keeps the large picture for the window while writing the
+    // title the small one it expects. The window asks for the scale that
+    // matches its own height; the change takes effect at the next resolve
+    // so no frame is drawn half at one scale and half at another.
+    uint32_t Scale();
+    void RequestScale(uint32_t scale);
+
+    // How much EDRAM there is at the current scale, in dwords.
+    uint32_t Capacity();
+
+    // The large copy of a resolved surface, by the physical address the
+    // title knows it by. Null when nothing was resolved there.
+    struct Shadow
+    {
+        uint32_t width = 0;
+        uint32_t height = 0;
+        const uint32_t* pixels = nullptr;   // packed the way EDRAM packs them
+    };
+    Shadow ShadowFor(uint32_t physicalAddress);
+
     // Where a sample lives in EDRAM. Tiles are laid out in rows across the
     // surface, and a sample sits at its own offset inside its tile.
     inline uint32_t SampleOffset(uint32_t sampleX, uint32_t sampleY,

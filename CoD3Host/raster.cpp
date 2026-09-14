@@ -34,15 +34,20 @@
 #include <string>
 #include <vector>
 
+#include <immintrin.h>
+
 namespace
 {
     constexpr uint32_t MaxInterpolators = 16;
     constexpr uint32_t MaxRegisters = 64;
 
-    struct Vec4
+    struct alignas(16) Vec4
     {
         float v[4] = { 0, 0, 0, 0 };
     };
+
+    inline __m128 Load(const Vec4& value) { return _mm_load_ps(value.v); }
+    inline void Store(Vec4& value, __m128 m) { _mm_store_ps(value.v, m); }
 
     std::function<void()> ReportSkips;
     std::mutex g_statisticsMutex;
@@ -62,9 +67,39 @@ namespace
     // Time spent inside triangles, so the rate can be stated rather than guessed.
     std::atomic<uint64_t> g_rasterNanoseconds{ 0 };
 
+    // The shader constant file as floats, the vertex half then the pixel
+    // half, so a program reads a constant with one aligned load rather than
+    // four register lookups.
+    constexpr uint32_t ConstantFloats = 512 * 4;
+    alignas(16) float g_constants[ConstantFloats];
+
+    // What each texture slot describes, decoded once a draw rather than once
+    // a texel. Slot n is decoded the first time a pixel asks for it.
+    struct TextureDesc
+    {
+        bool decoded = false;
+        bool usable = false;
+        bool tiled = false;
+        bool bilinear = false;
+        uint32_t format = 0;
+        uint32_t pitch = 0;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        const uint8_t* data = nullptr;   // host pointer to the first texel
+
+        // A resolved surface at the resolution scale, in place of the small
+        // copy the title has: what it draws with a frame stays as sharp as
+        // the frame.
+        const uint32_t* image = nullptr;
+    };
+    TextureDesc g_textures[32];
+    std::mutex g_textureMutex;
+
     void SnapshotRegisters()
     {
         Gpu::SnapshotRegisters(SnapshotFirst, SnapshotCount, g_snapshot);
+        memcpy(g_constants, &g_snapshot[0x4000 - SnapshotFirst], sizeof(g_constants));
+        for (TextureDesc& texture : g_textures) texture.decoded = false;
     }
 
     uint32_t Reg(uint32_t index)
@@ -100,15 +135,74 @@ namespace
 
     // --- programs ----------------------------------------------------------
 
+    // An arithmetic instruction with everything a pixel needs pulled out of
+    // the words once: which registers, the lane permutation for each source
+    // as a vector the permute instruction takes directly, the sign to flip,
+    // and the write masks as blend masks.
+    struct DecodedSource
+    {
+        uint8_t reg = 0;
+        bool temporary = false;
+        bool negate = false;
+        uint8_t swizzle = 0;
+        alignas(16) int32_t permute[4] = { 0, 1, 2, 3 };
+    };
+
+    struct DecodedAlu
+    {
+        uint8_t vectorOpcode = 0, scalarOpcode = 0;
+        uint8_t vectorDest = 0, scalarDest = 0;
+        uint8_t vectorMask = 0, scalarMask = 0;
+        bool exported = false, clamp = false;
+        DecodedSource source[3];
+    };
+
+    struct DecodedStep
+    {
+        bool fetch = false;
+        uint32_t d0 = 0, d1 = 0, d2 = 0;
+        DecodedAlu alu;
+    };
+
     struct Program
     {
         std::vector<uint32_t> words;
         std::vector<uint64_t> controlFlow;
         std::vector<uint8_t> isFetch;
+        std::vector<DecodedStep> steps;   // the instructions in the order they run
         uint32_t firstSlot = 0;
         uint32_t registersUsed = 1;
         bool valid = false;
     };
+
+    DecodedSource DecodeSource(uint32_t reg, bool temporary, uint32_t swizzle, bool negate)
+    {
+        DecodedSource source;
+        source.reg = uint8_t(reg & (MaxRegisters - 1));
+        source.temporary = temporary;
+        source.negate = negate;
+        source.swizzle = uint8_t(swizzle);
+        for (uint32_t i = 0; i < 4; i++)
+            source.permute[i] = int32_t((i + ((swizzle >> (i * 2)) & 3)) & 3);
+        return source;
+    }
+
+    DecodedAlu DecodeAlu(uint32_t d0, uint32_t d1, uint32_t d2)
+    {
+        DecodedAlu alu;
+        alu.vectorDest = uint8_t(d0 & 0x3F);
+        alu.scalarDest = uint8_t((d0 >> 8) & 0x3F);
+        alu.exported = ((d0 >> 15) & 1) != 0;
+        alu.vectorMask = uint8_t((d0 >> 16) & 0xF);
+        alu.scalarMask = uint8_t((d0 >> 20) & 0xF);
+        alu.scalarOpcode = uint8_t((d0 >> 26) & 0x3F);
+        alu.clamp = ((d0 >> 24) & 1) != 0;
+        alu.vectorOpcode = uint8_t((d2 >> 24) & 0x1F);
+        alu.source[0] = DecodeSource((d2 >> 16) & 0x3F, ((d2 >> 31) & 1) != 0, (d1 >> 16) & 0xFF, ((d2 >> 22) & 1) != 0);
+        alu.source[1] = DecodeSource((d2 >> 8) & 0x3F, ((d2 >> 30) & 1) != 0, (d1 >> 8) & 0xFF, ((d2 >> 14) & 1) != 0);
+        alu.source[2] = DecodeSource(d2 & 0x3F, ((d2 >> 29) & 1) != 0, d1 & 0xFF, ((d2 >> 6) & 1) != 0);
+        return alu;
+    }
 
     Program Parse(const std::vector<uint32_t>& words)
     {
@@ -177,8 +271,45 @@ namespace
         }
         program.registersUsed = std::min(highest + 1, MaxInterpolators);
 
+        // The instructions in the order Run walks them, decoded once here
+        // rather than once a pixel.
+        for (uint64_t instruction : program.controlFlow)
+        {
+            const uint32_t opcode = uint32_t(instruction >> 44) & 0xF;
+            if (opcode < 1 || opcode > 6) continue;
+            const uint32_t address = uint32_t(instruction) & 0xFFF;
+            const uint32_t count = (uint32_t(instruction) >> 12) & 7;
+            for (uint32_t i = 0; i < count; i++)
+            {
+                const uint32_t slot = address + i;
+                if (slot * 3 + 2 >= words.size()) break;
+                DecodedStep step;
+                step.d0 = words[slot * 3 + 0];
+                step.d1 = words[slot * 3 + 1];
+                step.d2 = words[slot * 3 + 2];
+                step.fetch = slot < program.isFetch.size() && program.isFetch[slot];
+                if (!step.fetch) step.alu = DecodeAlu(step.d0, step.d1, step.d2);
+                program.steps.push_back(step);
+            }
+            if (opcode == 2 || opcode == 4 || opcode == 6) break;
+        }
+
         program.valid = !program.controlFlow.empty();
         return program;
+    }
+
+    // Programs are parsed once and kept: the same few are bound for every
+    // draw of a frame, and decoding them again for each was measurable.
+    const Program& CachedProgram(bool pixel)
+    {
+        static std::mutex mutex;
+        static std::map<std::vector<uint32_t>, Program> programs;
+        const std::vector<uint32_t> words = Shaders::Microcode(pixel);
+        std::lock_guard<std::mutex> lock(mutex);
+        auto found = programs.find(words);
+        if (found == programs.end())
+            found = programs.emplace(words, Parse(words)).first;
+        return found->second;
     }
 
     // --- interpreter -------------------------------------------------------
@@ -200,9 +331,9 @@ namespace
     {
         // Vertex programs read the first 256 entries of the float file and
         // pixel programs the second 256.
-        const uint32_t base = 0x4000 + (pixel ? 256u : 0u) * 4 + index * 4;
+        const uint32_t at = ((pixel ? 256u : 0u) + (index & 255u)) * 4;
         Vec4 value;
-        for (int i = 0; i < 4; i++) value.v[i] = RegFloat(base + i);
+        memcpy(value.v, &g_constants[at], sizeof(value.v));
         return value;
     }
 
@@ -463,152 +594,179 @@ namespace
         fflush(stdout);
     }
 
+    // The description of a texture slot, decoded from its fetch constant the
+    // first time a draw samples it and reused for every texel after.
+    const TextureDesc& DescribeTexture(uint32_t slot)
+    {
+        TextureDesc& texture = g_textures[slot & 31];
+        if (texture.decoded) return texture;
+
+        std::lock_guard<std::mutex> lock(g_textureMutex);
+        if (texture.decoded) return texture;
+
+        const uint32_t word0 = Reg(0x4800 + slot * 6);
+        const uint32_t word1 = Reg(0x4800 + slot * 6 + 1);
+        const uint32_t word2 = Reg(0x4800 + slot * 6 + 2);
+        const uint32_t word3 = Reg(0x4800 + slot * 6 + 3);
+
+        TextureDesc decoded;
+        decoded.usable = false;
+        if ((word0 & 3) != 2)
+        {
+            ReportOnce("texture slot does not hold a texture", slot);
+        }
+        else
+        {
+            decoded.pitch = ((word0 >> 22) & 0x1FF) * 32;
+            decoded.tiled = ((word0 >> 31) & 1) != 0;
+            decoded.format = word1 & 0x3F;
+            const uint32_t base = (word1 & 0xFFFFF000);
+            decoded.width = (word2 & 0x1FFF) + 1;
+            decoded.height = ((word2 >> 13) & 0x1FFF) + 1;
+            decoded.data = Guest::Base + Guest::PhysicalAlias(base);
+
+            // How to sample, from the fetch constant. Zero is point and one
+            // is linear; three means take it from the fetch instruction,
+            // which for a title that never asks for point sampling means
+            // linear. Point sampling is what this did before, and it is why
+            // a menu drawn at 1040 by 624 and stretched to the window looked
+            // coarser than the console's.
+            const uint32_t magFilter = (word3 >> 19) & 3;
+            decoded.bilinear = (magFilter != 0);
+            ReportFilter(magFilter);
+
+            // 6 is four bytes a texel; 18, 19 and 20 are the block compressed
+            // forms, which is what most of a menu is made of. 2 is one byte
+            // a texel: the films arrive as three of those, the luma plane
+            // and the two chroma planes, which the title's own pixel shader
+            // turns into colour.
+            const bool compressed = (decoded.format == 18 || decoded.format == 19 || decoded.format == 20);
+            const bool oneByte = (decoded.format == 2);
+            const Edram::Shadow shadow = (decoded.format == 6) ? Edram::ShadowFor(base) : Edram::Shadow{};
+            if (shadow.pixels != nullptr && shadow.width >= decoded.width && shadow.height >= decoded.height)
+            {
+                decoded.image = shadow.pixels;
+                decoded.width = shadow.width;
+                decoded.height = shadow.height;
+                decoded.usable = true;
+            }
+            else if (decoded.format != 6 && !compressed && !oneByte)
+                ReportOnce("unhandled texture format", decoded.format);
+            else if (decoded.pitch == 0 || decoded.width == 0 || decoded.height == 0 ||
+                     decoded.width > 8192 || decoded.height > 8192)
+                ReportOnce("texture size makes no sense", decoded.width);
+            else
+                decoded.usable = true;
+        }
+        decoded.decoded = true;
+        texture = decoded;
+        return texture;
+    }
+
+    // One texel, by integer coordinates, whatever the format. Both sampling
+    // modes go through here so the formats are decoded in one place.
+    inline __m128 Texel(const TextureDesc& texture, int tx, int ty)
+    {
+        tx = std::min(int(texture.width) - 1, std::max(0, tx));
+        ty = std::min(int(texture.height) - 1, std::max(0, ty));
+
+        if (texture.image != nullptr)
+        {
+            const uint32_t value = texture.image[size_t(ty) * texture.width + uint32_t(tx)];
+            const __m128i bytes = _mm_set_epi32(
+                int((value >> 24) & 0xFF), int(value & 0xFF),
+                int((value >> 8) & 0xFF), int((value >> 16) & 0xFF));
+            return _mm_mul_ps(_mm_cvtepi32_ps(bytes), _mm_set1_ps(1.0f / 255.0f));
+        }
+        if (texture.format == 6)
+        {
+            const uint32_t offset = texture.tiled
+                ? Edram::TiledOffset(uint32_t(tx), uint32_t(ty), texture.pitch, 2)
+                : (uint32_t(ty) * texture.pitch + uint32_t(tx)) * 4;
+            uint32_t raw;
+            memcpy(&raw, texture.data + offset, 4);
+            const uint32_t value = __builtin_bswap32(raw);
+            // ARGB in the word: red is the second byte from the top.
+            const __m128i bytes = _mm_set_epi32(
+                int((value >> 24) & 0xFF), int(value & 0xFF),
+                int((value >> 8) & 0xFF), int((value >> 16) & 0xFF));
+            return _mm_mul_ps(_mm_cvtepi32_ps(bytes), _mm_set1_ps(1.0f / 255.0f));
+        }
+        if (texture.format == 2)
+        {
+            const uint32_t offset = texture.tiled
+                ? Edram::TiledOffset(uint32_t(tx), uint32_t(ty), texture.pitch, 0)
+                : (uint32_t(ty) * texture.pitch + uint32_t(tx));
+            // The one component in every lane, so whichever the shader's
+            // swizzle picks is the texel.
+            return _mm_set1_ps(texture.data[offset] / 255.0f);
+        }
+
+        // Blocks of four by four texels, addressed as blocks.
+        const uint32_t format = texture.format;
+        const uint32_t blockBytes = (format == 18) ? 8u : 16u;
+        const uint32_t blockShift = (format == 18) ? 3u : 4u;
+        const uint32_t blocksAcross = texture.pitch / 4;
+
+        const uint32_t blockX = uint32_t(tx) / 4;
+        const uint32_t blockY = uint32_t(ty) / 4;
+        const uint32_t inX = uint32_t(tx) % 4;
+        const uint32_t inY = uint32_t(ty) % 4;
+
+        const uint32_t blockOffset = texture.tiled
+            ? Edram::TiledOffset(blockX, blockY, blocksAcross, blockShift)
+            : (blockY * blocksAcross + blockX) * blockBytes;
+
+        const uint32_t block = uint32_t(texture.data - Guest::Base) + blockOffset;
+
+        bool transparent = false;
+        Rgba colour;
+        float alpha = 1.0f;
+
+        if (format == 18)
+        {
+            colour = DecodeColourBlock(block, inX, inY, true, transparent);
+            if (transparent) alpha = 0.0f;
+        }
+        else if (format == 19)
+        {
+            // Four bits a texel, straight through.
+            const uint32_t index = inY * 4 + inX;
+            const uint32_t byte = BlockByte(block, index / 2);
+            const uint32_t nibble = (index & 1) ? (byte >> 4) : (byte & 0xF);
+            alpha = nibble / 15.0f;
+            colour = DecodeColourBlock(block + 8, inX, inY, false, transparent);
+        }
+        else
+        {
+            alpha = DecodeAlphaBlock(block, inX, inY);
+            colour = DecodeColourBlock(block + 8, inX, inY, false, transparent);
+        }
+        return _mm_set_ps(alpha, colour.b, colour.g, colour.r);
+    }
+
     void RunTextureFetch(Context& context, uint32_t d0, uint32_t d1, uint32_t d2)
     {
         const uint32_t slot = (d0 >> 20) & 0x1F;
         const uint32_t sourceReg = (d0 >> 5) & 0x3F;
         const uint32_t destReg = (d0 >> 12) & 0x3F;
 
-        const uint32_t word0 = Reg(0x4800 + slot * 6);
-        const uint32_t word1 = Reg(0x4800 + slot * 6 + 1);
-        const uint32_t word2 = Reg(0x4800 + slot * 6 + 2);
-
-        if ((word0 & 3) != 2)
+        const TextureDesc& texture = DescribeTexture(slot);
+        if (!texture.usable)
         {
             context.textureNeeded = true;
-            ReportOnce("texture slot does not hold a texture", slot);
-            return;
-        }
-
-        const uint32_t pitch = ((word0 >> 22) & 0x1FF) * 32;
-        const bool tiled = ((word0 >> 31) & 1) != 0;
-        const uint32_t format = word1 & 0x3F;
-        const uint32_t base = (word1 & 0xFFFFF000);
-        const uint32_t width = (word2 & 0x1FFF) + 1;
-        const uint32_t height = ((word2 >> 13) & 0x1FFF) + 1;
-
-        // 6 is four bytes a texel; 18, 19 and 20 are the block compressed
-        // forms, which is what most of a menu is made of. 2 is one byte a
-        // texel: the films arrive as three of those, the luma plane and the
-        // two chroma planes, which the title's own pixel shader turns into
-        // colour.
-        const bool compressed = (format == 18 || format == 19 || format == 20);
-        const bool oneByte = (format == 2);
-        if (format != 6 && !compressed && !oneByte)
-        {
-            context.textureNeeded = true;
-            ReportOnce("unhandled texture format", format);
-            return;
-        }
-        if (pitch == 0 || width == 0 || height == 0 || width > 8192 || height > 8192)
-        {
-            context.textureNeeded = true;
-            ReportOnce("texture size makes no sense", width);
             return;
         }
 
         // Where in the texture this pixel lands.
         const Vec4& coordinates = context.registers[sourceReg & (MaxRegisters - 1)];
-        const float u = coordinates.v[0] * float(width);
-        const float v = coordinates.v[1] * float(height);
+        const float u = coordinates.v[0] * float(texture.width);
+        const float v = coordinates.v[1] * float(texture.height);
 
-        // One texel, by integer coordinates, whatever the format. Both sampling
-        // modes go through here so the formats are decoded in one place.
-        auto texel = [&](int tx, int ty) -> Vec4
+        __m128 sampled;
+        if (!texture.bilinear)
         {
-            tx = std::min(int(width) - 1, std::max(0, tx));
-            ty = std::min(int(height) - 1, std::max(0, ty));
-
-            Vec4 out{};
-            if (compressed)
-            {
-                // Blocks of four by four texels, addressed as blocks.
-                const uint32_t blockBytes = (format == 18) ? 8u : 16u;
-                const uint32_t blockShift = (format == 18) ? 3u : 4u;
-                const uint32_t blocksAcross = pitch / 4;
-
-                const uint32_t blockX = uint32_t(tx) / 4;
-                const uint32_t blockY = uint32_t(ty) / 4;
-                const uint32_t inX = uint32_t(tx) % 4;
-                const uint32_t inY = uint32_t(ty) % 4;
-
-                const uint32_t blockOffset = tiled
-                    ? Edram::TiledOffset(blockX, blockY, blocksAcross, blockShift)
-                    : (blockY * blocksAcross + blockX) * blockBytes;
-
-                const uint32_t block = Guest::PhysicalAlias(base) + blockOffset;
-
-                bool transparent = false;
-                Rgba colour;
-                float alpha = 1.0f;
-
-                if (format == 18)
-                {
-                    colour = DecodeColourBlock(block, inX, inY, true, transparent);
-                    if (transparent) alpha = 0.0f;
-                }
-                else if (format == 19)
-                {
-                    // Four bits a texel, straight through.
-                    const uint32_t index = inY * 4 + inX;
-                    const uint32_t byte = BlockByte(block, index / 2);
-                    const uint32_t nibble = (index & 1) ? (byte >> 4) : (byte & 0xF);
-                    alpha = nibble / 15.0f;
-                    colour = DecodeColourBlock(block + 8, inX, inY, false, transparent);
-                }
-                else
-                {
-                    alpha = DecodeAlphaBlock(block, inX, inY);
-                    colour = DecodeColourBlock(block + 8, inX, inY, false, transparent);
-                }
-
-                out.v[0] = colour.r;
-                out.v[1] = colour.g;
-                out.v[2] = colour.b;
-                out.v[3] = alpha;
-            }
-            else if (oneByte)
-            {
-                const uint32_t offset = tiled
-                    ? Edram::TiledOffset(uint32_t(tx), uint32_t(ty), pitch, 0)
-                    : (uint32_t(ty) * pitch + uint32_t(tx));
-                const float value = Guest::Base[Guest::PhysicalAlias(base) + offset] / 255.0f;
-                // The one component in every lane, so whichever the shader's
-                // swizzle picks is the texel.
-                out.v[0] = out.v[1] = out.v[2] = out.v[3] = value;
-            }
-            else
-            {
-                const uint32_t offset = tiled
-                    ? Edram::TiledOffset(uint32_t(tx), uint32_t(ty), pitch, 2)
-                    : (uint32_t(ty) * pitch + uint32_t(tx)) * 4;
-
-                const uint32_t address = Guest::PhysicalAlias(base) + offset;
-                const uint32_t value = Guest::Read32(Guest::Base, address);
-
-                out.v[0] = ((value >> 16) & 0xFF) / 255.0f;
-                out.v[1] = ((value >> 8) & 0xFF) / 255.0f;
-                out.v[2] = (value & 0xFF) / 255.0f;
-                out.v[3] = ((value >> 24) & 0xFF) / 255.0f;
-            }
-            return out;
-        };
-
-        // How to sample, from the fetch constant. Zero is point and one is
-        // linear; three means take it from the fetch instruction, which for a
-        // title that never asks for point sampling means linear. Point sampling
-        // is what this did before, and it is why a menu drawn at 1040 by 624
-        // and stretched to the window looked coarser than the console's.
-        const uint32_t word3 = Reg(0x4800 + slot * 6 + 3);
-        const uint32_t magFilter = (word3 >> 19) & 3;
-        const bool bilinear = (magFilter != 0);
-
-        ReportFilter(magFilter);
-
-        Vec4 sampled;
-        if (!bilinear)
-        {
-            sampled = texel(int(std::floor(u)), int(std::floor(v)));
+            sampled = Texel(texture, int(std::floor(u)), int(std::floor(v)));
         }
         else
         {
@@ -618,33 +776,32 @@ namespace
             const float fv = v - 0.5f;
             const int x0 = int(std::floor(fu));
             const int y0 = int(std::floor(fv));
-            const float ax = fu - float(x0);
-            const float ay = fv - float(y0);
+            const __m128 ax = _mm_set1_ps(fu - float(x0));
+            const __m128 ay = _mm_set1_ps(fv - float(y0));
 
-            const Vec4 t00 = texel(x0, y0);
-            const Vec4 t10 = texel(x0 + 1, y0);
-            const Vec4 t01 = texel(x0, y0 + 1);
-            const Vec4 t11 = texel(x0 + 1, y0 + 1);
+            const __m128 t00 = Texel(texture, x0, y0);
+            const __m128 t10 = Texel(texture, x0 + 1, y0);
+            const __m128 t01 = Texel(texture, x0, y0 + 1);
+            const __m128 t11 = Texel(texture, x0 + 1, y0 + 1);
 
-            for (int i = 0; i < 4; i++)
-            {
-                const float top = t00.v[i] + (t10.v[i] - t00.v[i]) * ax;
-                const float bottom = t01.v[i] + (t11.v[i] - t01.v[i]) * ax;
-                sampled.v[i] = top + (bottom - top) * ay;
-            }
+            const __m128 top = _mm_add_ps(t00, _mm_mul_ps(_mm_sub_ps(t10, t00), ax));
+            const __m128 bottom = _mm_add_ps(t01, _mm_mul_ps(_mm_sub_ps(t11, t01), ax));
+            sampled = _mm_add_ps(top, _mm_mul_ps(_mm_sub_ps(bottom, top), ay));
         }
 
         // The instruction rearranges the components on the way into the
         // register, the same way an arithmetic source does.
         const uint32_t swizzle = d1 & 0xFFF;
         Vec4& destination = context.registers[destReg & (MaxRegisters - 1)];
+        alignas(16) float lanes[4];
+        _mm_store_ps(lanes, sampled);
         for (uint32_t i = 0; i < 4; i++)
         {
             const uint32_t selector = (swizzle >> (i * 3)) & 7;
             switch (selector)
             {
             case 0: case 1: case 2: case 3:
-                destination.v[i] = sampled.v[selector]; break;
+                destination.v[i] = lanes[selector]; break;
             case 4: destination.v[i] = 0.0f; break;
             case 5: destination.v[i] = 1.0f; break;
             case 7: break;
@@ -652,18 +809,6 @@ namespace
             }
         }
         (void)d2;
-
-        // Once. This used to take a mutex on every texture fetch of every
-        // pixel to find out whether it had already printed, which with sixteen
-        // cores sampling at once was the thing the cores were waiting on.
-        static std::atomic<bool> reported{ false };
-        if (!reported.load(std::memory_order_relaxed) && !reported.exchange(true))
-        {
-            printf("raster: sampling texture slot %u, %ux%u, pitch %u, format %u, "
-                   "%s, at 0x%08X\n", slot, width, height, pitch, format,
-                   tiled ? "tiled" : "linear", base);
-            fflush(stdout);
-        }
     }
 
     void RunFetch(Context& context, uint32_t d0, uint32_t d1, uint32_t d2)
@@ -866,6 +1011,171 @@ namespace
         }
     }
 
+    // --- the pixel interpreter -----------------------------------------------
+    //
+    // The same semantics as Run above, on the decoded form and four lanes at
+    // a time. A source is one aligned load, one permute and one sign flip;
+    // an operation is one or two vector instructions; the write is a masked
+    // blend. This is what the difference between five and thirty frames a
+    // second is made of.
+
+    inline __m128 GatherSource(const Context& context, const DecodedSource& source)
+    {
+        const float* from = source.temporary
+            ? context.registers[source.reg].v
+            : &g_constants[((context.pixel ? 256u : 0u) + source.reg) * 4];
+        __m128 value = _mm_load_ps(from);
+        value = _mm_permutevar_ps(value, _mm_load_si128(reinterpret_cast<const __m128i*>(source.permute)));
+        if (source.negate) value = _mm_xor_ps(value, _mm_set1_ps(-0.0f));
+        return value;
+    }
+
+    inline __m128 MaskFromBits(uint32_t bits)
+    {
+        return _mm_castsi128_ps(_mm_set_epi32(
+            (bits & 8) ? -1 : 0, (bits & 4) ? -1 : 0, (bits & 2) ? -1 : 0, (bits & 1) ? -1 : 0));
+    }
+
+    inline float LaneSum4(__m128 v)
+    {
+        __m128 t = _mm_add_ps(v, _mm_movehl_ps(v, v));
+        t = _mm_add_ss(t, _mm_shuffle_ps(t, t, 1));
+        return _mm_cvtss_f32(t);
+    }
+
+    bool ApplyVectorFast(uint32_t opcode, __m128 a, __m128 b, __m128 c, __m128& out)
+    {
+        const __m128 one = _mm_set1_ps(1.0f);
+        const __m128 zero = _mm_setzero_ps();
+        switch (opcode)
+        {
+        case 0:  out = _mm_add_ps(a, b); return true;
+        case 1:  out = _mm_mul_ps(a, b); return true;
+        case 2:  out = _mm_max_ps(a, b); return true;
+        case 3:  out = _mm_min_ps(a, b); return true;
+        case 4:  out = _mm_and_ps(_mm_cmpeq_ps(a, b), one); return true;
+        case 5:  out = _mm_and_ps(_mm_cmpgt_ps(a, b), one); return true;
+        case 6:  out = _mm_and_ps(_mm_cmpge_ps(a, b), one); return true;
+        case 7:  out = _mm_and_ps(_mm_cmpneq_ps(a, b), one); return true;
+        case 8:  out = _mm_sub_ps(a, _mm_floor_ps(a)); return true;
+        case 9:  out = _mm_round_ps(a, _MM_FROUND_TO_ZERO | _MM_FROUND_NO_EXC); return true;
+        case 10: out = _mm_floor_ps(a); return true;
+        case 11: out = _mm_add_ps(_mm_mul_ps(a, b), c); return true;
+        case 12: out = _mm_blendv_ps(c, b, _mm_cmpeq_ps(a, zero)); return true;
+        case 13: out = _mm_blendv_ps(c, b, _mm_cmpge_ps(a, zero)); return true;
+        case 14: out = _mm_blendv_ps(c, b, _mm_cmpgt_ps(a, zero)); return true;
+        case 15: out = _mm_set1_ps(LaneSum4(_mm_mul_ps(a, b))); return true;
+        case 16:
+        {
+            const __m128 product = _mm_mul_ps(a, b);
+            alignas(16) float lanes[4];
+            _mm_store_ps(lanes, product);
+            out = _mm_set1_ps(lanes[0] + lanes[1] + lanes[2]);
+            return true;
+        }
+        case 17:
+        {
+            alignas(16) float pa[4], pc[4];
+            _mm_store_ps(pa, _mm_mul_ps(a, b));
+            _mm_store_ps(pc, c);
+            out = _mm_set1_ps(pa[0] + pa[1] + pc[0]);
+            return true;
+        }
+        case 19:
+        {
+            __m128 m = _mm_max_ps(a, _mm_movehl_ps(a, a));
+            m = _mm_max_ss(m, _mm_shuffle_ps(m, m, 1));
+            out = _mm_set1_ps(_mm_cvtss_f32(m));
+            return true;
+        }
+        default:
+            return false;
+        }
+    }
+
+    void RunAluFast(Context& context, const DecodedAlu& alu)
+    {
+        const __m128 a = GatherSource(context, alu.source[0]);
+        const __m128 b = GatherSource(context, alu.source[1]);
+        const __m128 c = GatherSource(context, alu.source[2]);
+
+        if (alu.vectorMask != 0)
+        {
+            __m128 result;
+            if (!ApplyVectorFast(alu.vectorOpcode, a, b, c, result))
+            {
+                ReportOnce("unhandled vector opcode", alu.vectorOpcode);
+                std::lock_guard<std::mutex> lock(g_statisticsMutex);
+                g_statistics.unknownOpcode++;
+            }
+            else
+            {
+                if (alu.clamp)
+                    result = _mm_min_ps(_mm_max_ps(result, _mm_setzero_ps()), _mm_set1_ps(1.0f));
+                Vec4& destination = alu.exported
+                    ? context.exports[alu.vectorDest] : context.registers[alu.vectorDest];
+                Store(destination, _mm_blendv_ps(Load(destination), result, MaskFromBits(alu.vectorMask)));
+                if (alu.exported) context.exported[alu.vectorDest] = true;
+            }
+        }
+
+        if (alu.scalarMask != 0)
+        {
+            float result = 0;
+            bool handled = false;
+            const uint32_t opcode = alu.scalarOpcode;
+            if (opcode >= 42 && opcode <= 47)
+            {
+                const DecodedSource& third = alu.source[2];
+                const uint32_t reg2 = (opcode & 1) | (third.swizzle & 0x3C)
+                                    | (uint32_t(third.temporary) << 1);
+                const Vec4 constant = ReadConstant(context.pixel, third.reg);
+                const Vec4& temporary = context.registers[reg2 & (MaxRegisters - 1)];
+                float x = constant.v[third.swizzle & 3];
+                const float y = temporary.v[(third.swizzle >> 6) & 3];
+                if (third.negate) x = -x;
+                switch (opcode)
+                {
+                case 42: case 43: result = x * y; break;
+                case 44: case 45: result = x + y; break;
+                default:          result = x - y; break;
+                }
+                handled = true;
+            }
+            else
+            {
+                Vec4 lanes;
+                Store(lanes, c);
+                handled = ApplyScalar(opcode, lanes, context.previousScalar, result);
+            }
+
+            if (!handled)
+            {
+                ReportOnce("unhandled scalar opcode", opcode);
+                std::lock_guard<std::mutex> lock(g_statisticsMutex);
+                g_statistics.unknownOpcode++;
+            }
+            else
+            {
+                context.previousScalar = result;
+                Vec4& destination = alu.exported
+                    ? context.exports[alu.scalarDest] : context.registers[alu.scalarDest];
+                Store(destination, _mm_blendv_ps(Load(destination), _mm_set1_ps(result), MaskFromBits(alu.scalarMask)));
+                if (alu.exported) context.exported[alu.scalarDest] = true;
+            }
+        }
+    }
+
+    void RunPixel(const Program& program, Context& context)
+    {
+        for (const DecodedStep& step : program.steps)
+        {
+            if (step.fetch) RunFetch(context, step.d0, step.d1, step.d2);
+            else RunAluFast(context, step.alu);
+            if (context.textureNeeded) return;
+        }
+    }
+
     // --- the surface -------------------------------------------------------
 
     struct Surface
@@ -886,20 +1196,24 @@ namespace
         const uint32_t tl = Reg(0x2081);
         const uint32_t br = Reg(0x2082);
 
-        surface.pitch = info & 0x3FFF;
+        // At the resolution scale: the pitch and the scissor grow with it,
+        // and a surface's tile base grows with its square, since each tile
+        // row of the title's becomes that many rows of that many tiles.
+        const uint32_t scale = Edram::Scale();
+        surface.pitch = (info & 0x3FFF) * scale;
         const uint32_t msaa = (info >> 16) & 3;
         surface.samplesX = (msaa == 2) ? 2u : 1u;
         surface.samplesY = (msaa >= 1) ? 2u : 1u;
-        surface.baseTile = colour & 0xFFF;
+        surface.baseTile = (colour & 0xFFF) * scale * scale;
 
-        surface.x0 = tl & 0x7FFF;
-        surface.y0 = (tl >> 16) & 0x7FFF;
-        surface.x1 = br & 0x7FFF;
-        surface.y1 = (br >> 16) & 0x7FFF;
+        surface.x0 = (tl & 0x7FFF) * scale;
+        surface.y0 = ((tl >> 16) & 0x7FFF) * scale;
+        surface.x1 = (br & 0x7FFF) * scale;
+        surface.y1 = ((br >> 16) & 0x7FFF) * scale;
 
         surface.valid = surface.pitch != 0 && surface.x1 > surface.x0
-                     && surface.y1 > surface.y0 && surface.x1 <= 4096
-                     && surface.y1 <= 4096;
+                     && surface.y1 > surface.y0 && surface.x1 <= 4096 * scale
+                     && surface.y1 <= 4096 * scale;
         return surface;
     }
 
@@ -1001,7 +1315,7 @@ namespace
         const uint32_t pitchSamples = surface.pitch * surface.samplesX;
         const uint32_t offset = Edram::SampleOffset(
             x * surface.samplesX, y * surface.samplesY, pitchSamples, surface.baseTile);
-        return offset < Edram::SizeDwords ? edram[offset] : 0;
+        return offset < Edram::Capacity() ? edram[offset] : 0;
     }
 
     void WritePixel(const Surface& surface, uint32_t x, uint32_t y, uint32_t value)
@@ -1015,7 +1329,7 @@ namespace
                 const uint32_t offset = Edram::SampleOffset(
                     x * surface.samplesX + i, y * surface.samplesY + j,
                     pitchSamples, surface.baseTile);
-                if (offset < Edram::SizeDwords) edram[offset] = value;
+                if (offset < Edram::Capacity()) edram[offset] = value;
             }
         }
     }
@@ -1056,6 +1370,11 @@ namespace
         if (control & 0x08) position.v[1] += RegFloat(0x2112);
         if (control & 0x10) position.v[2] *= RegFloat(0x2113);
         if (control & 0x20) position.v[2] += RegFloat(0x2114);
+
+        // Screen space at the resolution scale.
+        const float scale = float(Edram::Scale());
+        position.v[0] *= scale;
+        position.v[1] *= scale;
     }
 
     void RasterizeTriangle(const Surface& surface, const Program& pixelProgram,
@@ -1102,10 +1421,11 @@ namespace
         {
         Context context;
         context.pixel = true;
+        uint64_t writtenHere = 0;   // one atomic add a band, not one a pixel
 
         for (int y = firstRow; y < lastRow; y++)
         {
-            if (missing.load(std::memory_order_relaxed)) return;
+            if (missing.load(std::memory_order_relaxed)) break;
             for (int x = minX; x <= maxX; x++)
             {
                 const float px = float(x);
@@ -1135,8 +1455,8 @@ namespace
                              c.interpolants[i].v[k] * c.inverseW * w2);
 
                 context.textureNeeded = false;
-                Run(pixelProgram, context);
-                if (context.textureNeeded) { missing.store(true); return; }
+                RunPixel(pixelProgram, context);
+                if (context.textureNeeded) { missing.store(true); break; }
 
                 Vec4 colour = context.exports[0];
                 if (blend.needed)
@@ -1163,9 +1483,10 @@ namespace
                 }
 
                 WritePixel(surface, uint32_t(x), uint32_t(y), Pack8888(colour));
-                written.fetch_add(1, std::memory_order_relaxed);
+                writtenHere++;
             }
         }
+        written.fetch_add(writtenHere, std::memory_order_relaxed);
         };
 
         // Eight rows a piece is fine enough that a full screen quad spreads
@@ -1227,8 +1548,8 @@ void Raster::Draw(uint32_t initiator, uint32_t indexBase, uint32_t indexWord)
     if ((Reg(0x2208) & 7) != 4) { Skip("render backend is not writing colour"); return; }
 
     const Blend blend = CurrentBlend();
-    const Program vertexProgram = Parse(Shaders::Microcode(false));
-    const Program pixelProgram = Parse(Shaders::Microcode(true));
+    const Program& vertexProgram = CachedProgram(false);
+    const Program& pixelProgram = CachedProgram(true);
     if (!vertexProgram.valid || !pixelProgram.valid) { Skip("no shader program bound"); return; }
 
     // With no index buffer the indices are simply nought upwards; with one,
