@@ -15,6 +15,7 @@
 // guarded with #ifndef, so this file has to define its versions first or it
 // would redefine them.
 #include "cod3_mmio.h"
+#include "modules.h"
 
 // The recompiled code has its time base instruction redirected by that header.
 // This file is host code and includes the Windows headers, which declare the
@@ -1451,9 +1452,11 @@ uint64_t Mmio::Timebase()
 
 void Mmio::CallIndirect(PPCContext& ctx, uint8_t* base, uint32_t address)
 {
+    // The title's own code through its table; anything else is in a
+    // level's DLL, if one is loaded, or nowhere.
     PPCFunc* routine = (address >= PPC_CODE_BASE &&
                         address < PPC_CODE_BASE + PPC_CODE_SIZE)
-        ? PPC_LOOKUP_FUNC(base, address) : nullptr;
+        ? PPC_LOOKUP_FUNC(base, address) : Guest::LookupModule(address);
 
     // COD3_TRACECALL names a call site by its return address, in hex, and
     // every distinct target called from it is printed once with the first
@@ -1476,6 +1479,36 @@ void Mmio::CallIndirect(PPCContext& ctx, uint8_t* base, uint32_t address)
     }();
     bool tracing = false;
     for (uint32_t site : traced) tracing |= (site == uint32_t(ctx.lr));
+
+    // COD3_TRACETARGET names targets rather than sites: every call through
+    // a pointer that lands on one of them.
+    static const std::vector<uint32_t> tracedTargets = []() {
+        std::vector<uint32_t> targets;
+        const char* text = getenv("COD3_TRACETARGET");
+        for (const char* at = text; at != nullptr && *at != 0;)
+        {
+            char* end = nullptr;
+            const uint32_t target = uint32_t(strtoul(at, &end, 16));
+            if (end == at) break;
+            targets.push_back(target);
+            at = *end == ',' ? end + 1 : end;
+        }
+        return targets;
+    }();
+    for (uint32_t target : tracedTargets) tracing |= (target == address);
+
+    // COD3_TRACEMODULE=1 traces every call that crosses into or out of a
+    // level's DLL through a pointer: the interface between the title and
+    // the level, which is where a level that never starts stops.
+    static const bool traceModule = []() {
+        const char* text = getenv("COD3_TRACEMODULE");
+        return text != nullptr && text[0] != 0 && text[0] != '0';
+    }();
+    if (traceModule && (Modules::Contains(address) != Modules::Contains(uint32_t(ctx.lr))))
+    {
+        static std::atomic<int> crossings{ 0 };
+        if (crossings.fetch_add(1) < 400) tracing = true;
+    }
     if (tracing)
     {
         static std::mutex mutex;

@@ -184,10 +184,17 @@ namespace
 
     // Presses from a script, for driving the title without anyone at the
     // keyboard: COD3_PAD="5:start 8:a 9:down 10:a" presses each button at
-    // that many seconds from the start, for a quarter of a second. Names
-    // are start back a b x y up down left right ls rs; a plus joins
-    // several ("10:down+a"), and the seconds can have a decimal.
-    struct ScriptedPress { double at; uint16_t buttons; };
+    // that many seconds from the start. Names are start back a b x y up
+    // down left right ls rs; a plus joins several ("10:down+a"), and the
+    // seconds can have a decimal.
+    //
+    // A press lasts two of the title's own reads of the pad and no longer.
+    // It used to last a quarter of a second, and a menu that opened while
+    // the button was still down took it as pressed again: one Start on the
+    // title screen fell through the main menu, the single player menu and
+    // a dialogue and started a game, or landed anywhere depending on how
+    // fast the screens came.
+    struct ScriptedPress { double at; uint16_t buttons; int readsLeft; bool begun; };
     std::vector<ScriptedPress> g_script;
     bool g_scriptParsed = false;
     std::chrono::steady_clock::time_point g_scriptStart;
@@ -221,7 +228,7 @@ namespace
                     at = end == std::string::npos ? all.size() : end + 1;
                     const size_t colon = item.find(':');
                     if (colon == std::string::npos) continue;
-                    ScriptedPress press{ atof(item.substr(0, colon).c_str()), 0 };
+                    ScriptedPress press{ atof(item.substr(0, colon).c_str()), 0, 2, false };
                     std::string rest = item.substr(colon + 1);
                     size_t from = 0;
                     while (from <= rest.size())
@@ -240,18 +247,27 @@ namespace
         const double seconds = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - g_scriptStart).count();
         uint16_t buttons = 0;
-        for (const ScriptedPress& press : g_script)
+        for (ScriptedPress& press : g_script)
         {
-            if (seconds >= press.at && seconds < press.at + 0.25)
+            if (seconds < press.at || press.readsLeft <= 0) continue;
+            if (!press.begun)
             {
-                buttons |= press.buttons;
+                press.begun = true;
                 // A press is where something is about to happen, so the
                 // kernel trace, if one was asked for, starts here.
-                static const ScriptedPress* traced = nullptr;
-                if (traced != &press) { traced = &press; Kernel::StartKernelTrace(); }
+                Kernel::StartKernelTrace();
             }
+            buttons |= press.buttons;
         }
         return buttons;
+    }
+
+    // The title has read the pad: the presses it saw count down.
+    void ScriptedRead(uint16_t buttons)
+    {
+        for (ScriptedPress& press : g_script)
+            if (press.begun && press.readsLeft > 0 && (buttons & press.buttons) == press.buttons)
+                press.readsLeft--;
     }
 
     // The keyboard and mouse stand in for a pad. Only while the title's own
@@ -259,6 +275,14 @@ namespace
     Input::Pad ReadKeyboard()
     {
         Input::Pad pad{};
+        // COD3_NOKEYBOARD=1 ignores the keyboard and mouse entirely, for
+        // runs driven by a script while someone is using the machine: the
+        // key state is global, and typing anywhere walked the title's menus.
+        static const bool ignored = []() {
+            const char* text = getenv("COD3_NOKEYBOARD");
+            return text != nullptr && text[0] != 0 && text[0] != '0';
+        }();
+        if (ignored) return pad;
         if (!Window::HasFocus())
         {
             if (g_mouseHeld.load()) SetHold(false);
@@ -354,7 +378,7 @@ namespace
         const auto now = std::chrono::steady_clock::now();
 
         std::lock_guard<std::mutex> lock(g_mutex);
-        if (now - g_lastRead < std::chrono::milliseconds(4)) return;
+        if (now - g_lastRead < std::chrono::milliseconds(4) && g_script.empty()) return;
         g_lastRead = now;
 
         FindXInput();
@@ -363,12 +387,16 @@ namespace
         // plugged in and untouched used to silence the keyboard completely,
         // which looks exactly like input not working at all.
         Input::Pad pad = ReadKeyboard();
-        pad.buttons |= ScriptedButtons();
+        const uint16_t fromKeyboard = pad.buttons;
+        const uint16_t fromScript = ScriptedButtons();
+        uint16_t fromPad = 0;
+        pad.buttons |= fromScript;
         if (g_getState != nullptr)
         {
             XInputState state{};
             if (g_getState(0, &state) == ERROR_SUCCESS)
             {
+                fromPad = state.gamepad.buttons;
                 pad.buttons |= state.gamepad.buttons;
                 pad.leftTrigger = std::max(pad.leftTrigger, state.gamepad.leftTrigger);
                 pad.rightTrigger = std::max(pad.rightTrigger, state.gamepad.rightTrigger);
@@ -387,6 +415,16 @@ namespace
 
         if (!Same(pad, g_pad))
         {
+            // Where a button came from, the first few times it changes:
+            // the title sometimes walks its own menus with no one pressing
+            // anything, and this says whether anything was pressed at all.
+            static int announced = 0;
+            if (pad.buttons != g_pad.buttons && announced++ < 40)
+            {
+                printf("input: buttons 0x%04X (keyboard 0x%04X, script 0x%04X, pad 0x%04X, focus %d)\n",
+                    pad.buttons, fromKeyboard, fromScript, fromPad, Window::HasFocus() ? 1 : 0);
+                fflush(stdout);
+            }
             g_pad = pad;
             g_packet++;
         }
@@ -397,6 +435,7 @@ Input::Pad Input::State()
 {
     Refresh();
     std::lock_guard<std::mutex> lock(g_mutex);
+    ScriptedRead(g_pad.buttons);
     return g_pad;
 }
 

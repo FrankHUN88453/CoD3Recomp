@@ -17,6 +17,7 @@
 
 #include <file.h>
 #include <image.h>
+#include "modules.h"
 #include <xex.h>
 
 namespace Guest
@@ -56,9 +57,77 @@ namespace
 
     thread_local bool t_unwinding = false;
 
+    // What nothing else handled: the exception that is about to end the
+    // process, said out loud with its host frames, on the unbuffered stream.
+    LONG CALLBACK LastChanceHandler(EXCEPTION_POINTERS* info)
+    {
+        const auto* record = info->ExceptionRecord;
+        const uintptr_t exe = uintptr_t(GetModuleHandleW(nullptr));
+        fprintf(stderr, "unhandled: code %08lX at %p (exe+%llx) info %llx %p thread %lu\n",
+            record->ExceptionCode, record->ExceptionAddress,
+            (unsigned long long)(uintptr_t(record->ExceptionAddress) - exe),
+            (unsigned long long)record->ExceptionInformation[0],
+            (void*)record->ExceptionInformation[1], GetCurrentThreadId());
+        CONTEXT walk = *info->ContextRecord;
+        fprintf(stderr, "  frames:");
+        for (int depth = 0; depth < 24; depth++)
+        {
+            fprintf(stderr, " %llx", (unsigned long long)(walk.Rip - exe));
+            DWORD64 imageBase = 0;
+            PRUNTIME_FUNCTION entry = RtlLookupFunctionEntry(walk.Rip, &imageBase, nullptr);
+            if (entry == nullptr) break;
+            void* handlerData = nullptr;
+            DWORD64 establisher = 0;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, imageBase, walk.Rip, entry,
+                &walk, &handlerData, &establisher, nullptr);
+            if (walk.Rip == 0) break;
+        }
+        fprintf(stderr, "\n");
+        fflush(stdout);
+        return EXCEPTION_EXECUTE_HANDLER;
+    }
+
     LONG CALLBACK GuestFaultHandler(EXCEPTION_POINTERS* info)
     {
         const auto* record = info->ExceptionRecord;
+
+        // COD3_RAWFAULTS=1: every access violation, first thing and to the
+        // unbuffered stream, with the host frames exe relative for
+        // llvm-symbolizer, before anything below can go wrong. Demand
+        // commits are access violations too, so this is for a run that is
+        // dying without a word, not for reading in general.
+        static const bool rawFaults = []() {
+            const char* text = getenv("COD3_RAWFAULTS");
+            return text != nullptr && text[0] != 0 && text[0] != '0';
+        }();
+        if (rawFaults && record->ExceptionCode == EXCEPTION_ACCESS_VIOLATION)
+        {
+            static std::atomic<int> raw{ 0 };
+            if (raw.fetch_add(1) < 400)
+                fprintf(stderr, "fault: code %08lX kind %llu at %p (exe+%llx) address %p thread %lu unwinding %d guest ctx %p\n",
+                    record->ExceptionCode, (unsigned long long)record->ExceptionInformation[0],
+                    record->ExceptionAddress,
+                    (unsigned long long)(uintptr_t(record->ExceptionAddress) - uintptr_t(GetModuleHandleW(nullptr))),
+                    (void*)record->ExceptionInformation[1],
+                    GetCurrentThreadId(), t_unwinding ? 1 : 0, (void*)Kernel::CurrentContext());
+                // The host frames, exe relative, unwound without dbghelp.
+                CONTEXT walk = *info->ContextRecord;
+                const uintptr_t exe = uintptr_t(GetModuleHandleW(nullptr));
+                fprintf(stderr, "  frames:");
+                for (int depth = 0; depth < 24; depth++)
+                {
+                    fprintf(stderr, " %llx", (unsigned long long)(walk.Rip - exe));
+                    DWORD64 imageBase = 0;
+                    PRUNTIME_FUNCTION entry = RtlLookupFunctionEntry(walk.Rip, &imageBase, nullptr);
+                    if (entry == nullptr) break;
+                    void* handlerData = nullptr;
+                    DWORD64 establisher = 0;
+                    RtlVirtualUnwind(UNW_FLAG_NHANDLER, imageBase, walk.Rip, entry,
+                        &walk, &handlerData, &establisher, nullptr);
+                    if (walk.Rip == 0) break;
+                }
+                fprintf(stderr, "  rsp %p guest base %p\n", (void*)info->ContextRecord->Rsp, (void*)Guest::Base);
+        }
 
         // A sampler or the watchdog walking a running thread's stack from a
         // snapshot of its registers can read through a stale pointer. That
@@ -249,6 +318,7 @@ namespace
             }
             printf("  %.1f MB of guest memory had been committed on demand.\n",
                 g_demandCommitted / 1048576.0);
+            Kernel::PrintHostStack(info->ContextRecord);
             fflush(stdout);
             return EXCEPTION_CONTINUE_SEARCH;
         }
@@ -588,6 +658,24 @@ namespace
     }
 }
 
+namespace
+{
+    const Kernel::Import* g_imports = nullptr;
+    size_t g_importCount = 0;
+}
+
+PPCFunc* Kernel::FindImport(const char* name)
+{
+    for (size_t i = 0; i < g_importCount; i++)
+        if (strcmp(g_imports[i].name, name) == 0) return g_imports[i].host;
+    return nullptr;
+}
+
+PPCFunc* Guest::LookupModule(uint32_t guestAddress)
+{
+    return Modules::Lookup(guestAddress);
+}
+
 bool Guest::Initialize(const char* xexPath)
 {
     printf("Guest address space\n");
@@ -630,6 +718,7 @@ bool Guest::Initialize(const char* xexPath)
     }
 
     AddVectoredExceptionHandler(1, GuestFaultHandler);
+    SetUnhandledExceptionFilter(LastChanceHandler);
     CommitLowMemory();
 
     if (!Commit(PPC_IMAGE_BASE, PPC_IMAGE_SIZE, "image")) return false;
@@ -716,6 +805,8 @@ bool Guest::Initialize(const char* xexPath)
     static const Kernel::Import kImports[] = {
 #include "kernel_import_table.inc"
     };
+    g_imports = kImports;
+    g_importCount = sizeof(kImports) / sizeof(kImports[0]);
 
     size_t importsBound = 0;
     size_t importsUnbound = 0;
@@ -783,6 +874,7 @@ Kernel::Counters& Kernel::Stats()
 
 void Kernel::Exit(int code)
 {
+    fprintf(stderr, "exit: code %d (0x%X) on thread %lu\n", code, unsigned(code), GetCurrentThreadId());
     // GetConsoleProcessList reports how many processes share this console.
     // One means the console was created for us, so nothing else will be left
     // to read the output after the process ends.

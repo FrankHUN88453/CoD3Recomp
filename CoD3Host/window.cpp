@@ -217,13 +217,19 @@ namespace
         static const char* const path = getenv("COD3_FRAMEDUMP");
         if (path == nullptr) return;
 
+        // Every hundred and twenty presents unless COD3_FRAMEDUMP_EVERY says
+        // otherwise, numbered and cycling through forty, so the interesting
+        // frame is still there when the run ends.
+        static const int every = []() {
+            const char* text = getenv("COD3_FRAMEDUMP_EVERY");
+            const int value = text != nullptr ? int(strtol(text, nullptr, 10)) : 120;
+            return value > 0 ? value : 120;
+        }();
         static int counter = 0;
-        if ((counter++ % 120) != 0) return;
+        if ((counter++ % every) != 0) return;
 
-        // Numbered, cycling, so the interesting frame is still there when the
-        // run ends rather than overwritten by whatever came last.
         char name[512];
-        snprintf(name, sizeof(name), "%s-%02d.bmp", path, (counter / 120) % 24);
+        snprintf(name, sizeof(name), "%s-%02d.bmp", path, (counter / every) % 40);
 
         const int width = int(g_copiedWidth);
         const int height = int(g_copiedHeight);

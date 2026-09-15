@@ -60,3 +60,8 @@ target_compile_options(CoD3RecompLib PUBLIC -march=x86-64-v2)
 if (COD3_TRAP_ON_UNIMPLEMENTED)
     target_compile_definitions(CoD3RecompLib PUBLIC COD3_TRAP_ON_UNIMPLEMENTED)
 endif()
+
+# The levels' code, one library each. COD3_LEVEL_LIBRARIES names the ones
+# that were recompiled; the host links whatever is there.
+add_subdirectory(levels)
+set(COD3_LEVEL_LIBRARIES ${COD3_LEVEL_LIBRARIES} PARENT_SCOPE)

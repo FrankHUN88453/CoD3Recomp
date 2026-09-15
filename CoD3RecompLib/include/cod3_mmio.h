@@ -16,6 +16,7 @@
 #pragma once
 
 #include <cstdint>
+#include <csetjmp>
 
 // Declared here so the call below names the one in the global namespace
 // rather than starting a new type inside this one.
@@ -23,6 +24,15 @@ struct PPCContext;
 
 namespace Mmio
 {
+    // The title's longjmp, which the recompiler turned into the host's. A
+    // buffer that no host setjmp ever filled, or that was filled in a frame
+    // since gone, lands the thread on a null stack pointer, and that ends the
+    // process before any handler sees it. Going through here checks the
+    // buffer first and reports what was about to happen.
+    //
+    // On a script thread's fiber the longjmp is the thread yielding to the
+    // engine, and this returns when the thread is resumed (coroutines.cpp).
+    void LongJump(::PPCContext& ctx, uint8_t* base, jmp_buf& buffer, int value);
     // The time base register.
     //
     // Guest code reads it with mftb and turns the differences into seconds
@@ -140,3 +150,7 @@ namespace Mmio
 
 // The recompiler guards this one, so defining it first replaces it everywhere.
 #define PPC_CALL_INDIRECT_FUNC(x) ::Mmio::CallIndirect(ctx, base, uint32_t(x))
+
+// The recompiler emits longjmp(*reinterpret_cast<jmp_buf*>(base + r3), r4)
+// for the title's own longjmp; this puts the check in front of it.
+#define longjmp(buffer, value) ::Mmio::LongJump(ctx, base, buffer, value)

@@ -120,15 +120,20 @@ namespace
         }
     }
 
-    void DumpAllThreads()
+    void LoadSymbols(HANDLE process)
     {
-        const HANDLE process = GetCurrentProcess();
         static bool symbols = false;
         if (!symbols)
         {
             SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
             symbols = SymInitialize(process, nullptr, TRUE) != FALSE;
         }
+    }
+
+    void DumpAllThreads()
+    {
+        const HANDLE process = GetCurrentProcess();
+        LoadSymbols(process);
 
         printf("\nwatchdog: host stacks of every thread:\n");
         const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
@@ -184,6 +189,17 @@ namespace
             }
         }
     }
+}
+
+void Kernel::PrintHostStack(void* context)
+{
+    const HANDLE process = GetCurrentProcess();
+    LoadSymbols(process);
+    CONTEXT copy = *static_cast<CONTEXT*>(context);
+    printf("  host stack:");
+    WalkFrames(process, GetCurrentThread(), copy);
+    printf("\n");
+    fflush(stdout);
 }
 
 void Kernel::StartWatchdog()

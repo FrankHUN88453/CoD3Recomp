@@ -240,8 +240,13 @@ PPC_FUNC(__imp__ExCreateThread)
     fflush(stdout);
 
     DWORD hostId = 0;
-    HANDLE host = CreateThread(nullptr, 0, ThreadEntry, arguments,
-        (creationFlags & CreateSuspended) ? CREATE_SUSPENDED : 0, &hostId);
+    // Sixteen megabytes of host stack, reserved not committed: a guest call
+    // is a host call, so a level script that recurses deeply on its own
+    // megabyte of guest stack recurses just as deeply on the host's, and a
+    // host stack that runs out past its guard page ends the process with
+    // no exception anyone gets to see.
+    HANDLE host = CreateThread(nullptr, 16u << 20, ThreadEntry, arguments,
+        ((creationFlags & CreateSuspended) ? CREATE_SUSPENDED : 0) | STACK_SIZE_PARAM_IS_A_RESERVATION, &hostId);
 
 
     if (host == nullptr)

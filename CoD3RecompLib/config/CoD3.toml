@@ -38,12 +38,16 @@ savevmx_64_address   = 0x8234FB04
 # --- setjmp / longjmp ---------------------------------------------------
 # longjmp: 0x8234EEC0..0x8234EFD4 per .pdata, calls RtlUnwind at 0x8234EFC0,
 #          restores f14-f31 / r13-r31 / CR / LR / SP from the jmp_buf in r7.
-# setjmp:  leaf function, no .pdata entry, stores the same layout via r3 and
-#          returns 0 at 0x82351D88.
+# setjmp:  begins at 0x82351CC0 with a hook check (a pointer at 0x82BEAAF0
+#          is jumped to when set), then stores the same layout via r3 from
+#          0x82351CD4 and returns 0 at 0x82351D88. The seven bl callers name
+#          0x82351CC0; the address used to be the store at 0x82351CD4, which
+#          nothing calls, so no setjmp was ever the host's and the first
+#          longjmp of a level start went through an empty buffer.
 # jmp_buf layout: 0x00 f14-f31, 0x90 SP, 0x98 r13-r31, 0x130 CR, 0x134 LR,
 #                 0x138 unwind flag.
 longjmp_address = 0x8234EEC0
-setjmp_address  = 0x82351CD4
+setjmp_address  = 0x82351CC0
 
 # --- Explicit function boundaries -------------------------------------
 # XenonAnalyse's analyzer truncates a function at a jump-table `bctr`,

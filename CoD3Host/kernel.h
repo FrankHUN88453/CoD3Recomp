@@ -26,6 +26,13 @@ namespace Kernel
         PPCFunc*    host;
     };
 
+    // The host stub behind a kernel import, by name, or null.
+    PPCFunc* FindImport(const char* name);
+
+    // Where a guest path (game:\sp\x.dll, d:\..., or bare) is in the installed
+    // game, for reading; empty when it is not there.
+    std::filesystem::path ResolveGuestPath(const std::string& guestPath);
+
     // Called by every unimplemented import. Reports which one the game reached
     // and how it got there, then stops. It never returns: continuing past a
     // missing kernel call would corrupt guest state and produce a crash far
@@ -117,6 +124,10 @@ namespace Kernel
     // A thread that prints every host thread's stack once the vertical
     // blank counter has stopped moving: what a hang looks like from inside.
     void StartWatchdog();
+
+    // The host stack behind a set of registers, symbolised: for the fault
+    // handler, which has the registers of the thread that faulted.
+    void PrintHostStack(void* context);
 
     // Set by a thread while it unwinds another thread's stack from a copy of
     // its registers. A fault during that is a stale register, not a guest
@@ -326,13 +337,17 @@ namespace Guest
         Write32(Base, 0xE0000000u | offset, value);
     }
 
+    // A function outside the title's own code: in a level's DLL, when one
+    // is loaded (modules.cpp).
+    PPCFunc* LookupModule(uint32_t guestAddress);
+
     // Turns a guest code address into the recompiled function behind it, the
     // same way PPC_LOOKUP_FUNC does inside the translated code. Returns null
     // when nothing was recompiled at that address.
     inline PPCFunc* Lookup(uint32_t guestAddress)
     {
         if (guestAddress < PPC_CODE_BASE || guestAddress >= PPC_CODE_BASE + PPC_CODE_SIZE)
-            return nullptr;
+            return LookupModule(guestAddress);
         return *reinterpret_cast<PPCFunc**>(
             Base + FuncTableBase + (uint64_t(guestAddress - PPC_CODE_BASE) * 2));
     }

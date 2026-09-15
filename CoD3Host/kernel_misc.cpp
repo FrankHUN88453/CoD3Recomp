@@ -7,9 +7,13 @@
 // unrecoverable here and says so rather than corrupting state quietly.
 
 #include "kernel.h"
+#include "coroutines.h"
+#include "modules.h"
 #include "sampler.h"
+#include <map>
 #include <mutex>
 
+#include <csetjmp>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -330,8 +334,14 @@ PPC_FUNC(__imp__RtlImageXexHeaderField)
 PPC_FUNC(__imp__XexGetProcedureAddress)
 {
     Kernel::CountImport("XexGetProcedureAddress");
-    if (ctx.r5.u32 != 0) Guest::Write32(base, ctx.r5.u32, 0);
-    ctx.r3.u32 = X_STATUS_NOT_FOUND;
+    // By ordinal only: the levels export one function, by ordinal, and a
+    // name (a pointer, above the ordinal range) finds nothing.
+    const uint32_t address = ctx.r4.u32 < 0x10000 ? Modules::Export(ctx.r3.u32, ctx.r4.u32) : 0;
+    printf("XexGetProcedureAddress: module 0x%08X ordinal %u -> 0x%08X\n",
+        ctx.r3.u32, ctx.r4.u32, address);
+    fflush(stdout);
+    if (ctx.r5.u32 != 0) Guest::Write32(base, ctx.r5.u32, address);
+    ctx.r3.u32 = address != 0 ? X_STATUS_SUCCESS : X_STATUS_NOT_FOUND;
 }
 
 // NTSTATUS XexLoadImage(const char* name, ULONG flags, ULONG version, HANDLE* out)
@@ -339,14 +349,22 @@ PPC_FUNC(__imp__XexLoadImage)
 {
     Kernel::CountImport("XexLoadImage");
     const std::string name = GuestString(base, ctx.r3.u32);
-    printf("XexLoadImage: %s is not available, only the title itself is loaded\n",
-        name.empty() ? "<unnamed>" : name.c_str());
-    if (ctx.r6.u32 != 0) Guest::Write32(base, ctx.r6.u32, 0);
-    ctx.r3.u32 = X_STATUS_NOT_FOUND;
+    printf("XexLoadImage: %s (flags 0x%X, version 0x%X)\n",
+        name.empty() ? "<unnamed>" : name.c_str(), ctx.r4.u32, ctx.r5.u32);
+    fflush(stdout);
+    const uint32_t out = ctx.r6.u32;
+    const uint32_t handle = name.empty() ? 0 : Modules::Load(ctx, base, name);
+    if (out != 0) Guest::Write32(base, out, handle);
+    ctx.r3.u32 = handle != 0 ? X_STATUS_SUCCESS : X_STATUS_NOT_FOUND;
 }
 
 // NTSTATUS XexUnloadImage(HANDLE module)
-PPC_FUNC(__imp__XexUnloadImage) { ctx.r3.u32 = X_STATUS_SUCCESS; }
+PPC_FUNC(__imp__XexUnloadImage)
+{
+    Kernel::CountImport("XexUnloadImage");
+    Modules::Unload(ctx.r3.u32);
+    ctx.r3.u32 = X_STATUS_SUCCESS;
+}
 
 // NTSTATUS MmQueryStatistics(X_MM_STATISTICS* statistics)
 PPC_FUNC(__imp__MmQueryStatistics)
@@ -399,6 +417,46 @@ PPC_FUNC(__imp__RtlCaptureContext)
     // least deterministic.
     if (ctx.r3.u32 != 0)
         memset(Guest::Ptr(ctx.r3.u32), 0, 0x2B0);
+}
+
+// The title's longjmp, checked. Declared in cod3_mmio.h, which the host
+// cannot include: its macros are for the translated code alone.
+namespace Mmio { void LongJump(::PPCContext& ctx, uint8_t* base, jmp_buf& buffer, int value); }
+
+void Mmio::LongJump(PPCContext& ctx, uint8_t* base, jmp_buf& buffer, int value)
+{
+    // A script thread yielding: the engine's fiber does the longjmp.
+    if (Coroutines::YieldIfCoroutine(buffer, value)) return;
+
+    const auto* frame = reinterpret_cast<const _JUMP_BUFFER*>(&buffer);
+    ULONG_PTR low = 0, high = 0;
+    GetCurrentThreadStackLimits(&low, &high);
+    const bool stackOk = frame->Rsp >= low && frame->Rsp < high;
+    MEMORY_BASIC_INFORMATION info{};
+    const bool codeOk = VirtualQuery(reinterpret_cast<void*>(frame->Rip), &info, sizeof(info)) != 0
+        && (info.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)) != 0;
+    if (stackOk && codeOk)
+        longjmp(buffer, value);
+
+    printf("\nlongjmp: the title longjmp'd with %d through the buffer at 0x%08X, which no "
+           "host setjmp filled in this frame:\n  host stack pointer %p (this thread's stack is %p..%p), "
+           "return address %p%s\n",
+        value, uint32_t(reinterpret_cast<uint8_t*>(&buffer) - base), (void*)frame->Rsp,
+        (void*)low, (void*)high, (void*)frame->Rip, codeOk ? "" : ", not code");
+    printf("  the buffer's first words:");
+    for (int i = 0; i < 8; i++)
+        printf(" %08X", Guest::Read32(base, uint32_t(reinterpret_cast<uint8_t*>(&buffer) - base) + i * 4));
+    printf("\n  lr 0x%08X, r1 0x%08X\n", uint32_t(ctx.lr), ctx.r1.u32);
+    uint32_t functions[16] = {};
+    const int count = Sampler::FunctionsOnStack(functions, 16);
+    if (count > 0)
+    {
+        printf("  guest call chain, innermost first:");
+        for (int i = 0; i < count; i++) printf("%ssub_%08X", i == 0 ? " " : " <- ", functions[i]);
+        printf("\n");
+    }
+    fflush(stdout);
+    Kernel::Exit(1);
 }
 
 PPC_FUNC(__imp__RtlRaiseException)
@@ -574,4 +632,28 @@ void CoD3TraceValue(const char* tag, uint32_t value)
 {
     printf("probe: %s = 0x%08X\n", tag, value);
     fflush(stdout);
+}
+
+// The same, printed only when the value differs from the last one seen
+// under that tag: for a word polled every frame.
+void CoD3TraceChange(const char* tag, uint32_t value)
+{
+    static std::mutex mutex;
+    static std::map<std::string, uint32_t> last;
+    std::lock_guard<std::mutex> lock(mutex);
+    auto found = last.find(tag);
+    if (found != last.end() && found->second == value) return;
+    last[tag] = value;
+    printf("probe: %s -> 0x%08X\n", tag, value);
+    fflush(stdout);
+}
+
+// The script thread object's destructor, sub_824A3040 in the title: the
+// host fiber the thread ran on goes with it. The recompiled function is
+// reached through its weak alias, which this stronger definition replaces.
+extern "C" PPC_FUNC(__imp__sub_824A3040);
+PPC_FUNC(sub_824A3040)
+{
+    Coroutines::Destroy(ctx.r3.u32);
+    __imp__sub_824A3040(ctx, base);
 }

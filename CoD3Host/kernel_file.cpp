@@ -217,6 +217,18 @@ namespace
         return (forWriting ? g_savesRoot : Guest::GameRoot) / fs::path(relative);
     }
 
+    fs::path FindExisting(const fs::path& wanted);
+}
+
+std::filesystem::path Kernel::ResolveGuestPath(const std::string& guestPath)
+{
+    const fs::path wanted = Resolve(guestPath, false);
+    if (wanted.empty()) return {};
+    return FindExisting(wanted);
+}
+
+namespace
+{
     // The disc is case preserving but the title is not consistent about case,
     // and NTFS lookups are case insensitive, so a direct probe is usually
     // enough. This falls back to a directory scan when it is not.
