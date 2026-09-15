@@ -866,7 +866,9 @@ void Kernel::ReportWaitTraffic()
     static bool reported = false;
     if (reported) return;
 
-    std::lock_guard<std::mutex> lock(g_trafficMutex);
+    // The lock is a unique_lock so it can be given up before the lock
+    // report at the end, which takes it again for its own copy.
+    std::unique_lock<std::mutex> lock(g_trafficMutex);
     if (g_waits.empty()) return;
     reported = true;
 
@@ -941,12 +943,10 @@ void Kernel::ReportWaitTraffic()
             {
                 printf("  ring address 0x%08X, first words at each alias:\n",
                     ringAddress);
-                const uint32_t aliases[] = {
-                    ringAddress & 0x1FFFFFFF,
-                    0xA0000000u | (ringAddress & 0x1FFFFFFF),
-                    0xC0000000u | (ringAddress & 0x1FFFFFFF),
-                    0xE0000000u | (ringAddress & 0x1FFFFFFF),
-                };
+                // Only the window the command processor reads through: the
+                // others are not mapped, and reading them ended the process
+                // from inside a report.
+                const uint32_t aliases[] = { Guest::PhysicalAlias(ringAddress) };
                 for (uint32_t alias : aliases)
                 {
                     printf("    0x%08X:", alias);
@@ -958,6 +958,22 @@ void Kernel::ReportWaitTraffic()
         }
     }
 
+    lock.unlock();
+    Kernel::ReportLocks();
+}
+
+void Kernel::EnterWait(uint32_t object, uint32_t from, bool infinite)
+{
+    ::EnterWait(object, from, infinite);
+}
+
+void Kernel::LeaveWait()
+{
+    ::LeaveWait();
+}
+
+void Kernel::ReportLocks()
+{
     // Who holds each mutant. A thread blocked on one is waiting for whoever
     // owns it, so this turns "blocked on 0x108" into a thread to go and look at.
     printf("\n");
@@ -977,12 +993,27 @@ void Kernel::ReportWaitTraffic()
 
     printf("\n");
     printf("what each thread is blocked on right now:\n");
-    if (g_blocked.empty()) printf("  nothing is blocked\n");
-    for (const auto& entry : g_blocked)
+    // A copy: the threads keep entering and leaving waits while this prints.
+    std::map<uint32_t, Blocked> blocked;
+    {
+        std::lock_guard<std::mutex> lock(g_trafficMutex);
+        blocked = g_blocked;
+    }
+    if (blocked.empty()) printf("  nothing is blocked\n");
+    for (const auto& entry : blocked)
     {
         printf("  thread %-5u on 0x%08X from 0x%08X, %s",
             entry.first, entry.second.object, entry.second.from,
             entry.second.infinite ? "no timeout" : "with a timeout");
+
+        // A critical section is an address in the title's memory rather than
+        // a handle; its holder is the thread object written into it.
+        if (entry.second.object >= 0x80000000u)
+        {
+            const uint32_t owner = Guest::Read32(Guest::Base, entry.second.object + 0x18);
+            printf("   a critical section held by thread object 0x%08X (os %u)",
+                owner, owner ? Guest::Read32(Guest::Base, owner + 0x14C) : 0);
+        }
 
         // A thread handle says nothing on its own. Which thread, and where it
         // started, is what makes a stalled wait readable.
@@ -990,6 +1021,8 @@ void Kernel::ReportWaitTraffic()
         if (!who.empty()) printf("   waiting for a thread: %s", who.c_str());
         printf("\n");
     }
+
+    Kernel::ReportPoolWaits();
 
     // And what each of them was doing, since a thread that appears to be
     // waiting on a lock it holds is either a report out of date or a wait

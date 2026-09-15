@@ -178,6 +178,8 @@ namespace
             }
 
             printf("  thread %u (os %u):", thread.id, thread.osId);
+            if (const PPCContext* context = Kernel::ContextOf(thread.osId))
+                printf(" r1 %08X lr %08X", context->r1.u32, uint32_t(context->lr));
             if (innermost.empty())
             {
                 printf(" not in recompiled code\n");
@@ -201,6 +203,34 @@ namespace
                 printf("      stack:");
                 for (int i = 0; i < deepestCount; i++) printf(" sub_%08X", deepest[i]);
                 printf("\n");
+            }
+
+            // The guest's own call chain, from its registers: the link
+            // register is the return into the function that made the call
+            // this thread is in, and every frame above it keeps its caller's
+            // return address eight bytes below the back chain pointer it
+            // stored, the way the title's prologues save it. This walks
+            // through the host code the histogram cannot see.
+            if (const PPCContext* context = Kernel::ContextOf(thread.osId))
+            {
+                uint32_t frame = context->r1.u32;
+                uint32_t address = uint32_t(context->lr);
+                if (frame >= 0x10000 && frame < 0xC0000000u && address != 0)
+                {
+                    printf("      guest stack: %08X", address);
+                    for (int depth = 0; depth < 14; depth++)
+                    {
+                        const uint32_t caller = Guest::Read32(Guest::Base, frame);
+                        if (caller <= frame || caller - frame > 0x100000 || (caller & 7) != 0 ||
+                            caller >= 0xC0000000u)
+                            break;
+                        address = Guest::Read32(Guest::Base, caller - 8);
+                        if (address < 0x82000000u || address >= 0x8A000000u) break;
+                        printf(" %08X", address);
+                        frame = caller;
+                    }
+                    printf("\n");
+                }
             }
         }
         Kernel::ReportRecentCalls();

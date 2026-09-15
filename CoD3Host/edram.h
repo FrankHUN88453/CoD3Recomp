@@ -12,6 +12,7 @@
 // exactly right, and neither is linear.
 
 #include <cstdint>
+#include <vector>
 
 namespace Edram
 {
@@ -49,6 +50,12 @@ namespace Edram
         const uint32_t* pixels = nullptr;   // packed the way EDRAM packs them
     };
     Shadow ShadowFor(uint32_t physicalAddress);
+
+    // The same, copied out under the lock, for a thread that runs alongside
+    // the resolves: the pointer above is only good until the next resolve
+    // of that surface replaces the pixels behind it.
+    bool CopyShadow(uint32_t physicalAddress, uint32_t& width, uint32_t& height,
+                    std::vector<uint32_t>& pixels);
 
     // Where a sample lives in EDRAM. Tiles are laid out in rows across the
     // surface, and a sample sits at its own offset inside its tile.

@@ -8,6 +8,7 @@
 // The lock one thread holds and another waits for is on those stacks.
 
 #include "kernel.h"
+#include "sampler.h"
 
 #include <atomic>
 #include <chrono>
@@ -156,11 +157,38 @@ namespace
         uint64_t lastFrames = 0;
         auto lastChange = std::chrono::steady_clock::now();
         bool reported = false;
+        uint64_t lastSwaps = 0;
+        auto lastSwap = std::chrono::steady_clock::now();
+        bool swapReported = false;
         while (g_running.load(std::memory_order_acquire))
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             const uint64_t frames = Kernel::Stats().frames.load(std::memory_order_relaxed);
             const auto now = std::chrono::steady_clock::now();
+
+            // The frame counter above is the command thread's own loop, which
+            // keeps turning when the title has stopped. The title's swaps are
+            // the title: five seconds without one, once it has made any, is
+            // a stall, and the report is the guest side of it, the locks and
+            // where every guest thread stands, since that is where the title
+            // is stuck.
+            const uint64_t swaps = Kernel::Stats().swaps.load(std::memory_order_relaxed);
+            if (swaps != lastSwaps)
+            {
+                lastSwaps = swaps;
+                lastSwap = now;
+                swapReported = false;
+            }
+            else if (!swapReported && swaps != 0 && now - lastSwap > std::chrono::seconds(5))
+            {
+                swapReported = true;
+                printf("\nwatchdog: no swap for five seconds, after %llu\n",
+                    (unsigned long long)swaps);
+                Kernel::ReportLocks();
+                Sampler::SampleNow();
+                DumpAllThreads();
+                fflush(stdout);
+            }
 
             // COD3_WATCHDOG=N dumps every N seconds whether or not anything
             // has stopped: what every host thread is doing, on demand.

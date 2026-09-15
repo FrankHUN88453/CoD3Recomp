@@ -30,6 +30,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <condition_variable>
 #include <thread>
@@ -121,7 +122,13 @@ namespace
         const uint32_t armed = block
             ? Guest::Read32(Guest::Base, Guest::PhysicalAlias(block + 16)) : 0;
         const uint64_t raised = video.interruptsRaised.fetch_add(1, std::memory_order_relaxed);
-        if (raised < 40)
+        // The first forty, and forty more once a level is loading: the
+        // interrupts that complete the level's recorded command buffers.
+        static std::atomic<int> inLevel{ 0 };
+        const bool level = Kernel::Stats().filesOpened.load(std::memory_order_relaxed) >= 40;
+        const bool usual = armed == 0x82130098u || armed == 0x821300C8u ||
+                           armed == 0x822F4A10u || armed == 0x0BADF00Du;
+        if (raised < 40 || (level && (!usual || inLevel.fetch_add(1) < 40)))
         {
             printf("gpu: interrupt %llu on cpu %u, pending mask 0x%02X, callback "
                    "0x%08X%s\n", (unsigned long long)raised, cpu, pending, armed,
@@ -163,9 +170,17 @@ namespace
             VideoState& video = Video();
             const uint32_t callback = video.interruptCallback.load();
             if (callback == 0 || t_commandContext == nullptr || t_commandStackTop == 0)
+            {
+                printf("gpu: interrupt with no handler: callback 0x%08X, context %s, stack %s\n",
+                    callback, t_commandContext ? "set" : "null", t_commandStackTop ? "set" : "none");
                 return;
+            }
             PPCFunc* routine = Guest::Lookup(callback);
-            if (routine == nullptr) return;
+            if (routine == nullptr)
+            {
+                printf("gpu: interrupt handler 0x%08X is not recompiled code\n", callback);
+                return;
+            }
 
             Gpu::WriteRegister(Gpu::RegisterInterruptStatus,
                 Gpu::ReadRegister(Gpu::RegisterInterruptStatus) | 1);
@@ -756,6 +771,49 @@ PPC_FUNC(__imp__VdInitializeScalerCommandBuffer)
 }
 
 // VOID VdSwap(...)
+// The title's wait for the GPU to pass a point in its indirect buffer pool,
+// sub_822F16A0(device, end, lap): it waits while the GPU's last fence, the
+// second word of the write-back block, is on an earlier lap and behind
+// `end`. The arguments are kept while the wait lasts, for the stall report:
+// a wait that never ends says exactly which fence the GPU never wrote.
+namespace
+{
+    struct PoolWait { uint32_t device, end, lap; int64_t since; };
+    std::mutex g_poolWaitMutex;
+    std::map<uint32_t, PoolWait> g_poolWaits;
+}
+
+extern "C" PPC_FUNC(__imp__sub_822F16A0);
+PPC_FUNC(sub_822F16A0)
+{
+    const uint32_t osId = GetCurrentThreadId();
+    {
+        std::lock_guard<std::mutex> lock(g_poolWaitMutex);
+        g_poolWaits[osId] = { ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, NowMilliseconds() };
+    }
+    __imp__sub_822F16A0(ctx, base);
+    std::lock_guard<std::mutex> lock(g_poolWaitMutex);
+    g_poolWaits.erase(osId);
+}
+
+void Kernel::ReportPoolWaits()
+{
+    std::lock_guard<std::mutex> lock(g_poolWaitMutex);
+    if (g_poolWaits.empty()) return;
+    printf("\n");
+    printf("waits for the GPU to pass a point in the indirect buffer pool:\n");
+    for (const auto& entry : g_poolWaits)
+    {
+        const PoolWait& wait = entry.second;
+        const uint32_t block = Guest::Read32(Guest::Base, wait.device + 10768);
+        const uint32_t word = block ? Guest::Read32(Guest::Base, block + 4) : 0;
+        printf("  thread %-5u wants the GPU past 0x%08X on lap %u (%u); the GPU's word is "
+               "0x%08X (lap %u), %llu ms so far\n",
+            entry.first, wait.end, wait.lap, wait.lap & 3, word, word & 3,
+            (unsigned long long)(NowMilliseconds() - wait.since));
+    }
+}
+
 PPC_FUNC(__imp__VdSwap)
 {
     Kernel::CountImport("VdSwap");
@@ -763,6 +821,7 @@ PPC_FUNC(__imp__VdSwap)
     // name the buffer, so the first few are reported in full: that address is
     // what the window would present if anything had rendered into it.
     const uint64_t count = Video().swaps.fetch_add(1) + 1;
+    Kernel::Stats().swaps.store(count, std::memory_order_relaxed);
     // The fourth argument points at the texture fetch constant that describes
     // the front buffer: its address, its size and its format. That is the one
     // piece of information the window needs to show a real frame, so it is

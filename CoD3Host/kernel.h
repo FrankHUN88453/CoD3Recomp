@@ -88,6 +88,22 @@ namespace Kernel
     // Reports an object guest threads keep waiting on that nothing signals.
     void ReportWaitTraffic();
 
+    // The mutants and who holds them, what each thread is blocked on, and
+    // every thread's recent kernel calls: the second half of the above, on
+    // its own, for a lock that is not coming free.
+    void ReportLocks();
+
+    // A thread about to block on an object, for the report above, and the
+    // same thread no longer blocked. Critical sections use this too: their
+    // wait is a loop of this runtime's own, not a dispatcher wait.
+    void EnterWait(uint32_t object, uint32_t from, bool infinite);
+    void LeaveWait();
+
+    // The title's own waits for the GPU to pass a point in its indirect
+    // buffer pool, those in progress: the point, the lap, and the GPU's
+    // last word on where it is.
+    void ReportPoolWaits();
+
     std::mutex& DispatcherLock();
     std::condition_variable& DispatcherChanged();
 
@@ -102,6 +118,7 @@ namespace Kernel
         std::atomic<uint64_t> threadsCreated{ 0 };
         std::atomic<uint64_t> bytesAllocated{ 0 };
         std::atomic<uint64_t> audioFrames{ 0 };
+        std::atomic<uint64_t> swaps{ 0 };         // VdSwap calls: the frames the title finished
     };
     Counters& Stats();
 
@@ -148,6 +165,10 @@ namespace Kernel
     // so a fault report can print the registers at the fault. Each thread
     // that runs guest code registers its context on the way in.
     void SetCurrentContext(PPCContext* context);
+
+    // Another thread's context, by host thread id, for reading its guest
+    // registers in a report; null for a thread that runs no guest code.
+    PPCContext* ContextOf(uint32_t hostThreadId);
     PPCContext* CurrentContext();
 
     // COD3_DUMP names guest addresses, in hexadecimal separated by commas,
@@ -317,24 +338,23 @@ namespace Guest
 
     inline uint8_t* Ptr(uint32_t guestAddress) { return Base + guestAddress; }
 
-    // Physical memory is visible through several windows on this hardware: a
-    // physical address P can be reached at P itself and at 0xA0000000,
-    // 0xC0000000 and 0xE0000000 plus P, and they are all the same bytes. This
-    // runtime keeps them as separate memory, so anything the GPU writes for the
-    // title to read has to go to each of them or the title reads a stale copy.
-    // Where a physical address is readable in this runtime's flat memory.
+    // Physical memory is visible through three windows on this hardware, at
+    // 0xA0000000, 0xC0000000 and 0xE0000000 plus the physical address, and
+    // they are the same bytes: here, three views of one section
+    // (Initialize). Where a physical address is readable in this runtime's
+    // flat memory.
     inline uint32_t PhysicalAlias(uint32_t physicalAddress)
     {
         return 0xA0000000u | (physicalAddress & 0x1FFFFFFF);
     }
 
+    // A word the GPU writes at a physical address. The low copy is for the
+    // fence the driver puts at physical 0x100 and reads back there.
     inline void WritePhysical32(uint32_t physicalAddress, uint32_t value)
     {
         const uint32_t offset = physicalAddress & 0x1FFFFFFF;
-        Write32(Base, offset, value);
+        if (offset < 0x10000) Write32(Base, offset, value);
         Write32(Base, 0xA0000000u | offset, value);
-        Write32(Base, 0xC0000000u | offset, value);
-        Write32(Base, 0xE0000000u | offset, value);
     }
 
     // A function outside the title's own code: in a level's DLL, when one

@@ -29,6 +29,7 @@ namespace Guest
 namespace
 {
     void* g_reservation = nullptr;
+    HANDLE g_physicalSection = nullptr;   // the 512 MB behind the three physical windows
     uint64_t g_demandCommitted = 0;
 
     // Guest memory is reserved in one block but committed lazily. The title
@@ -693,7 +694,31 @@ bool Guest::Initialize(const char* xexPath)
     // guest pointer resolves to base + address. Reserve everything, commit
     // only what is actually touched: committing 4 GB up front would cost real
     // memory for pages the guest never uses.
-    g_reservation = VirtualAlloc(nullptr, TotalSize, MEM_RESERVE, PAGE_NOACCESS);
+    //
+    // Physical memory is reachable through three windows on this console, at
+    // 0xA0000000, 0xC0000000 and 0xE0000000 plus the physical address, and a
+    // write through one is visible through all of them. The title relies on
+    // that: its render threads write command lists through the first window
+    // and the thread that replays them reads them through the second, and
+    // with the windows as separate storage the replay read zeros, called a
+    // null handler for every entry and never fed the GPU a thing, which is
+    // where every level stopped. So the three windows are three views of one
+    // section. The reservation is made as a placeholder, which can be split
+    // and have views put into it without ever giving the address range back:
+    // releasing and re-reserving was tried before and lost the range.
+    static const auto virtualAlloc2 = reinterpret_cast<PVOID (WINAPI*)(
+        HANDLE, PVOID, SIZE_T, ULONG, ULONG, MEM_EXTENDED_PARAMETER*, ULONG)>(
+        GetProcAddress(GetModuleHandleW(L"kernelbase.dll"), "VirtualAlloc2"));
+    static const auto mapViewOfFile3 = reinterpret_cast<PVOID (WINAPI*)(
+        HANDLE, HANDLE, PVOID, ULONG64, SIZE_T, ULONG, ULONG, MEM_EXTENDED_PARAMETER*, ULONG)>(
+        GetProcAddress(GetModuleHandleW(L"kernelbase.dll"), "MapViewOfFile3"));
+    if (virtualAlloc2 == nullptr || mapViewOfFile3 == nullptr)
+    {
+        fprintf(stderr, "  this Windows has no VirtualAlloc2 or MapViewOfFile3\n");
+        return false;
+    }
+    g_reservation = virtualAlloc2(nullptr, nullptr, TotalSize,
+        MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, nullptr, 0);
     if (g_reservation == nullptr)
     {
         fprintf(stderr, "  reservation failed: error %lu\n", GetLastError());
@@ -701,14 +726,49 @@ bool Guest::Initialize(const char* xexPath)
     }
     Base = static_cast<uint8_t*>(g_reservation);
 
-    // Physical memory is reachable through four windows on this console, and a
-    // write through one is visible through all of them. Here they are separate
-    // storage, and only writes this runtime makes itself are mirrored. Making
-    // them genuinely the same memory means one section mapped in four places,
-    // which was tried: releasing the single reservation to make room for the
-    // views left the address space in a state the loader could not use, and the
-    // title stopped much earlier. It is a real gap and not the one that matters
-    // yet, because the guest reads back through the window it wrote to.
+    constexpr uint64_t WindowSize = 0x20000000;   // 512 MB of physical memory
+    constexpr uint64_t Windows[] = { 0xA0000000, 0xC0000000, 0xE0000000 };
+    g_physicalSection = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr,
+        PAGE_READWRITE | SEC_RESERVE, DWORD(WindowSize >> 32), DWORD(WindowSize), nullptr);
+    if (g_physicalSection == nullptr)
+    {
+        fprintf(stderr, "  the physical memory section could not be made: error %lu\n",
+            GetLastError());
+        return false;
+    }
+    // Split the placeholder at each window, so that each is a placeholder
+    // of its own and can be replaced by a view. Splitting off the tail first
+    // keeps every piece a single range.
+    for (uint64_t window : Windows)
+    {
+        // The last window reaches the end of the range: once the one before
+        // it is split off it is a placeholder of its own already.
+        if (window + WindowSize == TotalSize) continue;
+        if (!VirtualFree(Base + window, WindowSize, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER))
+        {
+            fprintf(stderr, "  the placeholder could not be split at 0x%llX: error %lu\n",
+                (unsigned long long)window, GetLastError());
+            return false;
+        }
+    }
+    for (uint64_t window : Windows)
+    {
+        if (mapViewOfFile3(g_physicalSection, GetCurrentProcess(), Base + window, 0, WindowSize,
+                           MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, nullptr, 0) == nullptr)
+        {
+            fprintf(stderr, "  the physical window at 0x%llX could not be mapped: error %lu\n",
+                (unsigned long long)window, GetLastError());
+            return false;
+        }
+    }
+    // The rest of the range, below the windows, becomes an ordinary
+    // reservation that pages are committed into as they are touched.
+    if (virtualAlloc2(GetCurrentProcess(), Base, Windows[0],
+                      MEM_RESERVE | MEM_REPLACE_PLACEHOLDER, PAGE_NOACCESS, nullptr, 0) == nullptr)
+    {
+        fprintf(stderr, "  the reservation below the windows failed: error %lu\n", GetLastError());
+        return false;
+    }
 
     // PPC_FUNC_PROLOGUE asserts this, and the vector loads assume it.
     if ((reinterpret_cast<uintptr_t>(Base) & 0x1F) != 0)
@@ -860,8 +920,12 @@ void Guest::Shutdown()
 {
     if (g_reservation != nullptr)
     {
+        for (uint64_t window : { 0xA0000000ull, 0xC0000000ull, 0xE0000000ull })
+            UnmapViewOfFile(Base + window);
         VirtualFree(g_reservation, 0, MEM_RELEASE);
         g_reservation = nullptr;
+        if (g_physicalSection != nullptr) CloseHandle(g_physicalSection);
+        g_physicalSection = nullptr;
         Base = nullptr;
     }
 }
@@ -1036,9 +1100,25 @@ void Kernel::DumpRequested()
 void Kernel::SetUnwinding(bool unwinding) { t_unwinding = unwinding; }
 bool Kernel::IsUnwinding() { return t_unwinding; }
 
+namespace
+{
+    std::mutex g_contextsMutex;
+    std::map<uint32_t, PPCContext*> g_contexts;   // by host thread id
+}
+
 void Kernel::SetCurrentContext(PPCContext* context)
 {
     t_currentContext = context;
+    std::lock_guard<std::mutex> lock(g_contextsMutex);
+    if (context != nullptr) g_contexts[GetCurrentThreadId()] = context;
+    else g_contexts.erase(GetCurrentThreadId());
+}
+
+PPCContext* Kernel::ContextOf(uint32_t hostThreadId)
+{
+    std::lock_guard<std::mutex> lock(g_contextsMutex);
+    auto found = g_contexts.find(hostThreadId);
+    return found != g_contexts.end() ? found->second : nullptr;
 }
 
 PPCContext* Kernel::CurrentContext()

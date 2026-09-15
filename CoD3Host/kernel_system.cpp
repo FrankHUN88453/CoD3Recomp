@@ -8,6 +8,7 @@
 // is bookkeeping the guest never observes.
 
 #include "kernel.h"
+#include "sampler.h"
 #include "scheduler.h"
 #include <chrono>
 
@@ -322,15 +323,41 @@ PPC_FUNC(__imp__RtlEnterCriticalSection)
     // Contended. The holder may release inline without telling this runtime,
     // so the wait re-checks on a timer rather than trusting a wake up.
     std::unique_lock<std::mutex> lock(Kernel::DispatcherLock());
+    Kernel::EnterWait(cs, uint32_t(ctx.lr), true);
+    int waited = 0;
     for (;;)
     {
         if (Guest::Read32(base, cs + CS_OWNING_THREAD) == 0)
         {
             Guest::Write32(base, cs + CS_OWNING_THREAD, self);
             Guest::Write32(base, cs + CS_RECURSION_COUNT, 1);
+            Kernel::LeaveWait();
             return;
         }
         Kernel::DispatcherChanged().wait_for(lock, std::chrono::milliseconds(1));
+
+        // Two seconds on one critical section is a holder that is not
+        // coming back: say which, held by whom, from where.
+        if (++waited == 2000)
+        {
+            const uint32_t owner = Guest::Read32(base, cs + CS_OWNING_THREAD);
+            printf("cs: 0x%08X has been held for two seconds by thread object 0x%08X "
+                   "(os %u, recursion %u), wanted by 0x%08X (os %lu) from 0x%08X\n",
+                cs, owner, owner ? Guest::Read32(base, owner + 0x14C) : 0,
+                Guest::Read32(base, cs + CS_RECURSION_COUNT), self, GetCurrentThreadId(),
+                uint32_t(ctx.lr));
+            fflush(stdout);
+            // Once: what every thread was last doing, which says what the
+            // holder is waiting for while it holds this.
+            static std::atomic<bool> reported{ false };
+            if (!reported.exchange(true))
+            {
+                lock.unlock();
+                Kernel::ReportLocks();
+                Sampler::SampleNow();
+                lock.lock();
+            }
+        }
     }
 }
 

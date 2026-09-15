@@ -214,6 +214,15 @@ bool Kernel::ReportWatchpoint(void* winContext)
         printf("\n");
     }
     printf("  it now holds 0x%08X%s\n", now, suspicious ? ", which is not a pointer" : "");
+    // The instruction itself, and the thread's link register: the host
+    // walk above goes astray through host frames, these two do not.
+    {
+        const CONTEXT* context = static_cast<const CONTEXT*>(winContext);
+        const uint32_t function = Sampler::FunctionAt(context->Rip);
+        const PPCContext* guest = Kernel::ContextOf(GetCurrentThreadId());
+        printf("  written by sub_%08X, os thread %lu, lr 0x%08X\n", function, GetCurrentThreadId(),
+            guest ? uint32_t(guest->lr) : 0);
+    }
     fflush(stdout);
     return true;
 }

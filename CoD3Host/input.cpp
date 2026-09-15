@@ -391,7 +391,14 @@ namespace
         const uint16_t fromScript = ScriptedButtons();
         uint16_t fromPad = 0;
         pad.buttons |= fromScript;
-        if (g_getState != nullptr)
+        // COD3_NOPAD=1 ignores a physical pad the same way, for the same
+        // reason: one lying on the desk with a button pressed walked the
+        // title's menus in place of the script.
+        static const bool padIgnored = []() {
+            const char* text = getenv("COD3_NOPAD");
+            return text != nullptr && text[0] != 0 && text[0] != '0';
+        }();
+        if (g_getState != nullptr && !padIgnored)
         {
             XInputState state{};
             if (g_getState(0, &state) == ERROR_SUCCESS)

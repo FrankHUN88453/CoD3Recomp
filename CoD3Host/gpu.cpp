@@ -432,6 +432,17 @@ namespace
             printf("gpu: fence write of 0x%08X to physical 0x%08X\n", written, target);
             fflush(stdout);
         }
+
+        // COD3_TRACEFENCE=1: every fence, with the ring position, for the
+        // title's own waits on them.
+        static const bool traceFences = []() {
+            const char* text = getenv("COD3_TRACEFENCE");
+            return text != nullptr && text[0] != 0 && text[0] != '0';
+        }();
+        if (traceFences)
+        {
+            printf("gpu: fence 0x%08X -> 0x%08X at ring %u\n", written, target, Gpu::WritePointer());
+        }
     }
 
     // WAIT_REG_MEM holds the command processor until a value satisfies a
@@ -1004,6 +1015,23 @@ uint32_t Gpu::ProcessRing(uint32_t ringBase, uint32_t ringSizeDwords,
                 t_lastIndirectAddress = target;
                 t_lastIndirectSize = ReadDword(cursor + 2);
                 t_lastIndirectSizeAt = ringBase + ((cursor + 2) % ringSizeDwords) * 4;
+
+                // COD3_TRACEPOOL=1: every buffer the ring hands over once a
+                // level is loading, against the title's own record of what
+                // it submitted.
+                static const bool tracePool = []() {
+                    const char* text = getenv("COD3_TRACEPOOL");
+                    return text != nullptr && text[0] != 0 && text[0] != '0';
+                }();
+                if (tracePool && Kernel::Stats().filesOpened.load(std::memory_order_relaxed) >= 40)
+                {
+                    static std::atomic<int> announced{ 0 };
+                    if (announced.fetch_add(1) < 3000)
+                    {
+                        printf("pool:   ring runs buffer %08X, %u dwords, at ring %u\n",
+                            target, targetDwords, cursor);
+                    }
+                }
                 ExecuteBuffer(Guest::PhysicalAlias(target), targetDwords, local, 1);
                 break;
             }
@@ -1285,6 +1313,15 @@ namespace
                     // the header is the mask of CPUs to interrupt.
                     const uint32_t cpuMask = cursor + 1 < dwords
                         ? Guest::Read32(Guest::Base, base + (cursor + 1) * 4) : 0;
+                    static const bool tracePool = []() {
+                        const char* text = getenv("COD3_TRACEPOOL");
+                        return text != nullptr && text[0] != 0 && text[0] != '0';
+                    }();
+                    if (tracePool && Kernel::Stats().filesOpened.load(std::memory_order_relaxed) >= 40)
+                    {
+                        printf("pool:   interrupt packet, cpu mask %u, raiser %s\n", cpuMask,
+                            g_raiseInterrupt != nullptr ? "installed" : "missing");
+                    }
                     RaiseInterruptNow(cpuMask);
                 }
                 else if (opcode == OpDrawIndx && cursor + 2 < dwords)

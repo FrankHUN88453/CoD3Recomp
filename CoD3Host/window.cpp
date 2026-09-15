@@ -161,14 +161,13 @@ namespace
 
         // The frame at the resolution scale, when the resolve kept one.
         {
-            const Edram::Shadow shadow = Edram::ShadowFor(address);
-            if (shadow.pixels != nullptr)
+            uint32_t shadowWidth = 0, shadowHeight = 0;
+            if (Edram::CopyShadow(address, shadowWidth, shadowHeight, g_pixels))
             {
-                outWidth = shadow.width;
-                outHeight = shadow.height;
-                g_copiedWidth = shadow.width;
-                g_copiedHeight = shadow.height;
-                g_pixels.assign(shadow.pixels, shadow.pixels + size_t(shadow.width) * shadow.height);
+                outWidth = shadowWidth;
+                outHeight = shadowHeight;
+                g_copiedWidth = shadowWidth;
+                g_copiedHeight = shadowHeight;
                 bool anything = false;
                 for (uint32_t value : g_pixels) if (value != 0) { anything = true; break; }
                 return anything;

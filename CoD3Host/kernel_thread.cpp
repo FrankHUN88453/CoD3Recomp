@@ -144,6 +144,9 @@ namespace
         // A wait on a thread object completes when the thread ends.
         Kernel::SignalThreadExit(GetCurrentThreadId());
         Guest::ReleaseThreadPointer(threadPointer);
+        // The context lives on this stack, which is about to go: the
+        // sampler must not find it afterwards.
+        Kernel::SetCurrentContext(nullptr);
         return ctx.r3.u32;
     }
 }
@@ -318,6 +321,7 @@ PPC_FUNC(__imp__ExTerminateThread)
     Kernel::SignalThreadExit(GetCurrentThreadId());
     Scheduler::Detach();
     if (block != 0) Guest::ReleaseThreadPointer(block);
+    Kernel::SetCurrentContext(nullptr);
 
     ExitThread(ctx.r3.u32);
 }

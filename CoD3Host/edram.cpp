@@ -134,6 +134,18 @@ Edram::Shadow Edram::ShadowFor(uint32_t physicalAddress)
     return Shadow{ found->second.width, found->second.height, found->second.pixels.data() };
 }
 
+bool Edram::CopyShadow(uint32_t physicalAddress, uint32_t& width, uint32_t& height,
+                       std::vector<uint32_t>& pixels)
+{
+    std::lock_guard<std::mutex> lock(g_shadowMutex);
+    auto found = g_shadows.find(physicalAddress & 0x1FFFFFFFu);
+    if (found == g_shadows.end() || found->second.pixels.empty()) return false;
+    width = found->second.width;
+    height = found->second.height;
+    pixels = found->second.pixels;
+    return true;
+}
+
 Edram::Statistics Edram::Stats()
 {
     std::lock_guard<std::mutex> lock(g_statisticsMutex);
