@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <mutex>
@@ -48,7 +49,6 @@ namespace
         if (key == VK_ESCAPE) { g_capturing = -1; return; }
         g_edit.keys[g_capturing] = key;
         g_capturing = -1;
-        Settings::Set(g_edit);
     }
 
     void SaveScreenshot(ID3D11Texture2D* back, int width, int height)
@@ -117,7 +117,8 @@ namespace
     void DrawMenu(int width, int height)
     {
         if (!g_editLoaded) { g_edit = Settings::Get(); g_editLoaded = true; }
-        bool changed = false;
+        bool changed = false;   // something differs from what is applied
+        const Settings::Values applied = Settings::Get();
         ImGui::SetNextWindowSize(ImVec2(560 * g_fontScale, 0), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowPos(ImVec2(width * 0.5f, height * 0.5f), ImGuiCond_FirstUseEver, ImVec2(0.5f, 0.5f));
         bool open = true;
@@ -133,23 +134,22 @@ namespace
                     {
                         // Only the first exists; the others stay names for now.
                         g_edit.renderer = 0;
-                        changed = true;
                     }
                     if (renderer != 0) ImGui::TextDisabled("Egyelőre csak a DirectX 11 érhető el.");
                     const char* scales[] = { "Ablak szerint (automatikus)", "1x (1040x624)", "2x (2080x1248)", "3x (3120x1872)", "4x (4160x2496)" };
-                    if (ImGui::Combo("Felbontás skálázó", &g_edit.renderScale, scales, 5)) changed = true;
+                    ImGui::Combo("Felbontás skálázó", &g_edit.renderScale, scales, 5);
                     ImGui::TextDisabled("A játék 1040x624-ben rajzol; ennek a többszöröse a kép.");
-                    if (ImGui::Checkbox("FPS megjelenítése", &g_edit.fpsOverlay)) changed = true;
+                    ImGui::Checkbox("FPS megjelenítése", &g_edit.fpsOverlay);
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Irányítás"))
                 {
-                    if (ImGui::SliderFloat("Egér érzékenység", &g_edit.mouseSensitivity, 0.1f, 3.0f, "%.2f")) changed = true;
+                    ImGui::SliderFloat("Egér érzékenység", &g_edit.mouseSensitivity, 0.1f, 3.0f, "%.2f");
                     ImGui::TextDisabled("Az X és az Y tengelyre egyformán.");
-                    if (ImGui::Checkbox("Aim Assist", &g_edit.aimAssist)) changed = true;
+                    ImGui::Checkbox("Aim Assist", &g_edit.aimAssist);
                     ImGui::SameLine();
                     ImGui::TextDisabled("(a játék saját célsegítése; újraindítás után él)");
-                    if (ImGui::Checkbox("Kontroller támogatás", &g_edit.controller)) changed = true;
+                    ImGui::Checkbox("Kontroller támogatás", &g_edit.controller);
                     ImGui::Separator();
                     ImGui::TextUnformatted("Billentyűk");
                     if (ImGui::BeginTable("keys", 2, ImGuiTableFlags_SizingStretchProp))
@@ -172,17 +172,34 @@ namespace
                     {
                         const Settings::Values defaults = Settings::Defaults();
                         for (int i = 0; i < Settings::ActionCount; i++) g_edit.keys[i] = defaults.keys[i];
-                        changed = true;
                     }
                     ImGui::EndTabItem();
                 }
                 ImGui::EndTabBar();
             }
             ImGui::Separator();
+            // Apply writes and uses the values; Cancel drops the edits.
+            const bool dirty = memcmp(&g_edit, &applied, sizeof(Settings::Values)) != 0;
+            ImGui::BeginDisabled(!dirty);
+            if (ImGui::Button("Alkalmaz", ImVec2(140 * g_fontScale, 0)))
+            {
+                Settings::Set(g_edit);
+                g_capturing = -1;
+            }
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (ImGui::Button("Mégse", ImVec2(140 * g_fontScale, 0)))
+            {
+                g_edit = applied;
+                g_capturing = -1;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Bezár", ImVec2(140 * g_fontScale, 0))) open = false;
+            if (dirty) { ImGui::SameLine(); ImGui::TextDisabled("(nem alkalmazott változások)"); }
             ImGui::TextDisabled("F11: menü   F12: képernyőkép a screenshots mappába   Esc: vissza a játékba");
         }
         ImGui::End();
-        if (changed) Settings::Set(g_edit);
+        (void)changed;
         if (!open) { g_open.store(false); g_capturing = -1; }
     }
 }

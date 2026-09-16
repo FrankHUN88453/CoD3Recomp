@@ -123,7 +123,9 @@ namespace
             levelSince = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
         const bool inLevel = levelSince != 0 &&
             std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count() - levelSince >= g_autoSeconds;
-        if (g_frameWanted.load(std::memory_order_relaxed) == -2 && inLevel && inFrame >= 300)
+        // COD3_D3DFRAME_MINDRAWS=N: the auto frame needs at least N draws.
+        static const uint64_t minDraws = []() { const char* t = getenv("COD3_D3DFRAME_MINDRAWS"); return t ? uint64_t(strtoull(t, nullptr, 10)) : 300ull; }();
+        if (g_frameWanted.load(std::memory_order_relaxed) == -2 && inLevel && inFrame >= minDraws)
         {
             g_frameWanted.store(int64_t(present) + 1);
             printf("d3d11: frame %llu had %llu draws, the next two are logged\n", (unsigned long long)present, (unsigned long long)inFrame);
@@ -2502,7 +2504,9 @@ namespace
         if (FAILED(g_context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return;
 
         char name[512];
-        snprintf(name, sizeof(name), "%s-%02d.bmp", path, (counter / every) % 40);
+        // COD3_FRAMEDUMP_KEEP=N cycles through N files rather than forty.
+        static const int keep = []() { const char* t = getenv("COD3_FRAMEDUMP_KEEP"); const int v = t ? int(strtol(t, nullptr, 10)) : 40; return v > 0 ? v : 40; }();
+        snprintf(name, sizeof(name), "%s-%03d.bmp", path, (counter / every) % keep);
         BITMAPFILEHEADER file{};
         BITMAPINFOHEADER info{};
         info.biSize = sizeof(info);
