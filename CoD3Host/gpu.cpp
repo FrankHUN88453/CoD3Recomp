@@ -722,6 +722,11 @@ namespace
 
 void Gpu::SetSubmitHook(void (*hook)()) { g_submitHook = hook; }
 
+namespace
+{
+    std::map<uint32_t, uint64_t> g_registerWrites;   // under g_registerMutex
+}
+
 void Gpu::WriteRegister(uint32_t address, uint32_t value)
 {
     uint32_t mirrorTo = 0;
@@ -729,6 +734,25 @@ void Gpu::WriteRegister(uint32_t address, uint32_t value)
     {
         std::lock_guard<std::mutex> lock(g_registerMutex);
         g_registers[address] = value;
+
+        // COD3_TRACEREG=1: every register written once a level is loading,
+        // and how often, for the ones this runtime does not act on.
+        static const bool traceRegisters = []() {
+            const char* text = getenv("COD3_TRACEREG");
+            return text != nullptr && text[0] != 0 && text[0] != '0';
+        }();
+        if (traceRegisters && Kernel::Stats().filesOpened.load(std::memory_order_relaxed) >= 40)
+        {
+            const uint32_t index = (address - ApertureBase) / 4;
+            if (index < 0x2400 && (index < 0x4000 || index >= 0x4800))
+                g_registerWrites[index]++;
+            if (index == 0x2307 || index == 0x2308 || index == 0x2205 || index == 0x2200 || index == 0x2002)
+            {
+                static std::map<uint64_t, bool> seen;
+                if (seen.size() < 60 && seen.emplace((uint64_t(index) << 32) | value, true).second)
+                    printf("gpu: register %04X written with %08X in the level\n", index, value);
+            }
+        }
 
         // The scratch registers are mirrored into memory.
         //
@@ -1420,6 +1444,16 @@ namespace
 
 void Gpu::ReportPacketMix()
 {
+    {
+        std::lock_guard<std::mutex> lock(g_registerMutex);
+        if (!g_registerWrites.empty())
+        {
+            printf("registers written in the level, by index:");
+            for (const auto& entry : g_registerWrites)
+                printf(" %04X x%llu", entry.first, (unsigned long long)entry.second);
+            printf("\n");
+        }
+    }
     std::lock_guard<std::mutex> lock(g_histogramMutex);
     if (g_type0 + g_type2 + g_type3 == 0) return;
 
