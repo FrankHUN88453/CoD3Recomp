@@ -121,6 +121,8 @@ namespace
         DeleteObject(font);
     }
 
+    std::atomic<int> g_wheel{ 0 };   // wheel notches since the last take
+
     LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM w, LPARAM l)
     {
         // Windows asks the window what the pointer should look like whenever it
@@ -136,6 +138,11 @@ namespace
         {
             g_running.store(false);
             PostQuitMessage(0);
+            return 0;
+        }
+        if (message == WM_MOUSEWHEEL)
+        {
+            g_wheel.fetch_add(GET_WHEEL_DELTA_WPARAM(w) / WHEEL_DELTA);
             return 0;
         }
         return DefWindowProcW(window, message, w, l);
@@ -520,6 +527,8 @@ bool Window::HasFocus()
     const HWND window = g_window.load();
     return window != nullptr && GetForegroundWindow() == window;
 }
+
+int Window::TakeWheel() { return g_wheel.exchange(0); }
 
 void Window::SetFrontBuffer(uint32_t address, uint32_t width, uint32_t height)
 {

@@ -946,6 +946,35 @@ PPC_FUNC(__imp__VdSwap)
             }
         }
     }
+
+    // One frame of latency, as the console's driver allows. The title's
+    // vertical blank runs at sixty hertz here whether or not the GPU has
+    // kept up, so nothing else stops the title from running two frames
+    // ahead of the GPU; and two frames ahead is the title writing the
+    // dynamic data of frame N+2 over the buffer frame N is still being
+    // drawn from - the sky's pieces went missing that way in every other
+    // frame of a cutscene. This waits until the GPU has reached the swap
+    // before this one. COD3_SWAPLATENCY=N allows N frames instead.
+    {
+        static const uint64_t allowed = []() {
+            const char* text = getenv("COD3_SWAPLATENCY");
+            const long value = text != nullptr ? strtol(text, nullptr, 10) : 1;
+            return uint64_t(value < 0 ? 0 : value);
+        }();
+        if (count > allowed)
+        {
+            const uint64_t needed = count - allowed;
+            if (Kernel::Stats().swapsReached.load(std::memory_order_acquire) < needed)
+            {
+                Scheduler::Release();
+                struct Resume { ~Resume() { Scheduler::Acquire(); } } resume;
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+                while (Kernel::Stats().swapsReached.load(std::memory_order_acquire) < needed &&
+                       std::chrono::steady_clock::now() < deadline)
+                    std::this_thread::sleep_for(std::chrono::microseconds(200));
+            }
+        }
+    }
     ctx.r3.u32 = 0;
 }
 

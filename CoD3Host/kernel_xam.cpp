@@ -15,10 +15,15 @@
 
 #include <cstdio>
 #include <mutex>
+#include <filesystem>
+#include <map>
+#include <string>
 #include <vector>
 #include <cstring>
 
 #include <Windows.h>
+
+PPC_FUNC(__imp__NtSetEvent);
 
 namespace
 {
@@ -353,25 +358,286 @@ PPC_FUNC(__imp__XamFree)
 }
 
 // --- Content and storage ---------------------------------------------------
+//
+// The console keeps saved games in content packages on a storage device the
+// player picks in a dialog. Here there is one device, the saves folder
+// beside the executable, and every package is a folder in saves/content
+// named by the file name the title gives it, with the display name kept in
+// a small file beside the title's own. Mounting a package makes its root
+// name ("save:") a path prefix the file layer resolves into the folder.
 
+namespace
+{
+    constexpr uint32_t X_ERROR_FILE_NOT_FOUND    = 0x00000002;
+    constexpr uint32_t X_ERROR_ACCESS_DENIED     = 0x00000005;
+    constexpr uint32_t X_ERROR_NO_MORE_FILES     = 0x00000012;
+    constexpr uint32_t X_ERROR_ALREADY_EXISTS    = 0x000000B7;
+    constexpr uint32_t DummyDeviceId = 0xF00D0000;
+
+    // XCONTENT_DATA: device id, content type, a display name of 128 wide
+    // characters, a file name of 42 bytes.
+    constexpr uint32_t ContentDataSize = 308;
+
+    struct ContentData
+    {
+        uint32_t deviceId = 0, contentType = 0;
+        std::wstring displayName;
+        std::string fileName;
+    };
+
+    ContentData ReadContentData(const uint8_t* base, uint32_t at)
+    {
+        ContentData data;
+        if (at == 0) return data;
+        data.deviceId = Guest::Read32(base, at);
+        data.contentType = Guest::Read32(base, at + 4);
+        for (uint32_t i = 0; i < 128; i++)
+        {
+            const uint16_t c = Guest::Read16(base, at + 8 + i * 2);
+            if (c == 0) break;
+            data.displayName += wchar_t(c);
+        }
+        for (uint32_t i = 0; i < 42; i++)
+        {
+            const char c = char(*(base + at + 8 + 256 + i));
+            if (c == 0) break;
+            data.fileName += c;
+        }
+        return data;
+    }
+
+    void WriteContentData(uint8_t* base, uint32_t at, const ContentData& data)
+    {
+        memset(base + at, 0, ContentDataSize);
+        Guest::Write32(base, at, data.deviceId);
+        Guest::Write32(base, at + 4, data.contentType);
+        for (size_t i = 0; i < data.displayName.size() && i < 127; i++)
+            Guest::Write16(base, uint32_t(at + 8 + i * 2), uint16_t(data.displayName[i]));
+        for (size_t i = 0; i < data.fileName.size() && i < 41; i++)
+            *(base + at + 8 + 256 + i) = uint8_t(data.fileName[i]);
+    }
+
+    // A file name the title gives is used as a folder name; only the plain
+    // characters of it are kept, so it cannot leave the saves folder.
+    std::string SafeName(const std::string& name)
+    {
+        std::string out;
+        for (char c : name)
+            if (isalnum((unsigned char)c) || c == '_' || c == '-' || c == '.' || c == ' ') out += c;
+        while (!out.empty() && (out.back() == '.' || out.back() == ' ')) out.pop_back();
+        return out.empty() ? "unnamed" : out;
+    }
+
+    std::filesystem::path ContentFolder(const ContentData& data)
+    {
+        char type[16];
+        snprintf(type, sizeof(type), "%08X", data.contentType);
+        return Kernel::SavesRoot() / "content" / type / SafeName(data.fileName);
+    }
+
+    // XOVERLAPPED: result, length, context, event, completion routine, its
+    // context, extended error. A call given one answers through it: the
+    // result goes in, the event is set, and the call itself says pending.
+    uint32_t CompleteOverlapped(PPCContext& ctx, uint8_t* base, uint32_t overlapped, uint32_t result, uint32_t length = 0)
+    {
+        if (overlapped == 0) return result;
+        Guest::Write32(base, overlapped + 0x00, result);
+        Guest::Write32(base, overlapped + 0x04, length);
+        Guest::Write32(base, overlapped + 0x18, result);
+        const uint32_t event = Guest::Read32(base, overlapped + 0x0C);
+        if (event != 0)
+        {
+            const uint64_t r3 = ctx.r3.u64, r4 = ctx.r4.u64;
+            ctx.r3.u32 = event;
+            ctx.r4.u32 = 0;
+            __imp__NtSetEvent(ctx, base);
+            ctx.r3.u64 = r3;
+            ctx.r4.u64 = r4;
+        }
+        const uint32_t routine = Guest::Read32(base, overlapped + 0x10);
+        if (routine != 0)
+        {
+            // Run here, on the calling thread, with the error, the length
+            // and the title's context: what the console's own would get.
+            if (PPCFunc* callback = Guest::Lookup(routine))
+            {
+                const uint64_t r3 = ctx.r3.u64, r4 = ctx.r4.u64, r5 = ctx.r5.u64;
+                ctx.r3.u32 = result;
+                ctx.r4.u32 = length;
+                ctx.r5.u32 = Guest::Read32(base, overlapped + 0x14);
+                callback(ctx, base);
+                ctx.r3.u64 = r3; ctx.r4.u64 = r4; ctx.r5.u64 = r5;
+            }
+        }
+        return X_ERROR_IO_PENDING;
+    }
+
+    // The enumerators the title has open: each a list of packages found.
+    std::mutex g_enumeratorMutex;
+    std::map<uint32_t, std::vector<ContentData>> g_enumerators;
+    uint32_t g_nextEnumerator = 0x7E000001;
+
+    std::vector<ContentData> FindContent(uint32_t contentType)
+    {
+        std::vector<ContentData> found;
+        char type[16];
+        snprintf(type, sizeof(type), "%08X", contentType);
+        std::error_code ec;
+        const std::filesystem::path folder = Kernel::SavesRoot() / "content" / type;
+        if (!std::filesystem::is_directory(folder, ec)) return found;
+        for (const auto& entry : std::filesystem::directory_iterator(folder, ec))
+        {
+            if (ec) break;
+            if (!entry.is_directory()) continue;
+            ContentData data;
+            data.deviceId = DummyDeviceId;
+            data.contentType = contentType;
+            data.fileName = entry.path().filename().string();
+            data.displayName = std::wstring(data.fileName.begin(), data.fileName.end());
+            if (FILE* names = _wfopen((entry.path() / L"displayname.txt").c_str(), L"rb"))
+            {
+                wchar_t text[130] = {};
+                const size_t n = fread(text, sizeof(wchar_t), 128, names);
+                fclose(names);
+                if (n > 0) data.displayName.assign(text, n);
+            }
+            found.push_back(data);
+        }
+        return found;
+    }
+}
+
+// X_RESULT XamContentCreateEnumerator(userIndex, deviceId, contentType,
+//                                     contentFlags, itemsPerEnumerate,
+//                                     bufferSize*, handle*)
 PPC_FUNC(__imp__XamContentCreateEnumerator)
 {
     Kernel::CountImport("XamContentCreateEnumerator");
-    if (ctx.r8.u32 != 0) Guest::Write32(base, ctx.r8.u32, 0);
-    ctx.r3.u32 = X_ERROR_NOT_FOUND;
+    const uint32_t contentType = ctx.r5.u32, items = ctx.r7.u32;
+    if (ctx.r8.u32 != 0) Guest::Write32(base, ctx.r8.u32, (items ? items : 1) * ContentDataSize);
+    uint32_t handle;
+    {
+        std::lock_guard<std::mutex> lock(g_enumeratorMutex);
+        handle = g_nextEnumerator++;
+        g_enumerators[handle] = FindContent(contentType);
+    }
+    if (ctx.r9.u32 != 0) Guest::Write32(base, ctx.r9.u32, handle);
+    printf("xam: content enumerator for type 0x%08X: %zu packages\n", contentType, g_enumerators[handle].size());
+    ctx.r3.u32 = X_ERROR_SUCCESS;
 }
-
-PPC_FUNC(__imp__XamContentCreateEx) { Kernel::CountImport("XamContentCreateEx"); ctx.r3.u32 = X_ERROR_NOT_FOUND; }
-PPC_FUNC(__imp__XamContentClose) { Kernel::CountImport("XamContentClose"); ctx.r3.u32 = X_ERROR_SUCCESS; }
-PPC_FUNC(__imp__XamContentDelete) { Kernel::CountImport("XamContentDelete"); ctx.r3.u32 = X_ERROR_NOT_FOUND; }
-PPC_FUNC(__imp__XamContentGetCreator) { Kernel::CountImport("XamContentGetCreator"); ctx.r3.u32 = X_ERROR_NOT_FOUND; }
 
 // X_RESULT XamEnumerate(HANDLE, flags, buffer, size, itemsReturned*, overlapped)
 PPC_FUNC(__imp__XamEnumerate)
 {
     Kernel::CountImport("XamEnumerate");
-    if (ctx.r7.u32 != 0) Guest::Write32(base, ctx.r7.u32, 0);
-    ctx.r3.u32 = X_ERROR_NOT_FOUND;
+    const uint32_t handle = ctx.r3.u32, buffer = ctx.r5.u32, size = ctx.r6.u32;
+    const uint32_t itemsOut = ctx.r7.u32, overlapped = ctx.r8.u32;
+    std::vector<ContentData> batch;
+    {
+        std::lock_guard<std::mutex> lock(g_enumeratorMutex);
+        auto found = g_enumerators.find(handle);
+        if (found != g_enumerators.end())
+        {
+            const uint32_t room = buffer != 0 ? size / ContentDataSize : 0;
+            while (!found->second.empty() && batch.size() < room)
+            {
+                batch.push_back(found->second.front());
+                found->second.erase(found->second.begin());
+            }
+        }
+    }
+    for (size_t i = 0; i < batch.size(); i++)
+        WriteContentData(base, uint32_t(buffer + i * ContentDataSize), batch[i]);
+    if (itemsOut != 0) Guest::Write32(base, itemsOut, uint32_t(batch.size()));
+    const uint32_t result = batch.empty() ? X_ERROR_NO_MORE_FILES : X_ERROR_SUCCESS;
+    ctx.r3.u32 = CompleteOverlapped(ctx, base, overlapped, result, uint32_t(batch.size()));
+}
+
+// X_RESULT XamContentCreateEx(userIndex, rootName, contentData*, flags,
+//                             disposition*, licenseMask*, cacheSize,
+//                             contentSize (64), overlapped)
+PPC_FUNC(__imp__XamContentCreateEx)
+{
+    Kernel::CountImport("XamContentCreateEx");
+    std::string rootName;
+    for (uint32_t i = 0; i < 32 && ctx.r4.u32 != 0; i++)
+    {
+        const char c = char(*(base + ctx.r4.u32 + i));
+        if (c == 0) break;
+        rootName += c;
+    }
+    const ContentData data = ReadContentData(base, ctx.r5.u32);
+    const uint32_t flags = ctx.r6.u32 & 0xF;
+    const uint32_t dispositionOut = ctx.r7.u32, licenseOut = ctx.r8.u32;
+    const uint32_t overlapped = Guest::Read32(base, ctx.r1.u32 + 0x54);
+
+    const std::filesystem::path folder = ContentFolder(data);
+    std::error_code ec;
+    const bool exists = std::filesystem::is_directory(folder, ec);
+    // XCONTENTFLAG_CREATENEW 1, CREATEALWAYS 2, OPENEXISTING 3, OPENALWAYS 4,
+    // TRUNCATEEXISTING 5.
+    uint32_t result = X_ERROR_SUCCESS;
+    uint32_t disposition = exists ? 2 : 1;   // XCONTENT_OPENED_EXISTING, XCONTENT_CREATED_NEW
+    if (flags == 1 && exists) result = X_ERROR_ALREADY_EXISTS;
+    else if ((flags == 3 || flags == 5) && !exists) result = X_ERROR_FILE_NOT_FOUND;
+    else
+    {
+        if ((flags == 2 || flags == 5) && exists) std::filesystem::remove_all(folder, ec);
+        std::filesystem::create_directories(folder, ec);
+        if (ec) result = X_ERROR_ACCESS_DENIED;
+        else
+        {
+            if (FILE* names = _wfopen((folder / L"displayname.txt").c_str(), L"wb"))
+            {
+                fwrite(data.displayName.c_str(), sizeof(wchar_t), data.displayName.size(), names);
+                fclose(names);
+            }
+            Kernel::MountContent(rootName, folder);
+        }
+    }
+    if (dispositionOut != 0) Guest::Write32(base, dispositionOut, disposition);
+    if (licenseOut != 0) Guest::Write32(base, licenseOut, 0xFFFFFFFF);
+    printf("xam: content \"%s\" (type 0x%08X, file %s, flags %u) as %s: %s, result 0x%X\n",
+        std::string(data.displayName.begin(), data.displayName.end()).c_str(), data.contentType,
+        data.fileName.c_str(), flags, rootName.c_str(), folder.string().c_str(), result);
+    fflush(stdout);
+    ctx.r3.u32 = CompleteOverlapped(ctx, base, overlapped, result);
+}
+
+// X_RESULT XamContentClose(rootName, overlapped)
+PPC_FUNC(__imp__XamContentClose)
+{
+    Kernel::CountImport("XamContentClose");
+    std::string rootName;
+    for (uint32_t i = 0; i < 32 && ctx.r3.u32 != 0; i++)
+    {
+        const char c = char(*(base + ctx.r3.u32 + i));
+        if (c == 0) break;
+        rootName += c;
+    }
+    Kernel::UnmountContent(rootName);
+    ctx.r3.u32 = CompleteOverlapped(ctx, base, ctx.r4.u32, X_ERROR_SUCCESS);
+}
+
+// X_RESULT XamContentDelete(userIndex, contentData*, overlapped)
+PPC_FUNC(__imp__XamContentDelete)
+{
+    Kernel::CountImport("XamContentDelete");
+    const ContentData data = ReadContentData(base, ctx.r4.u32);
+    std::error_code ec;
+    const std::filesystem::path folder = ContentFolder(data);
+    const bool existed = std::filesystem::is_directory(folder, ec);
+    if (existed) std::filesystem::remove_all(folder, ec);
+    ctx.r3.u32 = CompleteOverlapped(ctx, base, ctx.r5.u32, existed ? X_ERROR_SUCCESS : X_ERROR_FILE_NOT_FOUND);
+}
+
+// X_RESULT XamContentGetCreator(userIndex, contentData*, isCreator*, xuid*, overlapped)
+PPC_FUNC(__imp__XamContentGetCreator)
+{
+    Kernel::CountImport("XamContentGetCreator");
+    if (ctx.r5.u32 != 0) Guest::Write32(base, ctx.r5.u32, 1);
+    if (ctx.r6.u32 != 0) Guest::Write64(base, ctx.r6.u32, PlayerXuid);
+    ctx.r3.u32 = CompleteOverlapped(ctx, base, ctx.r7.u32, X_ERROR_SUCCESS);
 }
 
 // --- System dialogs --------------------------------------------------------
@@ -379,7 +645,18 @@ PPC_FUNC(__imp__XamEnumerate)
 // as a valid outcome and carries on.
 
 PPC_FUNC(__imp__XamShowSigninUI) { Kernel::CountImport("XamShowSigninUI"); ctx.r3.u32 = X_ERROR_SUCCESS; }
-PPC_FUNC(__imp__XamShowDeviceSelectorUI) { Kernel::CountImport("XamShowDeviceSelectorUI"); ctx.r3.u32 = X_ERROR_NOT_FOUND; }
+// X_RESULT XamShowDeviceSelectorUI(userIndex, contentType, contentFlags,
+//                                  totalRequested (64), deviceId*, overlapped)
+// The one device, chosen without a dialog.
+PPC_FUNC(__imp__XamShowDeviceSelectorUI)
+{
+    Kernel::CountImport("XamShowDeviceSelectorUI");
+    if (ctx.r7.u32 != 0) Guest::Write32(base, ctx.r7.u32, DummyDeviceId);
+    printf("xam: the storage device asked for (type 0x%08X, %llu bytes) is the saves folder\n",
+        ctx.r4.u32, (unsigned long long)ctx.r6.u64);
+    fflush(stdout);
+    ctx.r3.u32 = CompleteOverlapped(ctx, base, ctx.r8.u32, X_ERROR_SUCCESS);
+}
 PPC_FUNC(__imp__XamShowMessageBoxUI) { Kernel::CountImport("XamShowMessageBoxUI"); ctx.r3.u32 = X_ERROR_SUCCESS; }
 PPC_FUNC(__imp__XamShowMessageBoxUIEx) { Kernel::CountImport("XamShowMessageBoxUIEx"); ctx.r3.u32 = X_ERROR_SUCCESS; }
 PPC_FUNC(__imp__XamShowMarketplaceUI) { Kernel::CountImport("XamShowMarketplaceUI"); ctx.r3.u32 = X_ERROR_SUCCESS; }

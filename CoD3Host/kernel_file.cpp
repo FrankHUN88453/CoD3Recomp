@@ -109,6 +109,10 @@ namespace
 
     fs::path g_savesRoot;
 
+    // Content packages the title has mounted, by root name, lowered.
+    std::mutex g_mountMutex;
+    std::map<std::string, fs::path> g_mounts;
+
     std::string ReadGuestString(const uint8_t* base, uint32_t address, uint32_t length)
     {
         std::string out;
@@ -178,6 +182,21 @@ namespace
         std::string lowered = guestPath;
         std::transform(lowered.begin(), lowered.end(), lowered.begin(),
             [](unsigned char c) { return static_cast<char>(tolower(c)); });
+
+        // A mounted content package: "save:" and what follows it.
+        {
+            std::lock_guard<std::mutex> lock(g_mountMutex);
+            for (const auto& mount : g_mounts)
+            {
+                const std::string prefix = mount.first + ":";
+                if (lowered.compare(0, prefix.size(), prefix) != 0) continue;
+                if (lowered.size() > prefix.size() && lowered[prefix.size()] != '/') continue;
+                std::string rest = guestPath.substr(prefix.size());
+                while (!rest.empty() && rest.front() == '/') rest.erase(0, 1);
+                if (rest.find("..") != std::string::npos) return {};
+                return rest.empty() ? mount.second : mount.second / fs::path(rest);
+            }
+        }
 
         std::string relative;
         bool matched = false;
@@ -310,6 +329,26 @@ namespace
         fflush(stdout);
         return combined;
     }
+}
+
+std::filesystem::path Kernel::SavesRoot() { return g_savesRoot; }
+
+void Kernel::MountContent(const std::string& rootName, const fs::path& folder)
+{
+    std::string lowered = rootName;
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+        [](unsigned char c) { return static_cast<char>(tolower(c)); });
+    std::lock_guard<std::mutex> lock(g_mountMutex);
+    g_mounts[lowered] = folder;
+}
+
+void Kernel::UnmountContent(const std::string& rootName)
+{
+    std::string lowered = rootName;
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+        [](unsigned char c) { return static_cast<char>(tolower(c)); });
+    std::lock_guard<std::mutex> lock(g_mountMutex);
+    g_mounts.erase(lowered);
 }
 
 void Kernel::InitializeFileSystem(const fs::path& exeDirectory)

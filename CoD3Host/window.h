@@ -28,6 +28,8 @@ namespace Window
 
     // Where the guest resolved its last frame. Everything after this is a blit.
     void SetFrontBuffer(uint32_t address, uint32_t width, uint32_t height);
+    // Wheel notches turned since the last call, positive away from the user.
+    int TakeWheel();
 
     // How that buffer is laid out. A resolved surface is wider than the part
     // that is visible, and its texels are tiled rather than in reading order,

@@ -491,6 +491,36 @@ namespace
     {
         if (magic != 0x50415753u) return;
         if (surface == 0 || width <= 1 || height <= 1 || width > 4096 || height > 4096) return;
+        {
+            // The size, whenever it changes: a picture that jumps between
+            // two sizes is a picture that jumps on the screen.
+            static uint32_t lastWidth = 0, lastHeight = 0;
+            static int announced = 0;
+            if ((width != lastWidth || height != lastHeight) && announced++ < 40)
+            {
+                printf("video: swap of %08X at %ux%u\n", surface, width, height);
+                fflush(stdout);
+            }
+            lastWidth = width; lastHeight = height;
+        }
+        {
+            // How far the title's frames run ahead of the GPU's: the swaps
+            // VdSwap has been called for less the swaps reached here. Dynamic
+            // data the title double buffers is overwritten when this passes
+            // one, and what the GPU draws then is half of the next frame.
+            static uint64_t reached = 0;
+            static int64_t lastAhead = -1;
+            static int announced = 0;
+            reached++;
+            const int64_t ahead = int64_t(Kernel::Stats().swaps.load(std::memory_order_relaxed)) - int64_t(reached);
+            if (ahead != lastAhead && announced++ < 60)
+            {
+                printf("video: the title is %lld swaps ahead of the GPU at swap %llu\n", (long long)ahead, (unsigned long long)reached);
+                fflush(stdout);
+            }
+            lastAhead = ahead;
+            Kernel::Stats().swapsReached.store(reached, std::memory_order_release);
+        }
         Window::SetFrontBuffer(Guest::PhysicalAlias(surface), width, height);
         D3D11Backend::Swap(surface, width, height);
     }

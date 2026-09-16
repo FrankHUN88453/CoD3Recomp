@@ -336,13 +336,23 @@ namespace
             { 'R', PadX }, { 'E', PadX },
             { 'F', PadY },
             { 'V', PadRightThumb },
-            { 'Q', PadLeftShoulder }, { 'G', PadRightShoulder },
+            { 'Q', PadLeftShoulder }, { '4', PadLeftShoulder }, { 'G', PadRightShoulder },
             { VK_SHIFT, PadLeftThumb },
             { VK_TAB, PadLeft },
         };
 
         for (const Mapping& mapping : mappings)
             if (Down(mapping.key)) pad.buttons |= mapping.button;
+
+        // The wheel changes weapon, either way: the console has one button
+        // for it, which cycles, so up and down both press it, held for a
+        // few reads so the title's own poll sees the press.
+        {
+            static int wheelReadsLeft = 0;
+            const int wheel = Window::TakeWheel();
+            if (wheel != 0) wheelReadsLeft = 8;
+            if (wheelReadsLeft > 0) { pad.buttons |= PadY; wheelReadsLeft--; }
+        }
 
         // The title's first screen waits for Start, and asking a player to know
         // that is asking them to guess. While the mouse is free, which is every

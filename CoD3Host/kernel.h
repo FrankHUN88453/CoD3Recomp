@@ -49,6 +49,13 @@ namespace Kernel
     // the installer has already located.
     void InitializeFileSystem(const std::filesystem::path& exeDirectory);
 
+    // A content package the title has mounted under a root name ("save:")
+    // is a folder here; paths under the name resolve into it, for reading
+    // and writing alike, until it is unmounted.
+    std::filesystem::path SavesRoot();
+    void MountContent(const std::string& rootName, const std::filesystem::path& folder);
+    void UnmountContent(const std::string& rootName);
+
     // NtClose serves both the object table and the file table. This lets the
     // object implementation hand a handle it does not recognise to the file
     // layer before reporting it invalid.
@@ -123,6 +130,7 @@ namespace Kernel
         std::atomic<uint64_t> bytesAllocated{ 0 };
         std::atomic<uint64_t> audioFrames{ 0 };
         std::atomic<uint64_t> swaps{ 0 };         // VdSwap calls: the frames the title finished
+        std::atomic<uint64_t> swapsReached{ 0 };  // swap packets the GPU has carried out
     };
     Counters& Stats();
 

@@ -876,6 +876,9 @@ namespace
         }
     }
 
+    ComPtr<ID3D11Texture2D> g_lastResolveSource;   // the colour target the last resolve read, for the swap dump
+    ComPtr<ID3D11Texture2D> g_lastDrawDepth;       // the depth target the last draw used, for the same
+
     struct ColorTarget
     {
         ComPtr<ID3D11Texture2D> texture;
@@ -1107,6 +1110,15 @@ namespace
         VertexBuffer& entry = g_vertexBuffers[key];
         const uint8_t* data = Guest::Base + Guest::PhysicalAlias(physical);
         const uint64_t fingerprint = Fingerprint(data, bytes);
+        // COD3_WATCHVB=hex: every time the buffer at that physical address
+        // is seen with new contents, with the swap it happened in.
+        {
+            static const uint32_t watched = []() { const char* t = getenv("COD3_WATCHVB"); return t ? uint32_t(strtoul(t, nullptr, 16)) : 0u; }();
+            static int announced = 0;
+            if (watched != 0 && physical == watched && entry.fingerprint != fingerprint && announced++ < 80)
+                printf("d3d11: buffer %08X (%u bytes) changed at swap %llu%s\n", physical, bytes,
+                    (unsigned long long)g_swaps.load(std::memory_order_relaxed), entry.buffer ? "" : " (first)");
+        }
         if (entry.buffer && entry.bytes >= bytes && entry.fingerprint == fingerprint)
             return entry.resource.Get();
 
@@ -1479,7 +1491,11 @@ namespace
         static const char* const prefix = getenv("COD3_D3DDRAWDUMP");
         if (prefix == nullptr || texture == nullptr || !FrameLogged()) return;
         int& number = g_dumpNumber;
-        if (number >= 2000) return;
+        // COD3_D3DDRAWDUMPFROM=N skips the first N draws of the frame, for
+        // the end of a long frame.
+        static const uint32_t from = []() { const char* t = getenv("COD3_D3DDRAWDUMPFROM"); return t ? uint32_t(strtoul(t, nullptr, 10)) : 0u; }();
+        if (number < int(from)) { number++; return; }
+        if (number >= int(from) + 2000) return;
         D3D11_TEXTURE2D_DESC desc{};
         texture->GetDesc(&desc);
         if (desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM && desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM) return;
@@ -1735,7 +1751,7 @@ namespace
         if ((depthControl & 3) != 0 || depthOnly)
         {
             DepthTarget* depth = GetDepthTarget(Reg(0x2002), pitch, scale);
-            if (depth != nullptr) depthView = depth->view.Get();
+            if (depth != nullptr) { depthView = depth->view.Get(); g_lastDrawDepth = depth->texture; }
         }
         if (targetCount == 0 && depthView == nullptr)
         {
@@ -2211,6 +2227,49 @@ namespace
             {
                 DepthTarget* depth = depthView != nullptr ? GetDepthTarget(Reg(0x2002), pitch, scale) : nullptr;
                 DumpTargetAfterDraw(color->texture.Get(), depth != nullptr ? depth->texture.Get() : nullptr, targetWidth, targetHeight);
+                // COD3_D3DBAND=1 with COD3_D3DFRAME: after every draw of the
+                // logged frame, how many rows at the top of the middle column
+                // are black, printed when it changes: which draw painted or
+                // uncovered a band at the top.
+                static const bool band = getenv("COD3_D3DBAND") != nullptr;
+                if (band && FrameLogged() && color->format == DXGI_FORMAT_R8G8B8A8_UNORM)
+                {
+                    static ComPtr<ID3D11Texture2D> column;
+                    static uint32_t columnHeight = 0;
+                    const uint32_t rows = std::min<uint32_t>(color->height, 624 * scale);
+                    if (!column || columnHeight != rows)
+                    {
+                        D3D11_TEXTURE2D_DESC desc{};
+                        desc.Width = 1; desc.Height = rows; desc.MipLevels = 1; desc.ArraySize = 1;
+                        desc.Format = color->format; desc.SampleDesc.Count = 1;
+                        desc.Usage = D3D11_USAGE_STAGING; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+                        column.Reset();
+                        g_device->CreateTexture2D(&desc, nullptr, &column);
+                        columnHeight = rows;
+                    }
+                    if (column)
+                    {
+                        D3D11_BOX box{ color->width / 2, 0, 0, color->width / 2 + 1, rows, 1 };
+                        g_context->CopySubresourceRegion(column.Get(), 0, 0, 0, 0, color->texture.Get(), 0, &box);
+                        D3D11_MAPPED_SUBRESOURCE mapped{};
+                        if (SUCCEEDED(g_context->Map(column.Get(), 0, D3D11_MAP_READ, 0, &mapped)))
+                        {
+                            uint32_t black = 0;
+                            for (; black < rows; black++)
+                            {
+                                const uint8_t* px = static_cast<const uint8_t*>(mapped.pData) + size_t(black) * mapped.RowPitch;
+                                if (px[0] > 8 || px[1] > 8 || px[2] > 8) break;
+                            }
+                            g_context->Unmap(column.Get(), 0);
+                            static uint32_t last = 0xFFFFFFFF;
+                            if (black != last)
+                            {
+                                printf("frame: top band %u rows after draw %llu (dump %d)\n", black / scale, (unsigned long long)g_draws.load(std::memory_order_relaxed), g_dumpNumber);
+                                last = black;
+                            }
+                        }
+                    }
+                }
             }
         }
         struct After { PhaseClock& phases; ~After() { phases.Mark(9); } } after{ phases };
@@ -2247,6 +2306,7 @@ namespace
     }
 
     // --- the resolve ---------------------------------------------------------------
+
 
     void ResolveLocked()
     {
@@ -2342,6 +2402,7 @@ namespace
             CopyRectangle(source, sourceWidth, sourceHeight, x0 * scale, y0 * scale, hostWidth, hostHeight,
                           out.view.Get(), hostWidth, hostHeight);
             if (probing) Probe("resolved", out.texture.Get());
+            if (!fromDepth) g_lastResolveSource = GetColorTarget(Reg(sourceSelect == 0 ? 0x2001 : 0x2003 + (sourceSelect - 1)), pitch, scale)->texture;
         }
 
         if (colorClear)
@@ -2570,6 +2631,88 @@ void D3D11Backend::Resolve()
 
 void D3D11Backend::Swap(uint32_t frontBufferPhysical, uint32_t width, uint32_t height)
 {
+    // COD3_SWAPDUMP=prefix: the front buffer's texture as it is at the swap,
+    // every COD3_SWAPDUMP_EVERY swaps, cycling through forty, at quarter
+    // size: what the title finished, before the window shows it.
+    {
+        static const char* const prefix = getenv("COD3_SWAPDUMP");
+        static const int every = []() { const char* t = getenv("COD3_SWAPDUMP_EVERY"); const int v = t ? int(strtol(t, nullptr, 10)) : 30; return v > 0 ? v : 30; }();
+        static int counter = 0;
+        if (prefix != nullptr && (counter++ % every) == 0)
+        {
+            std::lock_guard<std::recursive_mutex> lock(g_mutex);
+            auto found = g_resolved.find(frontBufferPhysical & 0x1FFFFFFFu);
+            if (found != g_resolved.end() && found->second.texture)
+            {
+                D3D11_TEXTURE2D_DESC desc{};
+                found->second.texture->GetDesc(&desc);
+                desc.Usage = D3D11_USAGE_STAGING; desc.BindFlags = 0; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ; desc.MiscFlags = 0;
+                ComPtr<ID3D11Texture2D> staging;
+                D3D11_MAPPED_SUBRESOURCE mapped{};
+                if (SUCCEEDED(g_device->CreateTexture2D(&desc, nullptr, &staging)))
+                {
+                    g_context->CopyResource(staging.Get(), found->second.texture.Get());
+                    if (SUCCEEDED(g_context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped)))
+                    {
+                        const uint32_t w = desc.Width / 4, h = desc.Height / 4;
+                        std::vector<uint8_t> pixels(size_t(w) * h * 4);
+                        for (uint32_t y = 0; y < h; y++)
+                        {
+                            const uint8_t* row = static_cast<const uint8_t*>(mapped.pData) + size_t(y) * 4 * mapped.RowPitch;
+                            for (uint32_t x = 0; x < w; x++)
+                            {
+                                const uint8_t* from = row + size_t(x) * 16;
+                                uint8_t* to = pixels.data() + (size_t(y) * w + x) * 4;
+                                to[0] = from[2]; to[1] = from[1]; to[2] = from[0]; to[3] = 255;
+                            }
+                        }
+                        g_context->Unmap(staging.Get(), 0);
+                        char name[512];
+                        snprintf(name, sizeof(name), "%s-%02d.bmp", prefix, (counter / every) % 40);
+                        WriteBmp(name, pixels, w, h);
+                    }
+                }
+                if (g_lastDrawDepth)
+                {
+                    char name[512];
+                    snprintf(name, sizeof(name), "%s-%02d-d", prefix, (counter / every) % 40);
+                    DumpDepthAfterDraw(name, 0, g_lastDrawDepth.Get(), 4096, height);
+                }
+                // And the colour target the last resolve read, as it is now.
+                if (g_lastResolveSource)
+                {
+                    D3D11_TEXTURE2D_DESC tdesc{};
+                    g_lastResolveSource->GetDesc(&tdesc);
+                    tdesc.Usage = D3D11_USAGE_STAGING; tdesc.BindFlags = 0; tdesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ; tdesc.MiscFlags = 0;
+                    ComPtr<ID3D11Texture2D> tstaging;
+                    D3D11_MAPPED_SUBRESOURCE tmapped{};
+                    if (SUCCEEDED(g_device->CreateTexture2D(&tdesc, nullptr, &tstaging)))
+                    {
+                        g_context->CopyResource(tstaging.Get(), g_lastResolveSource.Get());
+                        if (SUCCEEDED(g_context->Map(tstaging.Get(), 0, D3D11_MAP_READ, 0, &tmapped)))
+                        {
+                            const uint32_t w = tdesc.Width / 4, h = std::min(tdesc.Height, height) / 4;
+                            std::vector<uint8_t> pixels(size_t(w) * h * 4);
+                            for (uint32_t y = 0; y < h; y++)
+                            {
+                                const uint8_t* row = static_cast<const uint8_t*>(tmapped.pData) + size_t(y) * 4 * tmapped.RowPitch;
+                                for (uint32_t x = 0; x < w; x++)
+                                {
+                                    const uint8_t* from = row + size_t(x) * 16;
+                                    uint8_t* to = pixels.data() + (size_t(y) * w + x) * 4;
+                                    to[0] = from[2]; to[1] = from[1]; to[2] = from[0]; to[3] = 255;
+                                }
+                            }
+                            g_context->Unmap(tstaging.Get(), 0);
+                            char name[512];
+                            snprintf(name, sizeof(name), "%s-%02d-t.bmp", prefix, (counter / every) % 40);
+                            WriteBmp(name, pixels, w, h);
+                        }
+                    }
+                }
+            }
+        }
+    }
     g_frontBuffer.store(frontBufferPhysical);
     g_frontWidth.store(width);
     g_frontHeight.store(height);
