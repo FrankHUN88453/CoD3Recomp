@@ -452,9 +452,18 @@ namespace
         g_window.store(window);
         ShowWindow(window, SW_SHOW);
         // In front and taking the keys from the start, rather than behind
-        // the console it was started from.
-        SetForegroundWindow(window);
-        SetFocus(window);
+        // the console it was started from. COD3_BACKGROUND=1 leaves it
+        // behind, and the keyboard and mouse alone: a run driven by a
+        // script while someone is using the machine.
+        static const bool background = []() {
+            const char* text = getenv("COD3_BACKGROUND");
+            return text != nullptr && text[0] != 0 && text[0] != '0';
+        }();
+        if (!background)
+        {
+            SetForegroundWindow(window);
+            SetFocus(window);
+        }
         printf("window: open at %dx%d\n", Width, Height);
         fflush(stdout);
 

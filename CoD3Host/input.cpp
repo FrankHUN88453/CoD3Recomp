@@ -281,6 +281,7 @@ namespace
         // key state is global, and typing anywhere walked the title's menus.
         static const bool ignored = []() {
             const char* text = getenv("COD3_NOKEYBOARD");
+            if (text == nullptr) text = getenv("COD3_BACKGROUND");   // a run nobody is playing
             return text != nullptr && text[0] != 0 && text[0] != '0';
         }();
         if (ignored) return pad;
