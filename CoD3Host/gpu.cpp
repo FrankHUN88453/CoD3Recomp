@@ -57,6 +57,20 @@ namespace
     // the vertex program's floats, the pixel program's, and the booleans
     // and loops. A draw uploads a range only when the count has moved.
     std::atomic<uint64_t> g_constantWrites[3];
+    // The lowest and highest word written in each range since it was
+    // last taken: a draw's own constants are a few words, and uploading
+    // the whole range for them was most of the time in constants.
+    std::atomic<uint32_t> g_constantDirtyLow[3] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu };
+    std::atomic<uint32_t> g_constantDirtyHigh[3] = { 0, 0, 0 };
+
+    inline void NoteConstantWrite(uint32_t range, uint32_t offset)
+    {
+        g_constantWrites[range].fetch_add(1, std::memory_order_relaxed);
+        uint32_t low = g_constantDirtyLow[range].load(std::memory_order_relaxed);
+        while (offset < low && !g_constantDirtyLow[range].compare_exchange_weak(low, offset, std::memory_order_relaxed)) {}
+        uint32_t high = g_constantDirtyHigh[range].load(std::memory_order_relaxed);
+        while (offset + 1 > high && !g_constantDirtyHigh[range].compare_exchange_weak(high, offset + 1, std::memory_order_relaxed)) {}
+    }
     std::mutex g_registerMutex;   // for the trace map below, not the file
 
     inline bool RegisterIndex(uint32_t address, uint32_t& index)
@@ -318,6 +332,8 @@ namespace
         fflush(stdout);
     }
 
+    bool TraceConstants();
+
     void DecodeDraw(uint32_t initiator, uint32_t indexBase = 0, uint32_t indexWord = 0)
     {
         const uint32_t primitive = initiator & 0x3F;
@@ -327,6 +343,16 @@ namespace
             g_draws.indices += (initiator >> 16);
         }
         DumpDrawState(primitive);
+
+        // COD3_TRACEDRAWS=1: every draw in a level, with the initiator, the
+        // mode, the programs and the depth control, a few thousand of them.
+        if (TraceConstants())
+        {
+            printf("draw: prim %u count %u source %u mode %u depth %08X mask %08X vs_%016llx ps_%016llx\n",
+                primitive, initiator >> 16, (initiator >> 6) & 3, Gpu::ReadRegister(Gpu::ApertureBase + 0x2208 * 4) & 7,
+                Gpu::ReadRegister(Gpu::ApertureBase + 0x2200 * 4), Gpu::ReadRegister(Gpu::ApertureBase + 0x2104 * 4),
+                (unsigned long long)Shaders::LastHash(false), (unsigned long long)Shaders::LastHash(true));
+        }
 
         // A resolve is spelled as a rectangle list draw with the render backend
         // in copy mode. It is the only draw in the stream that this runtime can
@@ -781,6 +807,14 @@ const std::atomic<uint32_t>* Gpu::RegisterFile() { return g_registerFile; }
 
 uint64_t Gpu::ConstantWrites(uint32_t range) { return range < 3 ? g_constantWrites[range].load(std::memory_order_relaxed) : 0; }
 
+bool Gpu::TakeConstantSpan(uint32_t range, uint32_t& first, uint32_t& end)
+{
+    if (range >= 3) return false;
+    first = g_constantDirtyLow[range].exchange(0xFFFFFFFFu, std::memory_order_relaxed);
+    end = g_constantDirtyHigh[range].exchange(0, std::memory_order_relaxed);
+    return first < end;
+}
+
 namespace
 {
     void (*g_submitHook)() = nullptr;
@@ -801,9 +835,9 @@ void Gpu::WriteRegister(uint32_t address, uint32_t value)
         uint32_t fileIndex;
         if (!RegisterIndex(address, fileIndex)) return;
         g_registerFile[fileIndex].store(value, std::memory_order_relaxed);
-        if (fileIndex >= 0x4000 && fileIndex < 0x4400) g_constantWrites[0].fetch_add(1, std::memory_order_relaxed);
-        else if (fileIndex >= 0x4400 && fileIndex < 0x4800) g_constantWrites[1].fetch_add(1, std::memory_order_relaxed);
-        else if (fileIndex >= 0x4900 && fileIndex < 0x4930) g_constantWrites[2].fetch_add(1, std::memory_order_relaxed);
+        if (fileIndex >= 0x4000 && fileIndex < 0x4400) NoteConstantWrite(0, fileIndex - 0x4000);
+        else if (fileIndex >= 0x4400 && fileIndex < 0x4800) NoteConstantWrite(1, fileIndex - 0x4400);
+        else if (fileIndex >= 0x4900 && fileIndex < 0x4930) NoteConstantWrite(2, fileIndex - 0x4900);
 
         // COD3_TRACEREG=1: every register written once a level is loading,
         // and how often, for the ones this runtime does not act on.
@@ -1060,13 +1094,13 @@ uint32_t Gpu::ProcessRing(uint32_t ringBase, uint32_t ringSizeDwords,
             {
             case OpDrawIndx:
                 local.draws++;
-                if (TraceConstants()) printf("const: draw indexed\n");
+                if (TraceConstants()) printf("const: draw indexed vs_%016llx\n", (unsigned long long)Shaders::LastHash(false));
                 DecodeDraw(ReadDword(cursor + 2), ReadDword(cursor + 3),
                            ReadDword(cursor + 4));
                 break;
             case OpDrawIndx2:
                 local.draws++;
-                if (TraceConstants()) printf("const: draw\n");
+                if (TraceConstants()) printf("const: draw vs_%016llx\n", (unsigned long long)Shaders::LastHash(false));
                 DecodeDraw(ReadDword(cursor + 1));
                 break;
             case OpImLoadImmediate:
@@ -1106,9 +1140,13 @@ uint32_t Gpu::ProcessRing(uint32_t ringBase, uint32_t ringSizeDwords,
             {
                 // The same with the register index given whole.
                 const uint32_t index = ReadDword(cursor + 1) & 0xFFFF;
-                t_writeSource = "a SET_CONSTANT2 packet";
-                for (uint32_t i = 0; i + 1 < count; i++)
-                    WriteRegister(ApertureBase + (index + i) * 4, ReadDword(cursor + 2 + i));
+                if (index >= 0x2000 && index + count < 0x5000)
+                {
+                    t_writeSource = "a SET_CONSTANT2 packet";
+                    for (uint32_t i = 0; i + 1 < count; i++)
+                        WriteRegister(ApertureBase + (index + i) * 4, ReadDword(cursor + 2 + i));
+                }
+                else ReportOnce("SET_CONSTANT2 outside the constants, ignored", index, count);
                 break;
             }
             case OpEventWriteShd:
@@ -1460,7 +1498,7 @@ namespace
                 else if (opcode == OpDrawIndx && cursor + 2 < dwords)
                 {
                     local.draws++;
-                    if (TraceConstants()) printf("const: draw indexed\n");
+                    if (TraceConstants()) printf("const: draw indexed vs_%016llx\n", (unsigned long long)Shaders::LastHash(false));
                     DecodeDraw(
                         Guest::Read32(Guest::Base, base + (cursor + 2) * 4),
                         cursor + 3 < dwords
@@ -1471,7 +1509,7 @@ namespace
                 else if (opcode == OpDrawIndx2 && cursor + 1 < dwords)
                 {
                     local.draws++;
-                    if (TraceConstants()) printf("const: draw\n");
+                    if (TraceConstants()) printf("const: draw vs_%016llx\n", (unsigned long long)Shaders::LastHash(false));
                     const uint32_t w1 = Guest::Read32(Guest::Base, base + (cursor + 1) * 4);
                     DumpDraw("DRAW_INDX_2", header, w1,
                         cursor + 2 < dwords ? Guest::Read32(Guest::Base, base + (cursor + 2) * 4) : 0);
@@ -1519,11 +1557,19 @@ namespace
                 }
                 else if ((opcode == OpSetConstant2 || opcode == OpSetShaderConstants) && cursor + 1 < dwords)
                 {
+                    // The index is the register itself. Only the registers
+                    // and constants above 0x2000 are taken: one of these
+                    // taken from a mis-sized packet wrote the command
+                    // processor's own write pointer, and the ring stopped.
                     const uint32_t count = ((header >> 16) & 0x3FFF) + 1;
                     const uint32_t index = Guest::Read32(Guest::Base, base + (cursor + 1) * 4) & 0xFFFF;
-                    t_writeSource = "a SET_CONSTANT2 packet";
-                    for (uint32_t i = 0; i + 1 < count && cursor + 2 + i < dwords; i++)
-                        Gpu::WriteRegister(Gpu::ApertureBase + (index + i) * 4, Guest::Read32(Guest::Base, base + (cursor + 2 + i) * 4));
+                    if (index >= 0x2000 && index + count < 0x5000)
+                    {
+                        t_writeSource = "a SET_CONSTANT2 packet";
+                        for (uint32_t i = 0; i + 1 < count && cursor + 2 + i < dwords; i++)
+                            Gpu::WriteRegister(Gpu::ApertureBase + (index + i) * 4, Guest::Read32(Guest::Base, base + (cursor + 2 + i) * 4));
+                    }
+                    else ReportOnce("SET_CONSTANT2 outside the constants, ignored", index, count);
                 }
                 else if (opcode == OpWaitRegMem && cursor + 4 < dwords)
                 {
@@ -1532,6 +1578,22 @@ namespace
                         Guest::Read32(Guest::Base, base + (cursor + 2) * 4),
                         Guest::Read32(Guest::Base, base + (cursor + 3) * 4),
                         Guest::Read32(Guest::Base, base + (cursor + 4) * 4));
+                }
+                else if (opcode == OpEventWrite && cursor + 1 < dwords)
+                {
+                    // Events: which ones the title raises, once each, with
+                    // the sample count registers as they stand, for the
+                    // occlusion queries the title may be waiting on.
+                    const uint32_t initiator = Guest::Read32(Guest::Base, base + (cursor + 1) * 4);
+                    static std::mutex mutex;
+                    static std::map<uint32_t, uint32_t> seen;
+                    std::lock_guard<std::mutex> lock(mutex);
+                    if (++seen[initiator & 0x3F] <= 2)
+                    {
+                        printf("gpu: EVENT_WRITE event %u (initiator %08X), sample count control %08X address %08X, viz query %08X\n",
+                            initiator & 0x3F, initiator, g_registerFile[0x2324].load(), g_registerFile[0x2325].load(), g_registerFile[0x2293].load());
+                        fflush(stdout);
+                    }
                 }
                 else if (opcode == OpEventWriteShd && cursor + 3 < dwords)
                 {

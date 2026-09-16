@@ -37,6 +37,9 @@ namespace Gpu
     // pixel floats, 2 the booleans and loops.
     const std::atomic<uint32_t>* RegisterFile();
     uint64_t ConstantWrites(uint32_t range);
+    // The span of words written in a range since it was last taken, and
+    // whether there was one; taking it clears it.
+    bool TakeConstantSpan(uint32_t range, uint32_t& first, uint32_t& end);
 
     // How many interrupts the command stream has asked for since this was last
     // called, and clears the count. The command thread raises them.

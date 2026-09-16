@@ -1,9 +1,11 @@
 #include "xenos_hlsl.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cstdarg>
 #include <algorithm>
+#include <map>
 #include <set>
 
 namespace
@@ -29,6 +31,7 @@ namespace
         Translation out;
         std::string body;
         std::set<uint32_t> vertexSlots;
+        std::map<uint32_t, uint32_t> vertexStrides;
         std::set<uint32_t> textureSlots;
         std::set<uint32_t> exportsUsed;
         int indent = 1;
@@ -345,6 +348,7 @@ namespace
             const bool predicateCondition = ((d2 >> 31) & 1) != 0;
 
             vertexSlots.insert(slot);
+            if (!mini && stride != 0 && vertexStrides.count(slot) == 0) vertexStrides[slot] = stride;
             Line("{");
             indent++;
             if (isPredicated) { Line(Format("if (p0 == %s) {", predicateCondition ? "true" : "false")); indent++; }
@@ -890,7 +894,9 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
         for (uint32_t slot : translator.vertexSlots)
         {
             hlsl += Format("ByteAddressBuffer vb%u : register(t%u);\n", slot, 32 + slot);
-            VertexFetch fetch; fetch.slot = slot; out.vertexFetches.push_back(fetch);
+            VertexFetch fetch; fetch.slot = slot;
+            if (translator.vertexStrides.count(slot)) fetch.stride = translator.vertexStrides[slot];
+            out.vertexFetches.push_back(fetch);
         }
         hlsl += "struct Output { float4 position : SV_Position;";
         for (uint32_t i = 0; i < 16; i++) hlsl += Format(" float4 o%u : TEXCOORD%u;", i, i);
@@ -920,6 +926,11 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
                 "      else if (fn == 3) passes = a <= ref; else if (fn == 4) passes = a > ref; else if (fn == 5) passes = a != ref;\n"
                 "      else if (fn == 6) passes = a >= ref;\n"
                 "      if (!passes) discard; }\n";
+        // COD3_D3DSHOW=oN: every pixel program puts out its Nth interpolator
+        // instead of its colour, for seeing what the vertex program handed
+        // over. The source changes, so the cache keeps the real programs.
+        static const char* const show = getenv("COD3_D3DSHOW");
+        if (show != nullptr && show[0] == 'o') hlsl += Format("    oC0 = float4(abs(input.%s.xyz), 1.0);\n", show);
         hlsl += "    output.c0 = oC0; output.c1 = oC1; output.c2 = oC2; output.c3 = oC3;\n";
         if (out.writesDepth) hlsl += "    output.depth = oDepth4.x;\n";
         hlsl += "    return output;\n}\n";

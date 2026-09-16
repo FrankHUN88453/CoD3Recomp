@@ -233,14 +233,17 @@ namespace
     {
         ComPtr<ID3D11VertexShader> shader;
         XenosHlsl::Translation translation;
+        uint64_t hash = 0;
         bool ok = false;
         bool pending = false;
+        bool skipped = false;   // COD3_D3DSKIPVS names it: its draws are left out, to see what is under them
         std::future<std::vector<uint8_t>> compiling;
     };
     struct PixelShader
     {
         ComPtr<ID3D11PixelShader> shader;
         XenosHlsl::Translation translation;
+        uint64_t hash = 0;   // of the source, for the flat colours and the log
         bool ok = false;
         bool pending = false;
         std::future<std::vector<uint8_t>> compiling;
@@ -428,6 +431,21 @@ namespace
         if (found == g_vertexShaders.end())
         {
             entry.translation = XenosHlsl::Translate(words, false);
+            entry.hash = Hash(entry.translation.hlsl);
+            // COD3_D3DSKIPVS=hex,hex: the vertex programs whose hash starts so.
+            static const char* const skips = getenv("COD3_D3DSKIPVS");
+            if (skips != nullptr)
+            {
+                char name[24];
+                snprintf(name, sizeof(name), "%016llx", (unsigned long long)entry.hash);
+                for (const char* at = skips; *at != 0;)
+                {
+                    const char* end = strchr(at, ',');
+                    const size_t length = end != nullptr ? size_t(end - at) : strlen(at);
+                    if (length > 0 && strncmp(name, at, length) == 0) entry.skipped = true;
+                    at = end != nullptr ? end + 1 : at + length;
+                }
+            }
             if (!entry.translation.ok)
             {
                 static int announced = 0;
@@ -450,6 +468,7 @@ namespace
         if (found == g_pixelShaders.end())
         {
             entry.translation = XenosHlsl::Translate(words, true);
+            entry.hash = Hash(entry.translation.hlsl);
             if (!entry.translation.ok)
             {
                 static int announced = 0;
@@ -505,6 +524,24 @@ namespace
     // The present: a triangle over the window sampling the frame.
     ComPtr<ID3D11VertexShader> g_presentVertexShader;
     ComPtr<ID3D11PixelShader> g_presentPixelShader;
+
+    // COD3_D3DFLAT=1: every draw in a flat colour made from its pixel
+    // program's hash, so a frame shows which program painted what.
+    ComPtr<ID3D11PixelShader> g_flatPixelShader;
+    bool g_flatTried = false;
+    const char* const FlatSource =
+        "cbuffer DrawConstants : register(b2) { float4 viewportScale; float4 viewportOffset; float4 targetSize; uint4 flags; };\n"
+        "float4 main() : SV_Target { uint h = flags.w; return float4(float(h & 255u) / 255.0, float((h >> 8) & 255u) / 255.0, float((h >> 16) & 255u) / 255.0, 1.0); }\n";
+    ID3D11PixelShader* FlatPixelShader()
+    {
+        if (!g_flatTried)
+        {
+            g_flatTried = true;
+            const std::vector<uint8_t> code = Compile(FlatSource, "ps_5_0", "flat pixel program");
+            if (!code.empty()) g_device->CreatePixelShader(code.data(), code.size(), nullptr, &g_flatPixelShader);
+        }
+        return g_flatPixelShader.Get();
+    }
     ComPtr<ID3D11SamplerState> g_presentSampler;
     const char* const PresentSource =
         "Texture2D frame : register(t0); SamplerState linearSampler : register(s0);\n"
@@ -527,6 +564,60 @@ namespace
     ComPtr<ID3D11Buffer> g_floatConstants[2];   // vertex, pixel
     ComPtr<ID3D11Buffer> g_boolConstants;
     ComPtr<ID3D11Buffer> g_drawConstants[2];    // vertex, pixel
+
+    // The constants a draw needs go into one dynamic buffer, appended with
+    // a map that promises not to overwrite what the GPU may still be
+    // reading, and bound at an offset. An update of a default buffer per
+    // draw, even a partial one, was the most expensive thing in a draw.
+    ComPtr<ID3D11Buffer> g_constantRing;
+    ComPtr<ID3D11DeviceContext1> g_ringContext;
+    constexpr uint32_t ConstantRingBytes = 16u << 20;
+    uint32_t g_constantRingOffset = 0;
+    bool g_constantRingTried = false, g_constantRingUsable = false;
+    // Where each stage's float file and the draw constants last went, so
+    // a draw that changed nothing binds the same place again: the copies
+    // between draws bind their own buffer at slot 0.
+    uint32_t g_ringFloatAt[2] = { 0xFFFFFFFFu, 0xFFFFFFFFu };
+    uint32_t g_ringDrawAt = 0xFFFFFFFFu;
+
+    bool ConstantRing()
+    {
+        if (g_constantRingTried) return g_constantRingUsable;
+        g_constantRingTried = true;
+        D3D11_FEATURE_DATA_D3D11_OPTIONS options{};
+        if (FAILED(g_device->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS, &options, sizeof(options))) ||
+            !options.ConstantBufferOffsetting || FAILED(g_context.As(&g_ringContext)))
+        {
+            printf("d3d11: constant buffer offsetting is not available; constants are updated in place\n");
+            return false;
+        }
+        D3D11_BUFFER_DESC desc{};
+        desc.ByteWidth = ConstantRingBytes;
+        desc.Usage = D3D11_USAGE_DYNAMIC;
+        desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        if (FAILED(g_device->CreateBuffer(&desc, nullptr, &g_constantRing))) return false;
+        g_constantRingUsable = true;
+        printf("d3d11: constants go through a %u MB ring\n", ConstantRingBytes >> 20);
+        return true;
+    }
+
+    // Appends bytes to the ring and says where they start, in bytes; the
+    // ring is discarded and started over when it is full.
+    uint32_t RingAppend(const void* data, uint32_t bytes)
+    {
+        const uint32_t aligned = (bytes + 255) & ~255u;
+        D3D11_MAP mode = D3D11_MAP_WRITE_NO_OVERWRITE;
+        if (g_constantRingOffset + aligned > ConstantRingBytes) { g_constantRingOffset = 0; mode = D3D11_MAP_WRITE_DISCARD; }
+        if (g_constantRingOffset == 0) mode = D3D11_MAP_WRITE_DISCARD;
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        if (FAILED(g_context->Map(g_constantRing.Get(), 0, mode, 0, &mapped))) return 0xFFFFFFFFu;
+        memcpy(static_cast<uint8_t*>(mapped.pData) + g_constantRingOffset, data, bytes);
+        g_context->Unmap(g_constantRing.Get(), 0);
+        const uint32_t at = g_constantRingOffset;
+        g_constantRingOffset += aligned;
+        return at;
+    }
 
     ID3D11Buffer* ConstantBuffer(ComPtr<ID3D11Buffer>& buffer, uint32_t bytes)
     {
@@ -1141,6 +1232,9 @@ namespace
 
         // A surface a resolve made, at the size the frame was drawn.
         auto resolved = g_resolved.find(base & 0x1FFFFFFFu);
+        static const char* const experiment = getenv("COD3_D3DDEPTHTEX");   // white: an experiment, no shadow maps
+        if (resolved != g_resolved.end() && resolved->second.depth && experiment != nullptr && strcmp(experiment, "white") == 0)
+            return WhiteTexture();
         if (resolved != g_resolved.end() && resolved->second.resource)
         {
             outWidth = resolved->second.guestWidth;
@@ -1217,6 +1311,53 @@ namespace
         default:
             ReportOnce("texture format not uploaded", format);
             return WhiteTexture();
+        }
+
+        // COD3_D3DTEXDUMP=directory keeps every texture uploaded, the block
+        // compressed ones as DDS and the rest as BMP, named by address.
+        static const char* const dumpTextures = getenv("COD3_D3DTEXDUMP");
+        if (dumpTextures != nullptr)
+        {
+            char name[512];
+            const bool compressed = hostFormat == DXGI_FORMAT_BC1_UNORM || hostFormat == DXGI_FORMAT_BC2_UNORM || hostFormat == DXGI_FORMAT_BC3_UNORM;
+            snprintf(name, sizeof(name), "%s/tex-%08X-%ux%u-f%u.%s", dumpTextures, base, width, height, format, compressed ? "dds" : "bmp");
+            if (FILE* out = fopen(name, "wb"))
+            {
+                if (compressed)
+                {
+                    uint32_t header[32] = {};
+                    header[0] = 0x20534444;        // "DDS "
+                    header[1] = 124;               // header size
+                    header[2] = 0x1 | 0x2 | 0x4 | 0x1000 | 0x80000;   // caps, height, width, pixel format, linear size
+                    header[3] = height; header[4] = width;
+                    header[5] = uint32_t(linear.size());
+                    header[19] = 32;               // pixel format size
+                    header[20] = 0x4;              // fourcc
+                    header[21] = hostFormat == DXGI_FORMAT_BC1_UNORM ? 0x31545844 : hostFormat == DXGI_FORMAT_BC2_UNORM ? 0x33545844 : 0x35545844;
+                    header[27] = 0x1000;           // caps: texture
+                    fwrite(header, 4, 32, out);
+                    fwrite(linear.data(), 1, linear.size(), out);
+                }
+                else
+                {
+                    std::vector<uint8_t> pixels(size_t(width) * height * 4);
+                    for (uint32_t y = 0; y < height; y++)
+                        for (uint32_t x = 0; x < width; x++)
+                        {
+                            const uint8_t* from = linear.data() + size_t(y) * rowBytes + (hostFormat == DXGI_FORMAT_R8_UNORM ? x : size_t(x) * 4);
+                            uint8_t* to = pixels.data() + (size_t(y) * width + x) * 4;
+                            if (hostFormat == DXGI_FORMAT_R8_UNORM) { to[0] = to[1] = to[2] = from[0]; to[3] = 255; }
+                            else { to[0] = from[2]; to[1] = from[1]; to[2] = from[0]; to[3] = 255; }
+                        }
+                    BITMAPFILEHEADER file{};
+                    BITMAPINFOHEADER info{};
+                    info.biSize = sizeof(info); info.biWidth = int(width); info.biHeight = -int(height); info.biPlanes = 1;
+                    info.biBitCount = 32; info.biCompression = BI_RGB; info.biSizeImage = DWORD(pixels.size());
+                    file.bfType = 0x4D42; file.bfOffBits = sizeof(file) + sizeof(info); file.bfSize = file.bfOffBits + info.biSizeImage;
+                    fwrite(&file, sizeof(file), 1, out); fwrite(&info, sizeof(info), 1, out); fwrite(pixels.data(), 1, pixels.size(), out);
+                }
+                fclose(out);
+            }
         }
 
         entry.texture.Reset();
@@ -1429,7 +1570,15 @@ namespace
 
         const uint32_t modeControl = Reg(0x2208) & 7;
         if (modeControl == 0) { Skip("render backend off"); return; }
-        const bool depthOnly = modeControl == 5;
+        // EDRAM mode 5 is taken as colour and depth, like mode 4. Xenia calls
+        // it "depth only" and runs no pixel program for it, with a note that
+        // this very title draws in it with programs that fetch shadow maps;
+        // here it is how the level's ground, tents, barrels and the jeep the
+        // player rides in are drawn, and taken as depth only they were
+        // never on the screen. COD3_D3DMODE5=depth or skip for experiments.
+        static const char* const depthOnlyExperiment = getenv("COD3_D3DMODE5");
+        const bool depthOnly = modeControl == 5 && depthOnlyExperiment != nullptr && strcmp(depthOnlyExperiment, "depth") == 0;
+        if (modeControl == 5 && depthOnlyExperiment != nullptr && strcmp(depthOnlyExperiment, "skip") == 0) { Skip("mode 5, left out on request"); return; }
 
         phases.Mark(0);
         // Points and the primitives this does not draw yet.
@@ -1470,6 +1619,7 @@ namespace
         // The programs.
         const VertexShader& vertexShader = GetVertexShader(Shaders::Microcode(false));
         if (!vertexShader.ok) { Skip(vertexShader.pending ? "vertex program compiling" : "vertex program"); return; }
+        if (vertexShader.skipped) { Skip("vertex program skipped on request"); return; }
         const PixelShader* pixelShader = nullptr;
         if (!depthOnly)
         {
@@ -1513,7 +1663,15 @@ namespace
             DepthTarget* depth = GetDepthTarget(Reg(0x2002), pitch, scale);
             if (depth != nullptr) depthView = depth->view.Get();
         }
-        if (targetCount == 0 && depthView == nullptr) { Skip("no target"); return; }
+        if (targetCount == 0 && depthView == nullptr)
+        {
+            if (FrameLogged())
+                printf("frame: skipped, no target: draw %u of %u, mode %u, colour mask %08X, depth control %08X, targets written %X, vs %zu ps %zu\n",
+                    primitive, indexCount, modeControl, colorMask, depthControl, pixelShader ? pixelShader->translation.colourTargets : 0u,
+                    vertexShader.translation.hlsl.size(), pixelShader ? pixelShader->translation.hlsl.size() : 0u);
+            Skip("no target");
+            return;
+        }
 
         phases.Mark(2);
         // Unbind anything about to be a target from the samplers.
@@ -1561,19 +1719,52 @@ namespace
         // file's ranges go up only when something was written to them
         // since the last draw.
         {
-            static uint64_t uploaded[3] = { ~0ull, ~0ull, ~0ull };
+            // Only the span written since the last draw goes up, in whole
+            // constants, through the partial update the host allows on
+            // constant buffers; the whole range when it does not.
+            static bool partialChecked = false, partialAllowed = false;
+            static ComPtr<ID3D11DeviceContext1> context1;
+            if (!partialChecked)
+            {
+                partialChecked = true;
+                D3D11_FEATURE_DATA_D3D11_OPTIONS options{};
+                if (SUCCEEDED(g_device->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS, &options, sizeof(options))) &&
+                    options.ConstantBufferPartialUpdate && SUCCEEDED(g_context.As(&context1)))
+                    partialAllowed = true;
+                printf("d3d11: partial constant buffer updates %s\n", partialAllowed ? "in use" : "not available");
+            }
             const std::atomic<uint32_t>* file = Gpu::RegisterFile();
             uint32_t words[1024];
             for (uint32_t range = 0; range < 3; range++)
             {
-                const uint64_t writes = Gpu::ConstantWrites(range);
-                if (writes == uploaded[range]) continue;
-                uploaded[range] = writes;
+                uint32_t spanFirst, spanEnd;
+                if (!Gpu::TakeConstantSpan(range, spanFirst, spanEnd)) continue;
                 const uint32_t first = range == 0 ? 0x4000 : range == 1 ? 0x4400 : 0x4900;
                 const uint32_t count = range == 2 ? 40 : 1024;
-                for (uint32_t i = 0; i < count; i++) words[i] = file[first + i].load(std::memory_order_relaxed);
-                if (range < 2) g_context->UpdateSubresource(ConstantBuffer(g_floatConstants[range], 4096), 0, nullptr, words, 0, 0);
-                else g_context->UpdateSubresource(ConstantBuffer(g_boolConstants, 160), 0, nullptr, words, 0, 0);   // 8 booleans words and 32 loop words
+                if (range < 2 && ConstantRing())
+                {
+                    // The whole file of the stage into the ring, and the
+                    // stage's slot 0 pointed at it; a draw that changed
+                    // nothing keeps the binding it has.
+                    for (uint32_t i = 0; i < count; i++) words[i] = file[first + i].load(std::memory_order_relaxed);
+                    const uint32_t at = RingAppend(words, 4096);
+                    if (at != 0xFFFFFFFFu) g_ringFloatAt[range] = at;
+                    continue;
+                }
+                ID3D11Buffer* buffer = range < 2 ? ConstantBuffer(g_floatConstants[range], 4096) : ConstantBuffer(g_boolConstants, 256);
+                if (partialAllowed && range < 2)
+                {
+                    spanFirst &= ~3u;
+                    spanEnd = std::min((spanEnd + 3) & ~3u, count);
+                    for (uint32_t i = spanFirst; i < spanEnd; i++) words[i - spanFirst] = file[first + i].load(std::memory_order_relaxed);
+                    D3D11_BOX box{ spanFirst * 4, 0, 0, spanEnd * 4, 1, 1 };
+                    context1->UpdateSubresource1(buffer, 0, &box, words, 0, 0, D3D11_COPY_NO_OVERWRITE);
+                }
+                else
+                {
+                    for (uint32_t i = 0; i < count; i++) words[i] = file[first + i].load(std::memory_order_relaxed);
+                    g_context->UpdateSubresource(buffer, 0, nullptr, words, 0, 0);
+                }
             }
         }
 
@@ -1594,21 +1785,35 @@ namespace
             const bool alphaTest = ((colorControl >> 3) & 1) != 0;
             constants.flags[1] = alphaTest ? (colorControl & 7) : 7;
             constants.flags[2] = Reg(0x210E);
+            constants.flags[3] = pixelShader ? uint32_t(pixelShader->hash) : 0u;
         }
 
         phases.Mark(4);
-        // Textures and samplers the pixel program samples.
-        if (pixelShader != nullptr)
+        // Textures and samplers the programs sample: the pixel program's,
+        // and the vertex program's, which the terrain has, for its height
+        // map. A vertex program's went unbound, and the terrain, its
+        // heights read as nothing, was never on the screen.
+        for (int stage = 0; stage < 2; stage++)
         {
-            for (const XenosHlsl::TextureFetch& fetch : pixelShader->translation.textureFetches)
+            const XenosHlsl::Translation* translation = stage == 0 ? (pixelShader ? &pixelShader->translation : nullptr) : &vertexShader.translation;
+            if (translation == nullptr) continue;
+            for (const XenosHlsl::TextureFetch& fetch : translation->textureFetches)
             {
                 uint32_t words[6];
                 for (uint32_t i = 0; i < 6; i++) words[i] = Reg(0x4800 + fetch.slot * 6 + i);
                 uint32_t width = 1, height = 1;
                 ID3D11ShaderResourceView* resource = GetTexture(words, width, height);
-                g_context->PSSetShaderResources(fetch.slot, 1, &resource);
                 ID3D11SamplerState* sampler = Sampler(words);
-                g_context->PSSetSamplers(fetch.sampler, 1, &sampler);
+                if (stage == 0)
+                {
+                    g_context->PSSetShaderResources(fetch.slot, 1, &resource);
+                    g_context->PSSetSamplers(fetch.sampler, 1, &sampler);
+                }
+                else
+                {
+                    g_context->VSSetShaderResources(fetch.slot, 1, &resource);
+                    g_context->VSSetSamplers(fetch.sampler, 1, &sampler);
+                }
                 constants.textureSize[fetch.slot][0] = float(width);
                 constants.textureSize[fetch.slot][1] = float(height);
                 constants.textureSize[fetch.slot][2] = 1.0f / float(width);
@@ -1638,8 +1843,34 @@ namespace
             g_context->VSSetShaderResources(32 + fetch.slot, 1, &resource);
         }
 
-        g_context->UpdateSubresource(ConstantBuffer(g_drawConstants[0], sizeof(constants)), 0, nullptr, &constants, 0, 0);
+        if (ConstantRing())
         {
+            // The draw's own constants into the ring too, when they changed;
+            // the float files keep the bindings the uploads above made.
+            static DrawConstants lastConstants;
+            if (g_ringDrawAt == 0xFFFFFFFFu || memcmp(&lastConstants, &constants, sizeof(constants)) != 0)
+            {
+                lastConstants = constants;
+                const uint32_t at = RingAppend(&constants, sizeof(constants));
+                if (at != 0xFFFFFFFFu) g_ringDrawAt = at;
+            }
+            ID3D11Buffer* ring = g_constantRing.Get();
+            ID3D11Buffer* bools = ConstantBuffer(g_boolConstants, 256);
+            const UINT drawCount = (sizeof(constants) + 255) / 256 * 16;
+            for (int stage = 0; stage < 2; stage++)
+            {
+                const uint32_t floatAt = g_ringFloatAt[stage] == 0xFFFFFFFFu ? 0 : g_ringFloatAt[stage];
+                const uint32_t drawAt = g_ringDrawAt == 0xFFFFFFFFu ? 0 : g_ringDrawAt;
+                ID3D11Buffer* buffers[3] = { ring, bools, ring };
+                const UINT firsts[3] = { floatAt / 16, 0, drawAt / 16 };
+                const UINT counts[3] = { 256, 16, drawCount };
+                if (stage == 0) g_ringContext->VSSetConstantBuffers1(0, 3, buffers, firsts, counts);
+                else g_ringContext->PSSetConstantBuffers1(0, 3, buffers, firsts, counts);
+            }
+        }
+        else
+        {
+            g_context->UpdateSubresource(ConstantBuffer(g_drawConstants[0], sizeof(constants)), 0, nullptr, &constants, 0, 0);
             ID3D11Buffer* buffers[3] = { g_floatConstants[0].Get(), g_boolConstants.Get(), g_drawConstants[0].Get() };
             g_context->VSSetConstantBuffers(0, 3, buffers);
             ID3D11Buffer* pixelBuffers[3] = { g_floatConstants[1].Get(), g_boolConstants.Get(), g_drawConstants[0].Get() };
@@ -1648,7 +1879,11 @@ namespace
 
         g_context->VSSetShader(vertexShader.shader.Get(), nullptr, 0);
         g_context->GSSetShader(rectangles ? RectangleShader() : nullptr, nullptr, 0);
-        g_context->PSSetShader(pixelShader ? pixelShader->shader.Get() : nullptr, nullptr, 0);
+        static const bool flat = getenv("COD3_D3DFLAT") != nullptr;
+        // Only the opaque draws go flat: a blended one in a flat colour
+        // with an alpha of one would cover the frame.
+        if (flat && pixelShader != nullptr && FlatPixelShader() != nullptr && Reg(0x2201) == 0x00010001) g_context->PSSetShader(FlatPixelShader(), nullptr, 0);
+        else g_context->PSSetShader(pixelShader ? pixelShader->shader.Get() : nullptr, nullptr, 0);
         g_context->IASetInputLayout(nullptr);
         g_context->IASetPrimitiveTopology(topology);
 
@@ -1702,10 +1937,10 @@ namespace
             if (announced++ < 24 || thisFrame)
             {
                 if (thisFrame) printf("frame %llu (dump %d): ", (unsigned long long)g_presents.load(std::memory_order_relaxed), g_dumpNumber);
-                printf("d3d11: draw %u of %u indices (%s), vte %03X viewport %.0f %.0f %.0f %.0f z %g %g clip %08X dinfo %08X, target %u %ux%u, "
+                printf("d3d11: draw %u of %u indices (%s), vte %03X viewport %.0f %.0f %.0f %.0f z %g %g clip %08X dinfo %08X vgt %08X %08X %08X, target %u %ux%u, "
                        "scissor %u,%u-%u,%u, depth %08X blend %08X mask %X, vs %zu ps %zu\n",
                     primitive, indexCount, sourceSelect == 0 ? "indexed" : "plain", Reg(0x2206),
-                    RegFloat(0x210F), RegFloat(0x2110), RegFloat(0x2111), RegFloat(0x2112), RegFloat(0x2113), RegFloat(0x2114), Reg(0x2204), Reg(0x2002),
+                    RegFloat(0x210F), RegFloat(0x2110), RegFloat(0x2111), RegFloat(0x2112), RegFloat(0x2113), RegFloat(0x2114), Reg(0x2204), Reg(0x2002), Reg(0x2100), Reg(0x2101), Reg(0x2102),
                     targetCount, targetWidth, targetHeight,
                     Reg(0x2081) & 0x7FFF, (Reg(0x2081) >> 16) & 0x7FFF, Reg(0x2082) & 0x7FFF, (Reg(0x2082) >> 16) & 0x7FFF,
                     depthControl, Reg(0x2201), colorMask,
@@ -1718,7 +1953,10 @@ namespace
                         printf("   vertex slot %u at %08X, %u dwords, endian %u\n", fetch.slot, word0 & ~3u, (word1 >> 2) & 0xFFFFFF, word1 & 3);
                     }
                 }
-                if (thisFrame && (indexCount <= 4 || vertexShader.translation.hlsl.size() == 12077))
+                static const char* const wantedProgram = getenv("COD3_D3DFRAMEVS");
+                char programName[24];
+                snprintf(programName, sizeof(programName), "%016llx", (unsigned long long)Hash(vertexShader.translation.hlsl));
+                if (thisFrame && (indexCount <= 4 || (wantedProgram != nullptr && strncmp(programName, wantedProgram, strlen(wantedProgram)) == 0)))
                 {
                     // A small draw's vertices, as words: a clearing
                     // rectangle's depth is in them.
@@ -1727,7 +1965,7 @@ namespace
                         const uint32_t word0 = Reg(0x4800 + fetch.slot * 2), word1 = Reg(0x4800 + fetch.slot * 2 + 1);
                         const uint8_t* data = Guest::Base + Guest::PhysicalAlias(word0 & ~3u);
                         printf("   vertex slot %u: %08X %08X, words", fetch.slot, word0, word1);
-                        for (uint32_t i = 0; i < 16; i++) { uint32_t v; memcpy(&v, data + i * 4, 4); printf(" %08X", _byteswap_ulong(v)); }
+                        for (uint32_t i = 0; i < 26; i++) { uint32_t v; memcpy(&v, data + i * 4, 4); printf(" %08X", _byteswap_ulong(v)); }
                         printf("\n");
                     }
                 }
@@ -1735,11 +1973,17 @@ namespace
                 {
                     // The projection's z and w rows, the usual places: what
                     // the depth comes from.
+                    // COD3_D3DFRAMEVS=hex: the draws whose vertex program's
+                    // hash starts so get their constants printed, both files.
                     static int constantDumps = 0;
-                    if (vertexShader.translation.hlsl.size() == 12077 && constantDumps++ < 3)
+                    if (wantedProgram != nullptr && strncmp(programName, wantedProgram, strlen(wantedProgram)) == 0 && constantDumps++ < 40)
                     {
-                        printf("   c0..31:");
+                        printf("   vs c0..31:");
                         for (uint32_t i = 0; i < 32 * 4; i++) printf("%s %g", (i % 4) == 0 ? " |" : "", RegFloat(0x4000 + i));
+                        printf("\n   ps c0..31:");
+                        for (uint32_t i = 0; i < 32 * 4; i++) printf("%s %g", (i % 4) == 0 ? " |" : "", RegFloat(0x4400 + i));
+                        printf("\n   ps c248..255:");
+                        for (uint32_t i = 248 * 4; i < 256 * 4; i++) printf("%s %g", (i % 4) == 0 ? " |" : "", RegFloat(0x4400 + i));
                         printf("\n");
                     }
                     printf("   c252..255:"); for (uint32_t i = 252 * 4; i < 256 * 4; i++) printf("%s %g", (i % 4) == 0 ? " |" : "", RegFloat(0x4000 + i)); printf("\n");
@@ -1747,18 +1991,51 @@ namespace
                     for (uint32_t i = 12 * 4; i < 16 * 4; i++) printf("%s %g", (i % 4) == 0 ? " |" : "", RegFloat(0x4000 + i));
                     printf("\n");
                     printf("   microcode vs_%016llx ps_%016llx\n", (unsigned long long)Shaders::LastHash(false), (unsigned long long)Shaders::LastHash(true));
+                    // The translations in the usual model rows and the camera's
+                    // distance row, for seeing where a draw's model lies.
+                    printf("   model at %g %g %g, camera row %g %g %g %g, indices %u\n",
+                        RegFloat(0x4000 + 16 * 4 + 3), RegFloat(0x4000 + 17 * 4 + 3), RegFloat(0x4000 + 18 * 4 + 3),
+                        RegFloat(0x4000 + 15 * 4), RegFloat(0x4000 + 15 * 4 + 1), RegFloat(0x4000 + 15 * 4 + 2), RegFloat(0x4000 + 15 * 4 + 3), indexCount);
+                    if (wantedProgram != nullptr && strncmp(programName, wantedProgram, strlen(wantedProgram)) == 0 && !indices.empty())
+                    {
+                        // The first few indices and the vertices they name.
+                        printf("   indices:");
+                        for (size_t i = 0; i < 8 && i < indices.size(); i++) printf(" %u", indices[i]);
+                        printf("\n");
+                        for (const XenosHlsl::VertexFetch& fetch : vertexShader.translation.vertexFetches)
+                        {
+                            const uint32_t word0 = Reg(0x4800 + fetch.slot * 2);
+                            const uint8_t* data = Guest::Base + Guest::PhysicalAlias(word0 & ~3u);
+                            for (size_t i = 0; i < 4 && i < indices.size(); i++)
+                            {
+                                printf("   vertex %u of slot %u, stride %u:", indices[i], fetch.slot, fetch.stride);
+                                for (uint32_t w = 0; w < fetch.stride && w < 16; w++)
+                                {
+                                    uint32_t v; memcpy(&v, data + (size_t(indices[i]) * fetch.stride + w) * 4, 4);
+                                    printf(" %08X", _byteswap_ulong(v));
+                                }
+                                printf("\n");
+                            }
+                        }
+                        printf("   c80..87:");
+                        for (uint32_t i = 80 * 4; i < 88 * 4; i++) printf("%s %g", (i % 4) == 0 ? " |" : "", RegFloat(0x4000 + i));
+                        printf("\n");
+                    }
                     printf("   vs %016llx ps %016llx, mode %u, cull %08X, alpha %08X, %s\n",
                         (unsigned long long)Hash(vertexShader.translation.hlsl),
                         pixelShader ? (unsigned long long)Hash(pixelShader->translation.hlsl) : 0ull,
                         Reg(0x2208), Reg(0x2205), Reg(0x2202), indices.empty() ? "plain" : "indexed");
-                    if (pixelShader)
-                        for (const XenosHlsl::TextureFetch& fetch : pixelShader->translation.textureFetches)
+                    for (int stage = 0; stage < 2; stage++)
+                    {
+                        const XenosHlsl::Translation* translation = stage == 0 ? (pixelShader ? &pixelShader->translation : nullptr) : &vertexShader.translation;
+                        if (translation == nullptr) continue;
+                        for (const XenosHlsl::TextureFetch& fetch : translation->textureFetches)
                         {
                             uint32_t w[6];
                             for (uint32_t i = 0; i < 6; i++) w[i] = Reg(0x4800 + fetch.slot * 6 + i);
                             const uint32_t base = w[1] & 0xFFFFF000u;
                             const uint32_t width = (w[2] & 0x1FFF) + 1, height = ((w[2] >> 13) & 0x1FFF) + 1;
-                            printf("   texture %u: format %u %ux%u at %08X%s swizzle %03X signs %02X%s, words %08X %08X %08X %08X %08X %08X\n", fetch.slot, w[1] & 0x3F,
+                            printf("   %stexture %u: format %u %ux%u at %08X%s swizzle %03X signs %02X%s, words %08X %08X %08X %08X %08X %08X\n", stage == 0 ? "" : "vs ", fetch.slot, w[1] & 0x3F,
                                 width, height, base,
                                 g_resolved.count(base & 0x1FFFFFFFu) ? " (resolved)" : "",
                                 (w[3] >> 1) & 0xFFF, (w[0] >> 2) & 0xFF, (w[0] & 3) != 2 ? " (not a texture)" : "",
@@ -1772,20 +2049,26 @@ namespace
                                 printf("\n");
                             }
                         }
+                    }
                 }
                 fflush(stdout);
             }
         }
+        // VGT_INDX_OFFSET is added to every vertex index, which is how the
+        // terrain draws its patches out of one buffer with one set of
+        // indices; the host adds it as the base vertex, and the vertex
+        // program sees the sum in its vertex id.
+        const int32_t indexOffset = int32_t(Reg(0x2102));
         if (!indices.empty())
         {
             ID3D11Buffer* buffer = IndexBuffer(indices.data(), uint32_t(indices.size() * 4));
             if (buffer == nullptr) { Skip("index buffer"); return; }
             g_context->IASetIndexBuffer(buffer, DXGI_FORMAT_R32_UINT, 0);
-            g_context->DrawIndexed(UINT(indices.size()), 0, 0);
+            g_context->DrawIndexed(UINT(indices.size()), 0, indexOffset);
         }
         else
         {
-            g_context->Draw(indexCount, 0);
+            g_context->Draw(indexCount, UINT(indexOffset));
         }
         phases.Mark(8);
         if (views[0] != nullptr)

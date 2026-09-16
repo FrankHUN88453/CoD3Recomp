@@ -20,6 +20,7 @@ namespace XenosHlsl
     struct VertexFetch
     {
         uint32_t slot = 0;        // the fetch constant, 0 to 95
+        uint32_t stride = 0;      // in dwords, as the program's first fetch of it says
     };
 
     struct TextureFetch
