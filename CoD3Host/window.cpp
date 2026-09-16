@@ -451,6 +451,10 @@ namespace
 
         g_window.store(window);
         ShowWindow(window, SW_SHOW);
+        // In front and taking the keys from the start, rather than behind
+        // the console it was started from.
+        SetForegroundWindow(window);
+        SetFocus(window);
         printf("window: open at %dx%d\n", Width, Height);
         fflush(stdout);
 

@@ -70,28 +70,43 @@ namespace
         // `a` is the one the w lane's swizzle picks, `b` the one the x lane's
         // does.
         void ScalarPair(uint32_t reg, bool temporary, uint32_t swizzle, bool negate,
-                        bool absolute, bool relative, std::string& a, std::string& b)
+                        bool absolute, bool relative, bool vectorTakesThree, std::string& a, std::string& b, std::string& single)
         {
             std::string base;
             if (temporary) base = (reg & 0x40) ? Format("r[(%u + aL) & 31]", reg & 0x1F) : Format("r[%u]", reg & 0x1F);
             else base = relative ? Format("c[(a0 + %u) & 255]", reg & 0xFF) : Format("c[%u]", reg & 0xFF);
-            // Which lanes the two operands come from is told differently by
-            // the two open translators: Xenia says w and x, freedreno's
-            // compiler says z and w (and writes its operands into both pairs
-            // to be safe). Xenia's reading is the one kept: across the
-            // title's programs the compiler fills the unused lanes with
-            // copies of the operands in a way that only makes sense with w
-            // and x, and the sky and the ground go wrong the other way. The
-            // grass program is the exception that is not understood yet: with
-            // z and w every "max a, a" in it is a move, every "sub a, a" a
-            // zero, and its blades stand up. COD3_SCALARLANES=zw tries that.
-            static const bool wx = []() {
+            // Which lanes of the third operand the two come from. The two
+            // open translators disagree: Xenia says w and x, freedreno's
+            // compiler says z and w and writes its operands into both pairs
+            // to be safe. The title's programs say both, by the vector
+            // operation the scalar one is issued with. When the vector
+            // operation takes two operands the third is the scalar's alone:
+            // the compiler then puts the two in w and x and fills the other
+            // lanes with copies of x, and the products of a normal's
+            // components that light a surface (xz, zz, yz, yy, distinct)
+            // only come out with w and x. When the vector operation takes
+            // three (mad, the conditional moves, dp2add), it reads the same
+            // operand, lanes x, y, z, and the scalar's are z and w: the water
+            // scales a texture coordinate by two, three and four that way,
+            // and the grass's blade stands on its base, where w and x would
+            // mix x into y and lay the blade flat. COD3_SCALARLANES=wx or
+            // =zw uses one reading everywhere, for comparison.
+            static const int forced = []() {
                 const char* text = getenv("COD3_SCALARLANES");
-                return text == nullptr || strcmp(text, "zw") != 0;
+                if (text == nullptr) return 0;
+                if (strcmp(text, "wx") == 0) return 1;
+                if (strcmp(text, "zw") == 0) return 2;
+                return 0;
             }();
-            const uint32_t laneA = wx ? 3 : 2, laneB = wx ? 0 : 3;
+            // The operations that take one operand read lane w whichever
+            // vector operation they go with; both translators agree there.
+            const bool zw = forced == 2 || (forced == 0 && vectorTakesThree);
+            const uint32_t laneA = zw ? 2 : 3, laneB = zw ? 3 : 0;
             a = base + "." + Components[(laneA + ((swizzle >> (laneA * 2)) & 3)) & 3];
             b = base + "." + Components[(laneB + ((swizzle >> (laneB * 2)) & 3)) & 3];
+            single = base + "." + Components[(3 + ((swizzle >> 6) & 3)) & 3];
+            if (absolute) single = "abs(" + single + ")";
+            if (negate) single = "(-" + single + ")";
             if (absolute) { a = "abs(" + a + ")"; b = "abs(" + b + ")"; }
             if (negate) { a = "(-" + a + ")"; b = "(-" + b + ")"; }
         }
@@ -161,8 +176,9 @@ namespace
             const std::string a = Source(reg1, temp1, swizzle1, negate1, temp1 ? (reg1 & 0x80) != 0 : absoluteConstants, rel1);
             const std::string b = Source(reg2, temp2, swizzle2, negate2, temp2 ? (reg2 & 0x80) != 0 : absoluteConstants, rel2);
             const std::string c = Source(reg3, temp3, swizzle3, negate3, temp3 ? (reg3 & 0x80) != 0 : absoluteConstants, rel3);
-            std::string sa, sb;
-            ScalarPair(reg3, temp3, swizzle3, negate3, temp3 ? (reg3 & 0x80) != 0 : absoluteConstants, rel3, sa, sb);
+            std::string sa, sb, s1;
+            const bool vectorTakesThree = vectorOpcode == 11 || (vectorOpcode >= 12 && vectorOpcode <= 14) || vectorOpcode == 17;
+            ScalarPair(reg3, temp3, swizzle3, negate3, temp3 ? (reg3 & 0x80) != 0 : absoluteConstants, rel3, vectorTakesThree, sa, sb, s1);
 
             Line("{");
             indent++;
@@ -239,49 +255,49 @@ namespace
             switch (scalarOpcode)
             {
             case 0:  scalar = Format("(%s + %s)", sa.c_str(), sb.c_str()); break;
-            case 1:  scalar = Format("(%s + ps)", sa.c_str()); break;
+            case 1:  scalar = Format("(%s + ps)", s1.c_str()); break;
             case 2:  scalar = Format("(%s * %s)", sa.c_str(), sb.c_str()); break;
-            case 3:  scalar = Format("(%s * ps)", sa.c_str()); break;
+            case 3:  scalar = Format("(%s * ps)", s1.c_str()); break;
             case 4:  scalar = Format("((ps == -3.402823466e38 || isnan(ps) || isnan(%s) || %s <= 0.0) ? -3.402823466e38 : %s * ps)",
                                      sb.c_str(), sb.c_str(), sa.c_str()); break;
             case 5:  scalar = Format("max(%s, %s)", sa.c_str(), sb.c_str()); break;
             case 6:  scalar = Format("min(%s, %s)", sa.c_str(), sb.c_str()); break;
-            case 7:  scalar = Format("(%s == 0.0 ? 1.0 : 0.0)", sa.c_str()); break;
-            case 8:  scalar = Format("(%s > 0.0 ? 1.0 : 0.0)", sa.c_str()); break;
-            case 9:  scalar = Format("(%s >= 0.0 ? 1.0 : 0.0)", sa.c_str()); break;
-            case 10: scalar = Format("(%s != 0.0 ? 1.0 : 0.0)", sa.c_str()); break;
-            case 11: scalar = Format("frac(%s)", sa.c_str()); break;
-            case 12: scalar = Format("trunc(%s)", sa.c_str()); break;
-            case 13: scalar = Format("floor(%s)", sa.c_str()); break;
-            case 14: scalar = Format("exp2(%s)", sa.c_str()); break;
-            case 15: scalar = Format("(%s > 0.0 ? log2(%s) : -3.402823466e38)", sa.c_str(), sa.c_str()); break;
-            case 16: scalar = Format("(%s > 0.0 ? log2(%s) : -3.402823466e38)", sa.c_str(), sa.c_str()); break;
-            case 17: scalar = Format("(%s == 0.0 ? 3.402823466e38 : 1.0 / %s)", sa.c_str(), sa.c_str()); break;
-            case 18: scalar = Format("(%s == 0.0 ? 0.0 : 1.0 / %s)", sa.c_str(), sa.c_str()); break;
-            case 19: scalar = Format("(1.0 / %s)", sa.c_str()); break;
-            case 20: scalar = Format("(%s <= 0.0 ? 3.402823466e38 : rsqrt(%s))", sa.c_str(), sa.c_str()); break;
-            case 21: scalar = Format("(%s <= 0.0 ? 0.0 : rsqrt(%s))", sa.c_str(), sa.c_str()); break;
-            case 22: scalar = Format("rsqrt(%s)", sa.c_str()); break;
+            case 7:  scalar = Format("(%s == 0.0 ? 1.0 : 0.0)", s1.c_str()); break;
+            case 8:  scalar = Format("(%s > 0.0 ? 1.0 : 0.0)", s1.c_str()); break;
+            case 9:  scalar = Format("(%s >= 0.0 ? 1.0 : 0.0)", s1.c_str()); break;
+            case 10: scalar = Format("(%s != 0.0 ? 1.0 : 0.0)", s1.c_str()); break;
+            case 11: scalar = Format("frac(%s)", s1.c_str()); break;
+            case 12: scalar = Format("trunc(%s)", s1.c_str()); break;
+            case 13: scalar = Format("floor(%s)", s1.c_str()); break;
+            case 14: scalar = Format("exp2(%s)", s1.c_str()); break;
+            case 15: scalar = Format("(%s > 0.0 ? log2(%s) : -3.402823466e38)", s1.c_str(), s1.c_str()); break;
+            case 16: scalar = Format("(%s > 0.0 ? log2(%s) : -3.402823466e38)", s1.c_str(), s1.c_str()); break;
+            case 17: scalar = Format("(%s == 0.0 ? 3.402823466e38 : 1.0 / %s)", s1.c_str(), s1.c_str()); break;
+            case 18: scalar = Format("(%s == 0.0 ? 0.0 : 1.0 / %s)", s1.c_str(), s1.c_str()); break;
+            case 19: scalar = Format("(1.0 / %s)", s1.c_str()); break;
+            case 20: scalar = Format("(%s <= 0.0 ? 3.402823466e38 : rsqrt(%s))", s1.c_str(), s1.c_str()); break;
+            case 21: scalar = Format("(%s <= 0.0 ? 0.0 : rsqrt(%s))", s1.c_str(), s1.c_str()); break;
+            case 22: scalar = Format("rsqrt(%s)", s1.c_str()); break;
             case 23: scalar = Format("max(%s, %s)", sa.c_str(), sb.c_str());
                      Line(Format("a0 = clamp((int)floor(%s + 0.5), -256, 255);", sa.c_str())); break;
             case 24: scalar = Format("max(%s, %s)", sa.c_str(), sb.c_str());
                      Line(Format("a0 = clamp((int)floor(%s), -256, 255);", sa.c_str())); break;
             case 25: scalar = Format("(%s - %s)", sa.c_str(), sb.c_str()); break;
-            case 26: scalar = Format("(%s - ps)", sa.c_str()); break;
-            case 27: Line(Format("p0 = (%s == 0.0);", sa.c_str())); scalar = "(p0 ? 0.0 : 1.0)"; break;
-            case 28: Line(Format("p0 = (%s != 0.0);", sa.c_str())); scalar = "(p0 ? 0.0 : 1.0)"; break;
-            case 29: Line(Format("p0 = (%s > 0.0);", sa.c_str())); scalar = "(p0 ? 0.0 : 1.0)"; break;
-            case 30: Line(Format("p0 = (%s >= 0.0);", sa.c_str())); scalar = "(p0 ? 0.0 : 1.0)"; break;
-            case 31: Line(Format("p0 = (%s == 1.0);", sa.c_str())); scalar = Format("(p0 ? 0.0 : blend1(%s == 0.0, 1.0, %s))", sa.c_str(), sa.c_str()); break;
-            case 32: Line(Format("p0 = (%s - 1.0 <= 0.0);", sa.c_str())); scalar = Format("(p0 ? 0.0 : %s - 1.0)", sa.c_str()); break;
+            case 26: scalar = Format("(%s - ps)", s1.c_str()); break;
+            case 27: Line(Format("p0 = (%s == 0.0);", s1.c_str())); scalar = "(p0 ? 0.0 : 1.0)"; break;
+            case 28: Line(Format("p0 = (%s != 0.0);", s1.c_str())); scalar = "(p0 ? 0.0 : 1.0)"; break;
+            case 29: Line(Format("p0 = (%s > 0.0);", s1.c_str())); scalar = "(p0 ? 0.0 : 1.0)"; break;
+            case 30: Line(Format("p0 = (%s >= 0.0);", s1.c_str())); scalar = "(p0 ? 0.0 : 1.0)"; break;
+            case 31: Line(Format("p0 = (%s == 1.0);", s1.c_str())); scalar = Format("(p0 ? 0.0 : blend1(%s == 0.0, 1.0, %s))", s1.c_str(), s1.c_str()); break;
+            case 32: Line(Format("p0 = (%s - 1.0 <= 0.0);", s1.c_str())); scalar = Format("(p0 ? 0.0 : %s - 1.0)", s1.c_str()); break;
             case 33: Line("p0 = false;"); scalar = "3.402823466e38"; break;
-            case 34: Line(Format("p0 = (%s == 0.0);", sa.c_str())); scalar = sa; break;
-            case 35: scalar = Format("(%s == 0.0 ? 1.0 : 0.0)", sa.c_str()); scalarKill = true; break;
-            case 36: scalar = Format("(%s > 0.0 ? 1.0 : 0.0)", sa.c_str()); scalarKill = true; break;
-            case 37: scalar = Format("(%s >= 0.0 ? 1.0 : 0.0)", sa.c_str()); scalarKill = true; break;
-            case 38: scalar = Format("(%s != 0.0 ? 1.0 : 0.0)", sa.c_str()); scalarKill = true; break;
-            case 39: scalar = Format("(%s == 1.0 ? 1.0 : 0.0)", sa.c_str()); scalarKill = true; break;
-            case 40: scalar = Format("sqrt(%s)", sa.c_str()); break;
+            case 34: Line(Format("p0 = (%s == 0.0);", s1.c_str())); scalar = s1; break;
+            case 35: scalar = Format("(%s == 0.0 ? 1.0 : 0.0)", s1.c_str()); scalarKill = true; break;
+            case 36: scalar = Format("(%s > 0.0 ? 1.0 : 0.0)", s1.c_str()); scalarKill = true; break;
+            case 37: scalar = Format("(%s >= 0.0 ? 1.0 : 0.0)", s1.c_str()); scalarKill = true; break;
+            case 38: scalar = Format("(%s != 0.0 ? 1.0 : 0.0)", s1.c_str()); scalarKill = true; break;
+            case 39: scalar = Format("(%s == 1.0 ? 1.0 : 0.0)", s1.c_str()); scalarKill = true; break;
+            case 40: scalar = Format("sqrt(%s)", s1.c_str()); break;
             case 42: case 43: case 44: case 45: case 46: case 47:
             {
                 // A constant and a temporary, the temporary's number spread
@@ -297,8 +313,8 @@ namespace
                 scalar = Format("(%s %s %s)", constant.c_str(), op, other.c_str());
                 break;
             }
-            case 48: scalar = Format("sin(%s)", sa.c_str()); break;
-            case 49: scalar = Format("cos(%s)", sa.c_str()); break;
+            case 48: scalar = Format("sin(%s)", s1.c_str()); break;
+            case 49: scalar = Format("cos(%s)", s1.c_str()); break;
             case 50: scalar = "ps"; break;
             default:
                 out.problem = Format("scalar opcode %u", scalarOpcode);

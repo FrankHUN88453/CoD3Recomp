@@ -98,6 +98,9 @@ namespace
                 g_frameWanted.store(-2);
                 if (text[4] != 0) g_autoSeconds = strtol(text + 4, nullptr, 10);
             }
+            // loading: the first frame of the loading screen with anything
+            // on it, once the level's files have started opening.
+            else if (strcmp(text, "loading") == 0) g_frameWanted.store(-3);
             else g_frameWanted.store(strtol(text, nullptr, 10));
             return true;
         }();
@@ -123,6 +126,11 @@ namespace
         {
             g_frameWanted.store(int64_t(present) + 1);
             printf("d3d11: frame %llu had %llu draws, the next two are logged\n", (unsigned long long)present, (unsigned long long)inFrame);
+        }
+        if (g_frameWanted.load(std::memory_order_relaxed) == -3 && Kernel::Stats().filesOpened.load(std::memory_order_relaxed) >= 22 && inFrame >= 3)
+        {
+            g_frameWanted.store(int64_t(present) + 1);
+            printf("d3d11: loading frame %llu had %llu draws, the next two are logged\n", (unsigned long long)present, (unsigned long long)inFrame);
         }
     }
 
@@ -1276,9 +1284,13 @@ namespace
                     memcpy(&raw, data + offset, 4);
                     uint32_t word = raw;
                     SwapWords(&word, 1, endian);
-                    // The word is A R G B from the top; the host wants R G B A from the bottom.
-                    const uint32_t rgba = ((word >> 16) & 0xFF) | (((word >> 8) & 0xFF) << 8) |
-                                          ((word & 0xFF) << 16) | ((word >> 24) << 24);
+                    // The word is A R G B from the top, and the console's
+                    // component x is its lowest byte: blue. The title reads
+                    // such a texture with the swizzle that puts z first, and
+                    // gets red. This used to reorder the bytes to R G B A as
+                    // well, and the swizzle then swapped them back: the gold
+                    // "3" of the loading screen came out blue.
+                    const uint32_t rgba = word;
                     memcpy(linear.data() + size_t(y) * rowBytes + size_t(x) * 4, &rgba, 4);
                 }
             break;
@@ -1960,6 +1972,22 @@ namespace
             for (uint32_t i = 0; i < indexCount; i++)
                 indices[i] = wideIndices ? Guest::Read32(Guest::Base, address + i * 4)
                                          : Guest::Read16(Guest::Base, address + i * 2);
+
+            // The index that ends a strip and starts the next, when the
+            // title has turned it on (PA_SU_SC_MODE_CNTL bit 21): the value
+            // in VGT_MULTI_PRIM_IB_RESET_INDX, compared on the low sixteen or
+            // twenty four bits. The host cuts strips only at 0xFFFFFFFF, and
+            // the title's 0xFFFF, widened, was a vertex: the grass is strips
+            // of seven vertices each, and every blade was joined to the next
+            // by a triangle across the field.
+            if ((Reg(0x2205) & (1u << 21)) != 0 &&
+                (topology == D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP || topology == D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP))
+            {
+                const uint32_t mask = wideIndices ? 0xFFFFFFu : 0xFFFFu;
+                const uint32_t reset = Reg(0x2103) & mask;
+                for (uint32_t& index : indices)
+                    if ((index & mask) == reset) index = 0xFFFFFFFFu;
+            }
         }
         else if (convertQuads || convertFan)
         {

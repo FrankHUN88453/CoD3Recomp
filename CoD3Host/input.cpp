@@ -22,6 +22,7 @@ namespace
     constexpr uint16_t PadStart     = 0x0010;
     constexpr uint16_t PadBack      = 0x0020;
     constexpr uint16_t PadLeftThumb  = 0x0040;
+    constexpr uint16_t PadRightThumb = 0x0080;
     constexpr uint16_t PadLeftShoulder  = 0x0100;
     constexpr uint16_t PadRightShoulder = 0x0200;
     constexpr uint16_t PadA         = 0x1000;
@@ -291,16 +292,39 @@ namespace
 
         // Taking and giving back the pointer.
         //
-        // The left button used to take it, which made the mouse useless for the
-        // one thing a menu wants it for: clicking. F1 and the middle button
-        // take it instead, Escape always gives it back, and the left button is
-        // left free to mean what it means on the screen in front of you.
-        if (g_mouseHeld.load() && Down(VK_ESCAPE)) SetHold(false);
-        else if (!g_mouseHeld.load() && (Down(VK_F1) || Down(VK_MBUTTON)))
-            SetHold(true);
+        // In a level the window takes the mouse by itself, the moment it is in
+        // front, and a click in it takes the mouse back after Escape: looking
+        // around is what a mouse is for in a shooter, and asking for a key
+        // first was asking every player to read the console. In the menus the
+        // left button used to take it, which made the mouse useless for the
+        // one thing a menu wants it for: clicking; F1 and the middle button
+        // take it there. Escape always gives it back, and in a level it is
+        // also Start, so the pause menu opens with the pointer free to leave.
+        const bool inLevel = Kernel::Stats().filesOpened.load(std::memory_order_relaxed) >= 40;
+        const bool escapeDown = Down(VK_ESCAPE);
+        // Start is held for a few reads after Escape frees the pointer, so
+        // the title's own poll, which is slower than these reads, sees it.
+        static int startReadsLeft = 0;
+        if (g_mouseHeld.load() && escapeDown) { SetHold(false); startReadsLeft = 10; }
+        else if (!g_mouseHeld.load())
+        {
+            static bool takenForLevel = false;
+            if (!inLevel) takenForLevel = false;
+            const bool firstTime = inLevel && !takenForLevel;
+            if (Down(VK_F1) || Down(VK_MBUTTON) || firstTime || (inLevel && Down(VK_LBUTTON) && !escapeDown))
+            {
+                SetHold(true);
+                if (inLevel) takenForLevel = true;
+            }
+        }
 
         const bool held = g_mouseHeld.load();
 
+        // The keys, where the console's buttons are on a keyboard: Space
+        // jumps (A), C crouches (B), F changes weapon (Y), R reloads and E
+        // uses (X), V is the melee (the right stick pressed), Shift the left
+        // stick pressed, G throws the grenade (the right bumper) and Q the
+        // smoke (the left), Tab holds the objectives up (left on the cross).
         struct Mapping { int key; uint16_t button; };
         static const Mapping mappings[] = {
             { VK_RETURN, PadStart },
@@ -308,10 +332,12 @@ namespace
             { VK_LEFT, PadLeft }, { VK_RIGHT, PadRight },
             { VK_SPACE, PadA }, { 'Z', PadA },
             { 'C', PadB }, { VK_CONTROL, PadB }, { 'X', PadB },
-            { 'R', PadX },
-            { 'F', PadY }, { VK_TAB, PadY },
-            { 'Q', PadLeftShoulder }, { 'E', PadRightShoulder },
+            { 'R', PadX }, { 'E', PadX },
+            { 'F', PadY },
+            { 'V', PadRightThumb },
+            { 'Q', PadLeftShoulder }, { 'G', PadRightShoulder },
             { VK_SHIFT, PadLeftThumb },
+            { VK_TAB, PadLeft },
         };
 
         for (const Mapping& mapping : mappings)
@@ -321,7 +347,8 @@ namespace
         // that is asking them to guess. While the mouse is free, which is every
         // menu, Space is Start as well as A.
         if (!held && Down(VK_SPACE)) pad.buttons |= PadStart;
-        if (!held && Down(VK_ESCAPE)) pad.buttons |= PadBack;
+        if (!held && Down(VK_ESCAPE) && !inLevel) pad.buttons |= PadBack;
+        if (inLevel && startReadsLeft > 0) { pad.buttons |= PadStart; startReadsLeft--; }
 
         // Driving a menu with the mouse.
         //
@@ -332,7 +359,7 @@ namespace
         // down steps the highlight, one step per movement rather than one per
         // pixel, and the left button takes the entry. It is not pointing and
         // clicking, but it is a menu driven with the mouse.
-        if (!held)
+        if (!held && !inLevel)
         {
             if (Down(VK_LBUTTON)) pad.buttons |= PadA;
             if (Down(VK_RBUTTON)) pad.buttons |= PadBack;
