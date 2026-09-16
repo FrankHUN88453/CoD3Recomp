@@ -13,6 +13,8 @@
 
 #include "kernel.h"
 #include "window.h"
+#include "overlay.h"
+#include "settings.h"
 #include "d3d11_backend.h"
 #include <cstdlib>
 #include <cstdio>
@@ -48,6 +50,9 @@ namespace
             return text != nullptr ? int(strtol(text, nullptr, 10)) : 0;
         }();
         if (pinned >= 1) return uint32_t(std::min(pinned, 4));
+        // The settings menu's choice, when it is not "by the window".
+        const int chosen = Settings::Get().renderScale;
+        if (chosen >= 1) return uint32_t(std::min(chosen, 4));
         const int scale = (clientHeight + 312) / 624;   // nearest whole multiple
         return uint32_t(std::max(1, std::min(scale, 4)));
     }
@@ -125,6 +130,9 @@ namespace
 
     LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM w, LPARAM l)
     {
+        // The settings menu sees every message first: F11 and F12, and all
+        // of the keys and the mouse while it is open.
+        if (Overlay::HandleMessage(window, message, uint64_t(w), int64_t(l))) return 0;
         // Windows asks the window what the pointer should look like whenever it
         // moves over it, and answering with nothing is how a pointer is hidden
         // over one window without touching it anywhere else.

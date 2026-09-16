@@ -6,6 +6,7 @@
 // the executable instead, so nothing ever modifies the installed copy.
 
 #include "kernel.h"
+#include "settings.h"
 #include <vector>
 #include "scheduler.h"
 
@@ -305,6 +306,11 @@ namespace
             while ((got = fread(buffer, 1, sizeof(buffer), file)) > 0)
                 extra.insert(extra.end(), buffer, buffer + got);
             fclose(file);
+        }
+        // And what the settings menu asks of the title.
+        {
+            const std::string lines = Settings::TitleConfigLines();
+            if (!lines.empty()) { extra.push_back('\n'); extra.insert(extra.end(), lines.begin(), lines.end()); }
         }
         if (extra.empty()) return {};
 

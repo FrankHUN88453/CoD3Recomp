@@ -1,5 +1,6 @@
 #include "installer.h"
 #include "kernel.h"
+#include "settings.h"
 #include <cstdlib>
 #include "scheduler.h"
 #include "sampler.h"
@@ -255,6 +256,7 @@ int Run(int argc, char** argv)
     // The file imports resolve guest paths under the installed game, and put
     // anything the title writes in a saves folder next to this program.
     Guest::GameRoot = game.root;
+    Settings::Load(exeDirectory);
     Kernel::InitializeFileSystem(exeDirectory);
 
     if (!Guest::Initialize(game.executable.string().c_str()))

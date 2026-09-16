@@ -1,4 +1,5 @@
 #include "d3d11_backend.h"
+#include "overlay.h"
 #include "xenos_hlsl.h"
 #include "gpu.h"
 #include "kernel.h"
@@ -1341,6 +1342,19 @@ namespace
             return WhiteTexture();
         }
 
+        // COD3_WATCHTEX=hex: every upload of the texture at that address,
+        // with its first words and the swap: a texture the title rewrites
+        // every frame shows here as one upload a frame.
+        {
+            static const uint32_t watched = []() { const char* t = getenv("COD3_WATCHTEX"); return t ? uint32_t(strtoul(t, nullptr, 16)) : 0u; }();
+            static int announced = 0;
+            if (watched != 0 && base == watched && announced++ < 120)
+            {
+                printf("d3d11: texture %08X uploaded at swap %llu, words", base, (unsigned long long)g_swaps.load(std::memory_order_relaxed));
+                for (uint32_t i = 0; i < 8 && i * 4 + 4 <= sourceBytes; i++) { uint32_t v; memcpy(&v, data + i * 4, 4); printf(" %08X", v); }
+                printf("\n");
+            }
+        }
         // COD3_D3DTEXDUMP=directory keeps every texture uploaded, the block
         // compressed ones as DDS and the rest as BMP, named by address.
         static const char* const dumpTextures = getenv("COD3_D3DTEXDUMP");
@@ -2580,6 +2594,9 @@ namespace
             ID3D11ShaderResourceView* none[1] = { nullptr };
             g_context->PSSetShaderResources(0, 1, none);
         }
+        // The menu, the counter and the screenshot key, over the picture.
+        Overlay::Initialize(hwnd, g_device.Get(), g_context.Get());
+        Overlay::Render(view.Get(), back.Get(), clientWidth, clientHeight);
         ID3D11RenderTargetView* noTargets[1] = { nullptr };
         g_context->OMSetRenderTargets(1, noTargets, nullptr);
         DumpFrame(back.Get(), clientWidth, clientHeight);
@@ -2631,6 +2648,7 @@ void D3D11Backend::Resolve()
 
 void D3D11Backend::Swap(uint32_t frontBufferPhysical, uint32_t width, uint32_t height)
 {
+    Overlay::NoteFrame();
     // COD3_SWAPDUMP=prefix: the front buffer's texture as it is at the swap,
     // every COD3_SWAPDUMP_EVERY swaps, cycling through forty, at quarter
     // size: what the title finished, before the window shows it.

@@ -1,6 +1,8 @@
 #include "input.h"
 #include "kernel.h"
 #include "window.h"
+#include "overlay.h"
+#include "settings.h"
 
 #include <algorithm>
 #include <atomic>
@@ -134,7 +136,8 @@ namespace
         const long dy = now.y - g_centre.y;
         if (dx != 0 || dy != 0) SetCursorPos(g_centre.x, g_centre.y);
 
-        constexpr long Gain = 1300;
+        // The settings menu's sensitivity scales the gain, both axes alike.
+        const long Gain = long(1300.0f * Settings::Get().mouseSensitivity);
         const long x = std::clamp(dx * Gain, -32767L, 32767L);
         // Screen coordinates grow downwards and a stick grows upwards.
         const long y = std::clamp(-dy * Gain, -32767L, 32767L);
@@ -285,8 +288,10 @@ namespace
             return text != nullptr && text[0] != 0 && text[0] != '0';
         }();
         if (ignored) return pad;
-        if (!Window::HasFocus())
+        if (!Window::HasFocus() || Overlay::IsOpen())
         {
+            // Out of focus, or the settings menu is up and the keys and the
+            // mouse are its.
             if (g_mouseHeld.load()) SetHold(false);
             return pad;
         }
@@ -321,28 +326,33 @@ namespace
 
         const bool held = g_mouseHeld.load();
 
-        // The keys, where the console's buttons are on a keyboard: Space
-        // jumps (A), C crouches (B), F changes weapon (Y), R reloads and E
-        // uses (X), V is the melee (the right stick pressed), Shift the left
-        // stick pressed, G throws the grenade (the right bumper) and Q the
-        // smoke (the left), Tab holds the objectives up (left on the cross).
+        // The keys, where the console's buttons are on a keyboard, from the
+        // settings menu: jump is A, crouch B, use and reload X, weapon Y,
+        // melee the right stick pressed, sprint the left, the grenade the
+        // right bumper and the smoke the left, objectives left on the cross,
+        // pause Start. The arrows and Enter always walk the menus.
+        const Settings::Values keys = Settings::Get();
         struct Mapping { int key; uint16_t button; };
-        static const Mapping mappings[] = {
+        const Mapping mappings[] = {
             { VK_RETURN, PadStart },
             { VK_UP, PadUp }, { VK_DOWN, PadDown },
             { VK_LEFT, PadLeft }, { VK_RIGHT, PadRight },
-            { VK_SPACE, PadA }, { 'Z', PadA },
-            { 'C', PadB }, { VK_CONTROL, PadB }, { 'X', PadB },
-            { 'R', PadX }, { 'E', PadX },
-            { 'F', PadY },
-            { 'V', PadRightThumb },
-            { 'Q', PadLeftShoulder }, { '4', PadLeftShoulder }, { 'G', PadRightShoulder },
-            { VK_SHIFT, PadLeftThumb },
-            { VK_TAB, PadLeft },
+            { keys.keys[Settings::Jump], PadA },
+            { keys.keys[Settings::Crouch], PadB },
+            { keys.keys[Settings::Use], PadX }, { keys.keys[Settings::Reload], PadX },
+            { keys.keys[Settings::Weapon], PadY },
+            { keys.keys[Settings::Melee], PadRightThumb },
+            { keys.keys[Settings::Sprint], PadLeftThumb },
+            { keys.keys[Settings::Grenade], PadRightShoulder },
+            { keys.keys[Settings::Smoke], PadLeftShoulder },
+            { keys.keys[Settings::Objectives], PadLeft },
         };
 
         for (const Mapping& mapping : mappings)
-            if (Down(mapping.key)) pad.buttons |= mapping.button;
+            if (mapping.key != 0 && Down(mapping.key)) pad.buttons |= mapping.button;
+        // Pause, when it is not the Escape that frees the mouse (below).
+        if (inLevel && keys.keys[Settings::Pause] != 0 && keys.keys[Settings::Pause] != VK_ESCAPE && Down(keys.keys[Settings::Pause]))
+            pad.buttons |= PadStart;
 
         // The wheel changes weapon, either way: the console has one button
         // for it, which cycles, so up and down both press it, held for a
@@ -380,18 +390,21 @@ namespace
         // Moving. WASD is the left stick so it is analogue, and the arrows stay
         // on the pad's cross so menus that only read that still work.
         int16_t x = 0, y = 0;
-        if (Down('A')) x -= StickFull;
-        if (Down('D')) x += StickFull;
-        if (Down('S')) y -= StickFull;
-        if (Down('W')) y += StickFull;
+        if (keys.keys[Settings::Left] && Down(keys.keys[Settings::Left])) x -= StickFull;
+        if (keys.keys[Settings::Right] && Down(keys.keys[Settings::Right])) x += StickFull;
+        if (keys.keys[Settings::Backward] && Down(keys.keys[Settings::Backward])) y -= StickFull;
+        if (keys.keys[Settings::Forward] && Down(keys.keys[Settings::Forward])) y += StickFull;
         pad.thumbLX = x;
         pad.thumbLY = y;
 
         ReadMouse(pad.thumbRX, pad.thumbRY);
 
-        // Firing and aiming, where a shooter expects them.
-        if (held && Down(VK_LBUTTON)) pad.rightTrigger = 255;
-        if (held && Down(VK_RBUTTON)) pad.leftTrigger = 255;
+        // Firing and aiming, where a shooter expects them: while the mouse
+        // is held, or for keys that are not mouse buttons at any time.
+        const int fire = keys.keys[Settings::Fire], aim = keys.keys[Settings::Aim];
+        const auto mouseButton = [](int key) { return key == VK_LBUTTON || key == VK_RBUTTON || key == VK_MBUTTON || key == VK_XBUTTON1 || key == VK_XBUTTON2; };
+        if (fire != 0 && (held || !mouseButton(fire)) && Down(fire)) pad.rightTrigger = 255;
+        if (aim != 0 && (held || !mouseButton(aim)) && Down(aim)) pad.leftTrigger = 255;
 
         return pad;
     }
@@ -436,7 +449,7 @@ namespace
             const char* text = getenv("COD3_NOPAD");
             return text != nullptr && text[0] != 0 && text[0] != '0';
         }();
-        if (g_getState != nullptr && !padIgnored)
+        if (g_getState != nullptr && !padIgnored && Settings::Get().controller)
         {
             XInputState state{};
             if (g_getState(0, &state) == ERROR_SUCCESS)

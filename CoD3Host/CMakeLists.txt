@@ -48,6 +48,14 @@ add_executable(CoD3 WIN32
     "scheduler.cpp"
     "window.cpp"
     "input.cpp"
+    "settings.cpp"
+    "overlay.cpp"
+    "../thirdparty/imgui/imgui.cpp"
+    "../thirdparty/imgui/imgui_draw.cpp"
+    "../thirdparty/imgui/imgui_tables.cpp"
+    "../thirdparty/imgui/imgui_widgets.cpp"
+    "../thirdparty/imgui/backends/imgui_impl_dx11.cpp"
+    "../thirdparty/imgui/backends/imgui_impl_win32.cpp"
     "audio_out.cpp"
     "parallel.cpp"
     "watchdog.cpp"
@@ -68,7 +76,12 @@ target_link_libraries(CoD3 PRIVATE
     dbghelp         # the watchdog's stack walks
     d3d11           # the host GPU
     dxgi
+    d3dcompiler     # the menu's own shaders (Dear ImGui)
+    windowscodecs   # screenshots as PNG
     shell32)
+
+# Dear ImGui, for the settings menu, from thirdparty/imgui.
+target_include_directories(CoD3 PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/imgui")
 
 # The levels whose code was recompiled and linked in, for modules.cpp: one
 # COD3_LEVEL(name) line each, written at configure time from what the
