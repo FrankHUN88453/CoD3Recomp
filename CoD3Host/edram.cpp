@@ -36,6 +36,8 @@ namespace
         std::vector<uint32_t> pixels;
     };
     std::mutex g_shadowMutex;
+    std::mutex g_resolveTargetMutex;
+    std::map<uint32_t, uint64_t> g_resolvesByTarget;   // every destination, how often
     std::map<uint32_t, ShadowImage> g_shadows;
 
     std::mutex g_statisticsMutex;
@@ -248,6 +250,10 @@ void Edram::Resolve()
             std::lock_guard<std::mutex> lock(mutex);
             if (seen.find(destBase) == seen.end()) { seen[destBase] = true; first = true; }
         }
+        {
+            std::lock_guard<std::mutex> lock(g_resolveTargetMutex);
+            g_resolvesByTarget[destBase]++;
+        }
         if (first)
         {
             const uint32_t last = destPitch * height * 4;
@@ -456,5 +462,13 @@ void Edram::Report()
         stats.lastWidth, stats.lastHeight,
         (unsigned long long)stats.texelsWritten,
         (unsigned long long)stats.texelsNonZero);
+    {
+        // Every destination and how often, which says where the frames go.
+        std::lock_guard<std::mutex> lock(g_resolveTargetMutex);
+        printf("        by destination:");
+        for (const auto& entry : g_resolvesByTarget)
+            printf(" %08X x%llu", entry.first, (unsigned long long)entry.second);
+        printf("\n");
+    }
     fflush(stdout);
 }

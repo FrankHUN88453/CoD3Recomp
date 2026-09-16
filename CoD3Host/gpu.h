@@ -6,6 +6,9 @@
 
 namespace Gpu
 {
+    // The indirect buffer the command thread is inside, for reports.
+    uint32_t CurrentIndirectBuffer();
+
     // Registers are addressed by their byte address in the aperture, which is
     // what the driver actually writes. These were found by watching what it
     // touched, not assumed: see the discovery reporting in gpu.cpp.

@@ -829,6 +829,10 @@ namespace
 
     // The indirect buffer packet most recently followed, raw, for reports.
     thread_local uint32_t t_lastIndirectAddress = 0;
+}
+uint32_t Gpu::CurrentIndirectBuffer() { return t_lastIndirectAddress; }
+namespace
+{
     thread_local uint32_t t_lastIndirectSize = 0;
     thread_local uint32_t t_lastIndirectSizeAt = 0;   // guest address of the size word
 

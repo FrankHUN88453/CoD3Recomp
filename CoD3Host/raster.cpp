@@ -30,6 +30,8 @@
 #include <cstring>
 #include <functional>
 #include <map>
+#include <set>
+#include <tuple>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -96,6 +98,26 @@ namespace
 
     // Time spent inside triangles, so the rate can be stated rather than guessed.
     std::atomic<uint64_t> g_rasterNanoseconds{ 0 };
+    thread_local uint32_t t_drawIndexCount = 0;   // the draw being rasterised, for the trace
+    thread_local uint32_t t_vertexShaderWord = 0;
+    thread_local size_t t_vertexShaderWords = 0;
+
+    // Triangles by the size of their bounding box, and the pixels each size
+    // wrote: whether a frame's pixels come from many small triangles or a
+    // few enormous ones is the first question about a slow frame.
+    constexpr int SizeBuckets = 6;
+    std::atomic<uint64_t> g_trianglesBySize[SizeBuckets];
+    std::atomic<uint64_t> g_pixelsBySize[SizeBuckets];
+    std::atomic<uint64_t> g_nanosecondsBySize[SizeBuckets];
+    int SizeBucket(uint64_t boxPixels)
+    {
+        if (boxPixels < 64) return 0;
+        if (boxPixels < 1024) return 1;
+        if (boxPixels < 16384) return 2;
+        if (boxPixels < 262144) return 3;
+        if (boxPixels < 1048576) return 4;
+        return 5;
+    }
 
     // The shader constant file as floats, the vertex half then the pixel
     // half, so a program reads a constant with one aligned load rather than
@@ -123,6 +145,7 @@ namespace
         const uint32_t* image = nullptr;
     };
     TextureDesc g_textures[32];
+    std::atomic<uint64_t> g_texturesMissing{ 0 };   // samples of textures that could not be read
     std::mutex g_textureMutex;
 
     void SnapshotRegisters()
@@ -171,9 +194,11 @@ namespace
     // and the write masks as blend masks.
     struct DecodedSource
     {
-        uint8_t reg = 0;
+        uint16_t reg = 0;            // a temporary's number, or a constant's index
         bool temporary = false;
         bool negate = false;
+        bool absolute = false;       // |value|, before the sign flip
+        bool relative = false;       // a constant addressed through a0
         uint8_t swizzle = 0;
         alignas(16) int32_t permute[4] = { 0, 1, 2, 3 };
     };
@@ -226,10 +251,26 @@ namespace
         }
     }
 
-    DecodedSource DecodeSource(uint32_t reg, bool temporary, uint32_t swizzle, bool negate)
+    // An operand's register field is eight bits. For a temporary the low five
+    // are its number, the top bit asks for the absolute value and the one
+    // below for loop relative addressing; for a constant all eight are the
+    // index, the absolute value is a flag of the instruction, and whether a0
+    // is added is another. The sign flips are three bits of the second word.
+    DecodedSource DecodeSource(uint32_t reg, bool temporary, uint32_t swizzle, bool negate,
+                               bool absoluteConstants, bool relativeConstant)
     {
         DecodedSource source;
-        source.reg = uint8_t(reg & (MaxRegisters - 1));
+        if (temporary)
+        {
+            source.reg = uint16_t(reg & 0x1F);
+            source.absolute = (reg & 0x80) != 0;
+        }
+        else
+        {
+            source.reg = uint16_t(reg & 0xFF);
+            source.absolute = absoluteConstants;
+            source.relative = relativeConstant;
+        }
         source.temporary = temporary;
         source.negate = negate;
         source.swizzle = uint8_t(swizzle);
@@ -249,9 +290,20 @@ namespace
         alu.scalarOpcode = uint8_t((d0 >> 26) & 0x3F);
         alu.clamp = ((d0 >> 24) & 1) != 0;
         alu.vectorOpcode = uint8_t((d2 >> 24) & 0x1F);
-        alu.source[0] = DecodeSource((d2 >> 16) & 0x3F, ((d2 >> 31) & 1) != 0, (d1 >> 16) & 0xFF, ((d2 >> 22) & 1) != 0);
-        alu.source[1] = DecodeSource((d2 >> 8) & 0x3F, ((d2 >> 30) & 1) != 0, (d1 >> 8) & 0xFF, ((d2 >> 14) & 1) != 0);
-        alu.source[2] = DecodeSource(d2 & 0x3F, ((d2 >> 29) & 1) != 0, d1 & 0xFF, ((d2 >> 6) & 1) != 0);
+        const bool absoluteConstants = ((d0 >> 7) & 1) != 0;
+        const bool temp1 = ((d2 >> 31) & 1) != 0;
+        const bool temp2 = ((d2 >> 30) & 1) != 0;
+        const bool temp3 = ((d2 >> 29) & 1) != 0;
+        // Which of the two relative addressing flags an operand takes: the
+        // first constant operand takes the first flag, the rest the second.
+        const bool relative0 = ((d1 >> 31) & 1) != 0;
+        const bool relative1 = ((d1 >> 30) & 1) != 0;
+        alu.source[0] = DecodeSource((d2 >> 16) & 0xFF, temp1, (d1 >> 16) & 0xFF, ((d1 >> 26) & 1) != 0,
+                                     absoluteConstants, relative0);
+        alu.source[1] = DecodeSource((d2 >> 8) & 0xFF, temp2, (d1 >> 8) & 0xFF, ((d1 >> 25) & 1) != 0,
+                                     absoluteConstants, temp1 ? relative0 : relative1);
+        alu.source[2] = DecodeSource(d2 & 0xFF, temp3, d1 & 0xFF, ((d1 >> 24) & 1) != 0,
+                                     absoluteConstants, (temp1 && temp2) ? relative0 : relative1);
         return alu;
     }
 
@@ -360,7 +412,30 @@ namespace
         std::lock_guard<std::mutex> lock(mutex);
         auto found = programs.find(words);
         if (found == programs.end())
+        {
             found = programs.emplace(words, Parse(words)).first;
+            // COD3_TRACEBIG=1: a new vertex program's fetches, which say how
+            // the title lays its vertices out.
+            static const bool trace = []() {
+                const char* text = getenv("COD3_TRACEBIG");
+                return text != nullptr && text[0] != 0 && text[0] != '0';
+            }();
+            if (trace && !pixel)
+            {
+                printf("raster: vertex program %08X (%zu words):", words.empty() ? 0 : words[0], words.size());
+                for (const DecodedStep& step : found->second.steps)
+                {
+                    if (!step.fetch || (step.d0 & 0x1F) != 0) continue;
+                    const int exponent = int((step.d1 >> 24) & 0x3F);
+                    printf("  r%u <- c%u fmt %u %s%s e%d stride %u offset %u swz %03X",
+                        (step.d0 >> 12) & 0x3F, ((step.d0 >> 20) & 0x1F) * 3 + ((step.d0 >> 25) & 3),
+                        (step.d1 >> 16) & 0x3F, ((step.d1 >> 12) & 1) ? "s" : "u",
+                        ((step.d1 >> 13) & 1) ? "w" : "n", exponent >= 32 ? exponent - 64 : exponent,
+                        step.d2 & 0xFF, (step.d2 >> 8) & 0x7FFFFF, step.d1 & 0xFFF);
+                }
+                printf("\n");
+            }
+        }
         return found->second;
     }
 
@@ -377,6 +452,7 @@ namespace
         uint32_t lastBase = 0;
         bool textureNeeded = false;
         float previousScalar = 0.0f;
+        int32_t addressRegister = 0;   // a0, set by the mova instructions
     };
 
     Vec4 ReadConstant(bool pixel, uint32_t index)
@@ -389,16 +465,21 @@ namespace
         return value;
     }
 
-    Vec4 ReadSource(const Context& context, uint32_t reg, bool temporary,
-                    uint32_t swizzle, bool negate)
+    Vec4 ReadSource(const Context& context, const DecodedSource& operand)
     {
-        Vec4 source = temporary ? context.registers[reg & (MaxRegisters - 1)]
-                                : ReadConstant(context.pixel, reg);
+        Vec4 source;
+        if (operand.temporary)
+            source = context.registers[operand.reg & (MaxRegisters - 1)];
+        else
+            source = ReadConstant(context.pixel,
+                uint32_t(operand.reg + (operand.relative ? context.addressRegister : 0)) & 255u);
         Vec4 result;
         for (uint32_t i = 0; i < 4; i++)
         {
-            const uint32_t component = (i + ((swizzle >> (i * 2)) & 3)) & 3;
-            result.v[i] = negate ? -source.v[component] : source.v[component];
+            const uint32_t component = (i + ((operand.swizzle >> (i * 2)) & 3)) & 3;
+            float value = source.v[component];
+            if (operand.absolute) value = std::fabs(value);
+            result.v[i] = operand.negate ? -value : value;
         }
         return result;
     }
@@ -423,6 +504,12 @@ namespace
         case 12: for (int i = 0; i < 4; i++) out.v[i] = a.v[i] == 0.0f ? b.v[i] : c.v[i]; return true;
         case 13: for (int i = 0; i < 4; i++) out.v[i] = a.v[i] >= 0.0f ? b.v[i] : c.v[i]; return true;
         case 14: for (int i = 0; i < 4; i++) out.v[i] = a.v[i] >  0.0f ? b.v[i] : c.v[i]; return true;
+        case 17:   // dot2addv
+        {
+            const float dot = a.v[0] * b.v[0] + a.v[1] * b.v[1] + c.v[0];
+            for (int i = 0; i < 4; i++) out.v[i] = dot;
+            return true;
+        }
         case 15:
         {
             float sum = 0;
@@ -454,9 +541,20 @@ namespace
         switch (opcode)
         {
         case 0:  out = a.v[0] + a.v[1]; return true;   // adds
+        case 1:  out = a.v[0] + previous; return true; // add_prevs
         case 2:  out = a.v[0] * a.v[1]; return true;   // muls
+        case 3:  out = a.v[0] * previous; return true; // mul_prevs
+        case 4:  // mul_prev2s: the product unless the previous result was the floor value
+            out = (previous == -3.402823466e38f || previous != previous ||
+                   a.v[1] != a.v[1] || a.v[1] <= 0.0f)
+                ? -3.402823466e38f : a.v[0] * previous;
+            return true;
         case 5:  out = std::max(a.v[0], a.v[1]); return true;
         case 6:  out = std::min(a.v[0], a.v[1]); return true;
+        case 7:  out = a.v[0] == 0.0f ? 1.0f : 0.0f; return true;   // setes
+        case 8:  out = a.v[0] >  0.0f ? 1.0f : 0.0f; return true;   // setgts
+        case 9:  out = a.v[0] >= 0.0f ? 1.0f : 0.0f; return true;   // setgtes
+        case 10: out = a.v[0] != 0.0f ? 1.0f : 0.0f; return true;   // setnes
         case 11: out = a.v[0] - std::floor(a.v[0]); return true;
         case 12: out = std::trunc(a.v[0]); return true;
         case 13: out = std::floor(a.v[0]); return true;
@@ -466,6 +564,14 @@ namespace
             out = a.v[0] != 0.0f ? 1.0f / a.v[0] : 0.0f; return true;
         case 20: case 21: case 22:
             out = a.v[0] > 0.0f ? 1.0f / std::sqrt(a.v[0]) : 0.0f; return true;
+        case 23: out = a.v[0]; return true;            // movas: the address register is set by the caller
+        case 24: out = a.v[0]; return true;            // mova_floors
+        case 25: out = a.v[0] - a.v[1]; return true;   // subs
+        case 26: out = a.v[0] - previous; return true; // sub_prevs
+        case 27: out = a.v[0] == 0.0f ? 0.0f : 1.0f; return true;   // pred_setes: the value, the predicate is not kept
+        case 28: out = a.v[0] != 0.0f ? 0.0f : 1.0f; return true;   // pred_setnes
+        case 29: out = a.v[0] >  0.0f ? 0.0f : 1.0f; return true;   // pred_setgts
+        case 30: out = a.v[0] >= 0.0f ? 0.0f : 1.0f; return true;   // pred_setgtes
         case 40: out = a.v[0] > 0.0f ? std::sqrt(a.v[0]) : 0.0f; return true;
         case 48: out = std::sin(a.v[0]); return true;
         case 49: out = std::cos(a.v[0]); return true;
@@ -479,39 +585,151 @@ namespace
     // How many components a format carries and how wide each one is. Only the
     // formats this title's programs ask for are here; anything else is counted
     // and reported rather than approximated.
-    bool FetchAttribute(uint32_t format, uint32_t address, Vec4& out)
+    // How the fetch instruction and its constant say the data is stored:
+    // the byte order the constant asks for, and the number format, sign
+    // and power of two scale the instruction asks for. The title packs its
+    // model vertices tightly, positions as scaled shorts and normals as
+    // ten bit fields, and read as floats those were triangles the size of
+    // the screen.
+    struct FetchFormat
     {
-        auto ReadFloat = [&](uint32_t offset) {
-            const uint32_t bits = Guest::Read32(Guest::Base, address + offset * 4);
+        uint32_t format = 0;
+        uint32_t endian = 0;        // 0 none, 1 bytes in halves, 2 bytes in words, 3 halves in words
+        bool isSigned = false;
+        bool normalized = true;
+        int exponent = 0;
+    };
+
+    float HalfToFloat(uint16_t half)
+    {
+        const uint32_t sign = uint32_t(half & 0x8000) << 16;
+        uint32_t exponent = (half >> 10) & 0x1F;
+        uint32_t mantissa = half & 0x3FF;
+        uint32_t bits;
+        if (exponent == 0)
+        {
+            if (mantissa == 0) bits = sign;
+            else
+            {
+                exponent = 127 - 15 + 1;
+                while ((mantissa & 0x400) == 0) { mantissa <<= 1; exponent--; }
+                bits = sign | (exponent << 23) | ((mantissa & 0x3FF) << 13);
+            }
+        }
+        else if (exponent == 31) bits = sign | 0x7F800000 | (mantissa << 13);
+        else bits = sign | ((exponent + 127 - 15) << 23) | (mantissa << 13);
+        float value;
+        memcpy(&value, &bits, sizeof(value));
+        return value;
+    }
+
+    bool FetchAttribute(const FetchFormat& how, uint32_t address, Vec4& out)
+    {
+        // A little endian word of the data, after the swap the constant asks
+        // for: what the shader sees.
+        auto Word = [&](uint32_t offset) -> uint32_t {
+            uint32_t raw;
+            memcpy(&raw, Guest::Base + address + offset * 4, 4);
+            switch (how.endian)
+            {
+            case 1: return ((raw & 0xFF00FF00u) >> 8) | ((raw & 0x00FF00FFu) << 8);
+            case 2: return _byteswap_ulong(raw);
+            case 3: return (raw >> 16) | (raw << 16);
+            default: return raw;
+            }
+        };
+        auto AsFloat = [](uint32_t bits) {
             float value;
             memcpy(&value, &bits, 4);
             return value;
         };
+        const float scale = std::ldexp(1.0f, how.exponent);
+        // An integer field of `bits` bits, as the number format says.
+        auto Field = [&](uint32_t value, int bits) -> float {
+            if (how.isSigned)
+            {
+                const int32_t wide = int32_t(value << (32 - bits)) >> (32 - bits);
+                if (!how.normalized) return float(wide) * scale;
+                const float limit = float((1u << (bits - 1)) - 1);
+                return std::max(float(wide) / limit, -1.0f) * scale;
+            }
+            if (!how.normalized) return float(value) * scale;
+            return float(value) / float((1ull << bits) - 1) * scale;
+        };
 
-        switch (format)
+        switch (how.format)
         {
         case 36:   // one float
-            out.v[0] = ReadFloat(0);
+            out.v[0] = AsFloat(Word(0)) * scale;
             return true;
         case 37:   // two floats
-            out.v[0] = ReadFloat(0); out.v[1] = ReadFloat(1);
+            out.v[0] = AsFloat(Word(0)) * scale; out.v[1] = AsFloat(Word(1)) * scale;
             return true;
         case 57:   // three floats
-            out.v[0] = ReadFloat(0); out.v[1] = ReadFloat(1); out.v[2] = ReadFloat(2);
+            out.v[0] = AsFloat(Word(0)) * scale; out.v[1] = AsFloat(Word(1)) * scale;
+            out.v[2] = AsFloat(Word(2)) * scale;
             return true;
         case 38:   // four floats
-            for (int i = 0; i < 4; i++) out.v[i] = ReadFloat(i);
+            for (uint32_t i = 0; i < 4; i++) out.v[i] = AsFloat(Word(i)) * scale;
             return true;
         case 6:    // four bytes, first component in the least significant one
         {
-            // The order matters more than it looks. Reading it the other way
-            // round put the alpha where the blue belongs, and a background
-            // quad with an alpha of zero blends away to nothing.
-            const uint32_t packed = Guest::Read32(Guest::Base, address);
-            out.v[0] = (packed & 0xFF) / 255.0f;
-            out.v[1] = ((packed >> 8) & 0xFF) / 255.0f;
-            out.v[2] = ((packed >> 16) & 0xFF) / 255.0f;
-            out.v[3] = ((packed >> 24) & 0xFF) / 255.0f;
+            const uint32_t packed = Word(0);
+            for (uint32_t i = 0; i < 4; i++) out.v[i] = Field((packed >> (i * 8)) & 0xFF, 8);
+            return true;
+        }
+        case 7:    // ten, ten, ten and two bits
+        {
+            const uint32_t packed = Word(0);
+            out.v[0] = Field(packed & 0x3FF, 10);
+            out.v[1] = Field((packed >> 10) & 0x3FF, 10);
+            out.v[2] = Field((packed >> 20) & 0x3FF, 10);
+            out.v[3] = Field(packed >> 30, 2);
+            return true;
+        }
+        case 25:   // two shorts
+        {
+            const uint32_t packed = Word(0);
+            out.v[0] = Field(packed & 0xFFFF, 16);
+            out.v[1] = Field(packed >> 16, 16);
+            return true;
+        }
+        case 26:   // four shorts
+        {
+            const uint32_t low = Word(0), high = Word(1);
+            out.v[0] = Field(low & 0xFFFF, 16);
+            out.v[1] = Field(low >> 16, 16);
+            out.v[2] = Field(high & 0xFFFF, 16);
+            out.v[3] = Field(high >> 16, 16);
+            return true;
+        }
+        case 31:   // two half floats
+        {
+            const uint32_t packed = Word(0);
+            out.v[0] = HalfToFloat(uint16_t(packed)) * scale;
+            out.v[1] = HalfToFloat(uint16_t(packed >> 16)) * scale;
+            return true;
+        }
+        case 32:   // four half floats
+        {
+            const uint32_t low = Word(0), high = Word(1);
+            out.v[0] = HalfToFloat(uint16_t(low)) * scale;
+            out.v[1] = HalfToFloat(uint16_t(low >> 16)) * scale;
+            out.v[2] = HalfToFloat(uint16_t(high)) * scale;
+            out.v[3] = HalfToFloat(uint16_t(high >> 16)) * scale;
+            return true;
+        }
+        case 33: case 34: case 35:   // one, two or four whole words
+        {
+            const uint32_t count = how.format == 33 ? 1 : how.format == 34 ? 2 : 4;
+            for (uint32_t i = 0; i < count; i++)
+            {
+                const uint32_t value = Word(i);
+                if (how.isSigned)
+                    out.v[i] = (how.normalized ? float(int32_t(value)) / 2147483647.0f : float(int32_t(value))) * scale;
+                else
+                    out.v[i] = (how.normalized ? float(value) / 4294967295.0f : float(value)) * scale;
+            }
             return true;
         }
         default:
@@ -931,7 +1149,18 @@ namespace
             ? g_textures[slot] : DescribeTexture(slot);
         if (!texture.usable)
         {
-            context.textureNeeded = true;
+            // A texture this runtime cannot read samples as white: the
+            // draw goes on with its geometry and lighting rather than being
+            // dropped whole. The level's shadow map is a depth texture, and
+            // every surface that looked it up was missing from the frame.
+            Vec4& destination = context.registers[destReg & (MaxRegisters - 1)];
+            __m128 result = _mm_set1_ps(1.0f);
+            result = _mm_blendv_ps(result, _mm_setzero_ps(),
+                _mm_load_ps(reinterpret_cast<const float*>(step.fetchZero)));
+            result = _mm_blendv_ps(result, Load(destination),
+                _mm_load_ps(reinterpret_cast<const float*>(step.fetchKeep)));
+            Store(destination, result);
+            g_texturesMissing.fetch_add(1, std::memory_order_relaxed);
             return;
         }
 
@@ -1025,7 +1254,12 @@ namespace
         const uint32_t word0 = Reg(0x4800 + index * 2);
         const uint32_t word1 = Reg(0x4800 + index * 2 + 1);
 
-        const uint32_t format = (d1 >> 16) & 0x3F;
+        FetchFormat how;
+        how.format = (d1 >> 16) & 0x3F;
+        how.isSigned = ((d1 >> 12) & 1) != 0;
+        how.normalized = ((d1 >> 13) & 1) == 0;
+        how.exponent = int((d1 >> 24) & 0x3F);
+        if (how.exponent >= 32) how.exponent -= 64;
         const uint32_t swizzle = d1 & 0xFFF;
         const bool mini = ((d1 >> 30) & 1) != 0;
 
@@ -1039,13 +1273,26 @@ namespace
         if ((word0 & 3) == 3) { context.lastBase = base; }
         if (stride != 0) context.lastStride = stride;
 
-        (void)word1;
+        how.endian = word1 & 3;
+        {
+            // Each combination of format and byte order, once: the title's
+            // vertex layouts, and which of them are read here.
+            static std::mutex mutex;
+            static std::set<uint32_t> seen;
+            const uint32_t key = (how.format << 8) | (how.endian << 4) | (how.isSigned ? 2 : 0) |
+                                 (how.normalized ? 1 : 0) | (uint32_t(how.exponent & 0x3F) << 16);
+            std::lock_guard<std::mutex> lock(mutex);
+            if (seen.insert(key).second)
+                printf("raster: vertex format %u, byte order %u, %s, %s, exponent %d\n",
+                    how.format, how.endian, how.isSigned ? "signed" : "unsigned",
+                    how.normalized ? "normalised" : "whole", how.exponent);
+        }
 
         Vec4 fetched;
         const uint32_t address = base + (context.vertexIndex * stride + offset) * 4;
-        if (!FetchAttribute(format, address, fetched))
+        if (!FetchAttribute(how, address, fetched))
         {
-            ReportOnce("unhandled vertex format", format);
+            ReportOnce("unhandled vertex format", how.format);
             std::lock_guard<std::mutex> lock(g_statisticsMutex);
             g_statistics.unknownFormat++;
             return;
@@ -1079,23 +1326,15 @@ namespace
         const bool vectorClamp = ((d0 >> 24) & 1) != 0;
 
         const uint32_t src3Swizzle = d1 & 0xFF;
-        const uint32_t src2Swizzle = (d1 >> 8) & 0xFF;
-        const uint32_t src1Swizzle = (d1 >> 16) & 0xFF;
-
-        const uint32_t src3Reg = d2 & 0x3F;
-        const uint32_t src2Reg = (d2 >> 8) & 0x3F;
-        const uint32_t src1Reg = (d2 >> 16) & 0x3F;
         const uint32_t vectorOpcode = (d2 >> 24) & 0x1F;
-        const bool src1Temporary = ((d2 >> 31) & 1) != 0;
-        const bool src2Temporary = ((d2 >> 30) & 1) != 0;
-        const bool src3Temporary = ((d2 >> 29) & 1) != 0;
-        const bool src3Negate = ((d2 >> 6) & 1) != 0;
-        const bool src2Negate = ((d2 >> 14) & 1) != 0;
-        const bool src1Negate = ((d2 >> 22) & 1) != 0;
+        const DecodedAlu decoded = DecodeAlu(d0, d1, d2);
+        const uint32_t src3Reg = decoded.source[2].reg;
+        const bool src3Temporary = decoded.source[2].temporary;
+        const bool src3Negate = decoded.source[2].negate;
 
-        const Vec4 a = ReadSource(context, src1Reg, src1Temporary, src1Swizzle, src1Negate);
-        const Vec4 b = ReadSource(context, src2Reg, src2Temporary, src2Swizzle, src2Negate);
-        const Vec4 c = ReadSource(context, src3Reg, src3Temporary, src3Swizzle, src3Negate);
+        const Vec4 a = ReadSource(context, decoded.source[0]);
+        const Vec4 b = ReadSource(context, decoded.source[1]);
+        const Vec4 c = ReadSource(context, decoded.source[2]);
 
         if (vectorMask != 0)
         {
@@ -1152,6 +1391,12 @@ namespace
             else
             {
                 handled = ApplyScalar(scalarOpcode, c, context.previousScalar, result);
+                if (scalarOpcode == 23 || scalarOpcode == 24)
+                {
+                    // mova: the address register takes the rounded operand.
+                    const float rounded = scalarOpcode == 23 ? std::floor(c.v[0] + 0.5f) : std::floor(c.v[0]);
+                    context.addressRegister = int32_t(std::max(-256.0f, std::min(255.0f, rounded)));
+                }
             }
 
             if (!handled)
@@ -1223,11 +1468,13 @@ namespace
 
     inline __m128 GatherSource(const Context& context, const DecodedSource& source)
     {
-        const float* from = source.temporary
-            ? context.registers[source.reg].v
-            : &g_constants[((context.pixel ? 256u : 0u) + source.reg) * 4];
+        const uint32_t index = source.temporary ? uint32_t(source.reg & (MaxRegisters - 1))
+            : ((context.pixel ? 256u : 0u) +
+               (uint32_t(source.reg + (source.relative ? context.addressRegister : 0)) & 255u));
+        const float* from = source.temporary ? context.registers[index].v : &g_constants[index * 4];
         __m128 value = _mm_load_ps(from);
         value = _mm_permutevar_ps(value, _mm_load_si128(reinterpret_cast<const __m128i*>(source.permute)));
+        if (source.absolute) value = _mm_andnot_ps(_mm_set1_ps(-0.0f), value);
         if (source.negate) value = _mm_xor_ps(value, _mm_set1_ps(-0.0f));
         return value;
     }
@@ -1349,6 +1596,11 @@ namespace
                 Vec4 lanes;
                 Store(lanes, c);
                 handled = ApplyScalar(opcode, lanes, context.previousScalar, result);
+                if (opcode == 23 || opcode == 24)
+                {
+                    const float rounded = opcode == 23 ? std::floor(lanes.v[0] + 0.5f) : std::floor(lanes.v[0]);
+                    context.addressRegister = int32_t(std::max(-256.0f, std::min(255.0f, rounded)));
+                }
             }
 
             if (!handled)
@@ -1817,14 +2069,75 @@ namespace
 
         // Eight rows a piece is fine enough that a full screen quad spreads
         // over every core and coarse enough that handing out a piece is not
-        // the work. A triangle under a band tall runs inline.
+        // the work. A small triangle runs inline whatever its height: handing
+        // out pieces costs tens of microseconds, and a level frame has two
+        // hundred thousand triangles under a thousand pixels each.
+        const uint64_t boxPixels = uint64_t(maxX - minX + 1) * uint64_t(maxY - minY + 1);
         const auto started = std::chrono::steady_clock::now();
-        Parallel::For(minY, maxY + 1, 8, rows);
+        if (boxPixels < 8192) rows(minY, maxY + 1);
+        else Parallel::For(minY, maxY + 1, 8, rows);
         const auto took = std::chrono::steady_clock::now() - started;
-        g_rasterNanoseconds.fetch_add(
-            uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(took).count()),
-            std::memory_order_relaxed);
+        const uint64_t nanoseconds =
+            uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(took).count());
+        g_rasterNanoseconds.fetch_add(nanoseconds, std::memory_order_relaxed);
         pixelsWritten += written.load();
+        {
+            const int bucket = SizeBucket(boxPixels);
+            g_trianglesBySize[bucket].fetch_add(1, std::memory_order_relaxed);
+            g_pixelsBySize[bucket].fetch_add(written.load(), std::memory_order_relaxed);
+            g_nanosecondsBySize[bucket].fetch_add(nanoseconds, std::memory_order_relaxed);
+        }
+
+        // COD3_TRACEBIG=1: a frame with hundreds of triangles that cover most
+        // of the target is all overdraw, and this says what they were: the
+        // big triangles of each frame by shader, state and draw size, printed
+        // for the first frames that have more than two hundred of them.
+        static const bool traceBig = []() {
+            const char* text = getenv("COD3_TRACEBIG");
+            return text != nullptr && text[0] != 0 && text[0] != '0';
+        }();
+        if (traceBig && boxPixels >= 262144)
+        {
+            struct Key { uint32_t shader, blend, colour, mode, count; uint64_t buffer; };
+            static std::map<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t, uint32_t>, uint64_t> frame;
+            static uint64_t frameSwap = 0;
+            static uint64_t frameBig = 0;
+            static int printed = 0;
+            const uint64_t swap = Kernel::Stats().swaps.load(std::memory_order_relaxed);
+            if (swap != frameSwap)
+            {
+                if (frameBig > 200 && printed < 4)
+                {
+                    printed++;
+                    printf("raster: frame %llu had %llu big triangles:\n",
+                        (unsigned long long)frameSwap, (unsigned long long)frameBig);
+                    for (const auto& entry : frame)
+                        printf("        shader %08X blend %08X colour %08X mode %08X draw of %u: x%llu\n",
+                            std::get<0>(entry.first), std::get<1>(entry.first), std::get<2>(entry.first),
+                            std::get<3>(entry.first), std::get<4>(entry.first),
+                            (unsigned long long)entry.second);
+                    fflush(stdout);
+                }
+                frame.clear();
+                frameBig = 0;
+                frameSwap = swap;
+            }
+            frameBig++;
+            {
+                // The corners of the first of them from the shader that
+                // makes most: is it the geometry or the transform.
+                static std::atomic<int> shown{ 0 };
+                const uint32_t shader = pixelProgram.words.empty() ? 0 : pixelProgram.words[0];
+                if (shader == 0x00011002u && t_drawIndexCount >= 36 && shown.fetch_add(1) < 24)
+                    printf("raster: big triangle (%.0f,%.0f w%.4g) (%.0f,%.0f w%.4g) (%.0f,%.0f w%.4g) "
+                           "wrote %llu, draw of %u, vertex shader %08X (%zu words), viewport %08X\n",
+                        ax, ay, 1.0f / a.inverseW, bx, by, 1.0f / b.inverseW, cx, cy, 1.0f / c.inverseW,
+                        (unsigned long long)written.load(), t_drawIndexCount,
+                        t_vertexShaderWord, t_vertexShaderWords, Reg(0x2206));
+            }
+            frame[std::make_tuple(unsigned(pixelProgram.words.empty() ? 0 : pixelProgram.words[0]),
+                                  Reg(0x2201), Reg(0x2001), Reg(0x2208), t_drawIndexCount)]++;
+        }
     }
 }
 
@@ -1835,6 +2148,7 @@ void Raster::Draw(uint32_t initiator, uint32_t indexBase, uint32_t indexWord)
     const uint32_t sourceSelect = (initiator >> 6) & 3;
     const uint32_t indexCount = initiator >> 16;
     const bool wideIndices = ((initiator >> 11) & 1) != 0;
+    t_drawIndexCount = indexCount;
 
     // Why a draw was skipped, counted by reason. A single total says nothing
     // about which check is the one standing in the way.
@@ -1876,6 +2190,8 @@ void Raster::Draw(uint32_t initiator, uint32_t indexBase, uint32_t indexWord)
     const Blend blend = CurrentBlend();
     const Program& vertexProgram = CachedProgram(false);
     const Program& pixelProgram = CachedProgram(true);
+    t_vertexShaderWord = vertexProgram.words.empty() ? 0 : vertexProgram.words[0];
+    t_vertexShaderWords = vertexProgram.words.size();
     if (!vertexProgram.valid || !pixelProgram.valid) { Skip("no shader program bound"); return; }
 
     // Every texture the pixel program samples, described now, on this
@@ -2002,7 +2318,23 @@ void Raster::Report()
                    "%d threads\n",
                 seconds, stats.pixels / seconds / 1e6, Parallel::Width());
     }
+    {
+        static const char* const names[SizeBuckets] = {
+            "under 64", "under 1K", "under 16K", "under 256K", "under 1M", "1M and over" };
+        printf("        by bounding box:");
+        for (int i = 0; i < SizeBuckets; i++)
+        {
+            const uint64_t triangles = g_trianglesBySize[i].load();
+            if (triangles == 0) continue;
+            printf("  %s: %llu tris %llu px %.1f s;", names[i], (unsigned long long)triangles,
+                (unsigned long long)g_pixelsBySize[i].load(), g_nanosecondsBySize[i].load() / 1e9);
+        }
+        printf("\n");
+    }
     if (ReportSkips) ReportSkips();
+    if (const uint64_t missing = g_texturesMissing.load())
+        printf("        %llu samples of textures that could not be read, taken as white\n",
+            (unsigned long long)missing);
     if (stats.unknownOpcode || stats.unknownFormat)
         printf("        %llu unhandled opcodes, %llu unhandled vertex formats\n",
             (unsigned long long)stats.unknownOpcode,
