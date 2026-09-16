@@ -75,8 +75,23 @@ namespace
             std::string base;
             if (temporary) base = (reg & 0x40) ? Format("r[(%u + aL) & 31]", reg & 0x1F) : Format("r[%u]", reg & 0x1F);
             else base = relative ? Format("c[(a0 + %u) & 255]", reg & 0xFF) : Format("c[%u]", reg & 0xFF);
-            a = base + "." + Components[(3 + ((swizzle >> 6) & 3)) & 3];
-            b = base + "." + Components[(0 + ((swizzle >> 0) & 3)) & 3];
+            // Which lanes the two operands come from is told differently by
+            // the two open translators: Xenia says w and x, freedreno's
+            // compiler says z and w (and writes its operands into both pairs
+            // to be safe). Xenia's reading is the one kept: across the
+            // title's programs the compiler fills the unused lanes with
+            // copies of the operands in a way that only makes sense with w
+            // and x, and the sky and the ground go wrong the other way. The
+            // grass program is the exception that is not understood yet: with
+            // z and w every "max a, a" in it is a move, every "sub a, a" a
+            // zero, and its blades stand up. COD3_SCALARLANES=zw tries that.
+            static const bool wx = []() {
+                const char* text = getenv("COD3_SCALARLANES");
+                return text == nullptr || strcmp(text, "zw") != 0;
+            }();
+            const uint32_t laneA = wx ? 3 : 2, laneB = wx ? 0 : 3;
+            a = base + "." + Components[(laneA + ((swizzle >> (laneA * 2)) & 3)) & 3];
+            b = base + "." + Components[(laneB + ((swizzle >> (laneB * 2)) & 3)) & 3];
             if (absolute) { a = "abs(" + a + ")"; b = "abs(" + b + ")"; }
             if (negate) { a = "(-" + a + ")"; b = "(-" + b + ")"; }
         }

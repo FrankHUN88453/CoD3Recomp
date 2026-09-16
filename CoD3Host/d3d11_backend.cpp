@@ -1351,7 +1351,7 @@ namespace
                             const uint8_t* from = linear.data() + size_t(y) * rowBytes + (hostFormat == DXGI_FORMAT_R8_UNORM ? x : size_t(x) * 4);
                             uint8_t* to = pixels.data() + (size_t(y) * width + x) * 4;
                             if (hostFormat == DXGI_FORMAT_R8_UNORM) { to[0] = to[1] = to[2] = from[0]; to[3] = 255; }
-                            else { to[0] = from[2]; to[1] = from[1]; to[2] = from[0]; to[3] = 255; }
+                            else { to[0] = from[2]; to[1] = from[1]; to[2] = from[0]; to[3] = from[3]; }   // the alpha kept: the grass reads it
                         }
                     BITMAPFILEHEADER file{};
                     BITMAPINFOHEADER info{};
@@ -2153,6 +2153,20 @@ namespace
                         for (uint32_t i = 0; i < 32; i++) printf("%s%02X", (i % 4) == 0 ? " " : "", bytes[i]);
                         printf("\n");
                     }
+                    for (const XenosHlsl::VertexFetch& fetch : vertexShader.translation.vertexFetches)
+                    {
+                        const uint32_t word0 = Reg(0x4800 + fetch.slot * 2), word1 = Reg(0x4800 + fetch.slot * 2 + 1);
+                        const uint8_t* data = Guest::Base + Guest::PhysicalAlias(word0 & ~3u);
+                        printf("d3d11 probe: vertex slot %u: %08X %08X, words", fetch.slot, word0, word1);
+                        for (uint32_t i = 0; i < 12 * fetch.stride; i++) { uint32_t v; memcpy(&v, data + i * 4, 4); printf(" %08X", _byteswap_ulong(v)); }
+                        printf("\n");
+                    }
+                    printf("d3d11 probe: c0..23:");
+                    for (uint32_t i = 0; i < 24 * 4; i++) printf("%s %g", (i % 4) == 0 ? " |" : "", RegFloat(0x4000 + i));
+                    printf("\n");
+                    printf("d3d11 probe: c80..95:");
+                    for (uint32_t i = 80 * 4; i < 96 * 4; i++) printf("%s %g", (i % 4) == 0 ? " |" : "", RegFloat(0x4000 + i));
+                    printf("\n");
                     printf("d3d11 probe: c24..47:");
                     for (uint32_t i = 24 * 4; i < 48 * 4; i++) printf("%s %g", (i % 4) == 0 ? " |" : "", RegFloat(0x4000 + i));
                     printf("\n");

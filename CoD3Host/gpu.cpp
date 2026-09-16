@@ -335,6 +335,8 @@ namespace
 
     bool TraceConstants();
 
+    void PrintRecent();
+
     void DecodeDraw(uint32_t initiator, uint32_t indexBase = 0, uint32_t indexWord = 0)
     {
         const uint32_t primitive = initiator & 0x3F;
@@ -353,6 +355,29 @@ namespace
                 primitive, initiator >> 16, (initiator >> 6) & 3, Gpu::ReadRegister(Gpu::ApertureBase + 0x2208 * 4) & 7,
                 Gpu::ReadRegister(Gpu::ApertureBase + 0x2200 * 4), Gpu::ReadRegister(Gpu::ApertureBase + 0x2104 * 4),
                 (unsigned long long)Shaders::LastHash(false), (unsigned long long)Shaders::LastHash(true));
+            // COD3_TRACEDRAWVS=hex: the packets before the first draws of that
+            // vertex program, and its constants c80..c95, for finding which
+            // packet sets what the program reads.
+            static const char* const wantedProgram = getenv("COD3_TRACEDRAWVS");
+            static int shown = 0;
+            if (wantedProgram != nullptr && shown < 4)
+            {
+                char name[24];
+                snprintf(name, sizeof(name), "%016llx", (unsigned long long)Shaders::LastHash(false));
+                if (strncmp(name, wantedProgram, strlen(wantedProgram)) == 0)
+                {
+                    shown++;
+                    printf("draw: c80..95 now:");
+                    for (uint32_t i = 80 * 4; i < 96 * 4; i++)
+                    {
+                        const uint32_t bits = Gpu::ReadRegister(Gpu::ApertureBase + (0x4000 + i) * 4);
+                        float f; memcpy(&f, &bits, 4);
+                        printf("%s %g", (i % 4) == 0 ? " |" : "", f);
+                    }
+                    printf("\n");
+                    PrintRecent();
+                }
+            }
         }
 
         // A resolve is spelled as a rectangle list draw with the render backend
@@ -851,6 +876,25 @@ void Gpu::WriteRegister(uint32_t address, uint32_t value)
     {
         uint32_t fileIndex;
         if (!RegisterIndex(address, fileIndex)) return;
+        // COD3_VSCONST=N:x,y,z,w overrides vertex constant N with the given
+        // values whenever it is written: an experiment's knob, for telling
+        // whether a value the title writes is the one its program expects.
+        {
+            static const struct Override { int index; uint32_t words[4]; bool on; } override = []() {
+                Override o{ -1, { 0, 0, 0, 0 }, false };
+                const char* text = getenv("COD3_VSCONST");
+                if (text == nullptr) return o;
+                float f[4] = { 0, 0, 0, 0 };
+                if (sscanf(text, "%d:%f,%f,%f,%f", &o.index, &f[0], &f[1], &f[2], &f[3]) >= 2)
+                {
+                    for (int i = 0; i < 4; i++) memcpy(&o.words[i], &f[i], 4);
+                    o.on = true;
+                }
+                return o;
+            }();
+            if (override.on && fileIndex >= 0x4000 + uint32_t(override.index) * 4 && fileIndex < 0x4000 + uint32_t(override.index) * 4 + 4)
+                value = override.words[fileIndex - (0x4000 + uint32_t(override.index) * 4)];
+        }
         g_registerFile[fileIndex].store(value, std::memory_order_relaxed);
         if (fileIndex >= 0x4000 && fileIndex < 0x4400) NoteConstantWrite(0, fileIndex - 0x4000);
         else if (fileIndex >= 0x4400 && fileIndex < 0x4800) NoteConstantWrite(1, fileIndex - 0x4400);
