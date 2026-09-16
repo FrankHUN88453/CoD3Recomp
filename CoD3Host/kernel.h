@@ -106,6 +106,10 @@ namespace Kernel
 
     std::mutex& DispatcherLock();
     std::condition_variable& DispatcherChanged();
+    // Sleeping on the dispatcher, and waking the sleepers if there are any.
+    std::cv_status WaitDispatcher(std::unique_lock<std::mutex>& lock, std::chrono::milliseconds limit);
+    std::cv_status WaitDispatcherUntil(std::unique_lock<std::mutex>& lock, std::chrono::steady_clock::time_point deadline);
+    void WakeDispatcher();
 
     // A heartbeat, so a run that neither stops nor draws anything still shows
     // whether the title is doing work. Without a picture there is no other way

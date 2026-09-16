@@ -1,0 +1,47 @@
+#pragma once
+
+// The console's shader microcode as HLSL, for the D3D11 backend.
+//
+// A program is a control flow block of exec instructions, each running a
+// run of ALU and fetch instructions from the same words. The translation
+// is straightforward and literal: every register is a float4, every ALU
+// instruction becomes the vector operation on its three operands and the
+// scalar operation on the third, written through their masks, exports go
+// to the outputs, fetches become loads from the vertex buffers or samples
+// from the textures. What the hardware did implicitly - the viewport, the
+// interpolator handover - is done by the epilogue and the backend.
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace XenosHlsl
+{
+    struct VertexFetch
+    {
+        uint32_t slot = 0;        // the fetch constant, 0 to 95
+    };
+
+    struct TextureFetch
+    {
+        uint32_t slot = 0;        // the fetch constant, 0 to 31; the texture register too
+        uint32_t sampler = 0;     // the sampler register, one per texture the program uses
+        uint32_t dimension = 1;   // 0 one dimensional, 1 two, 2 three, 3 cube
+    };
+
+    struct Translation
+    {
+        bool ok = false;
+        std::string hlsl;
+        std::string problem;      // what could not be translated, if anything
+        std::vector<VertexFetch> vertexFetches;
+        std::vector<TextureFetch> textureFetches;
+        uint32_t interpolators = 0;   // how many the vertex program exports
+        uint32_t colourTargets = 1;   // a bit per colour target the pixel program writes
+        bool writesDepth = false;
+        bool usesKill = false;
+    };
+
+    // A vertex or pixel program from its microcode words.
+    Translation Translate(const std::vector<uint32_t>& words, bool pixel);
+}

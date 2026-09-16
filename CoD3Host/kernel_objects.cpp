@@ -10,6 +10,7 @@
 
 #include "kernel.h"
 #include "scheduler.h"
+#include "timeline.h"
 #include <atomic>
 #include "gpu.h"
 
@@ -289,6 +290,36 @@ std::condition_variable& Kernel::DispatcherChanged()
     return changed;
 }
 
+// How many threads are asleep on the dispatcher: a change of state wakes
+// them all, and that is a cost only worth paying when there is someone to
+// wake. A worker polling its job lock releases it a million times a second,
+// and each release used to wake every sleeping thread in the process.
+namespace
+{
+    std::atomic<int> g_dispatcherSleepers{ 0 };
+}
+
+std::cv_status Kernel::WaitDispatcher(std::unique_lock<std::mutex>& lock, std::chrono::milliseconds limit)
+{
+    g_dispatcherSleepers.fetch_add(1, std::memory_order_acq_rel);
+    const std::cv_status status = DispatcherChanged().wait_for(lock, limit);
+    g_dispatcherSleepers.fetch_sub(1, std::memory_order_acq_rel);
+    return status;
+}
+
+std::cv_status Kernel::WaitDispatcherUntil(std::unique_lock<std::mutex>& lock, std::chrono::steady_clock::time_point deadline)
+{
+    g_dispatcherSleepers.fetch_add(1, std::memory_order_acq_rel);
+    const std::cv_status status = DispatcherChanged().wait_until(lock, deadline);
+    g_dispatcherSleepers.fetch_sub(1, std::memory_order_acq_rel);
+    return status;
+}
+
+void Kernel::WakeDispatcher()
+{
+    if (g_dispatcherSleepers.load(std::memory_order_acquire) > 0) DispatcherChanged().notify_all();
+}
+
 // --- Handles ---------------------------------------------------------------
 
 // NTSTATUS NtClose(HANDLE handle)
@@ -296,7 +327,7 @@ PPC_FUNC(__imp__NtClose)
 {
     Kernel::CountImport("NtClose");
     std::lock_guard<std::mutex> lock(Kernel::DispatcherLock());
-    struct Wake { ~Wake() { Kernel::DispatcherChanged().notify_all(); } } wake;
+    struct Wake { ~Wake() { Kernel::WakeDispatcher(); } } wake;
 
     auto found = Handles().find(ctx.r3.u32);
     if (found != Handles().end())
@@ -321,7 +352,7 @@ PPC_FUNC(__imp__ObReferenceObjectByHandle)
 {
     Kernel::CountImport("ObReferenceObjectByHandle");
     std::lock_guard<std::mutex> lock(Kernel::DispatcherLock());
-    struct Wake { ~Wake() { Kernel::DispatcherChanged().notify_all(); } } wake;
+    struct Wake { ~Wake() { Kernel::WakeDispatcher(); } } wake;
 
     const uint32_t handle = ctx.r3.u32;
     if (Find(handle) == nullptr)
@@ -376,7 +407,7 @@ PPC_FUNC(__imp__NtCreateEvent)
 {
     Kernel::CountImport("NtCreateEvent");
     std::lock_guard<std::mutex> lock(Kernel::DispatcherLock());
-    struct Wake { ~Wake() { Kernel::DispatcherChanged().notify_all(); } } wake;
+    struct Wake { ~Wake() { Kernel::WakeDispatcher(); } } wake;
 
     Object object;
     object.type = ObjectType::Event;
@@ -396,7 +427,7 @@ PPC_FUNC(__imp__NtSetEvent)
     Kernel::CountImportOn("NtSetEvent", ctx.r3.u32);
     CountSignal(ctx.r3.u32, uint32_t(ctx.lr));
     std::lock_guard<std::mutex> lock(Kernel::DispatcherLock());
-    struct Wake { ~Wake() { Kernel::DispatcherChanged().notify_all(); } } wake;
+    struct Wake { ~Wake() { Kernel::WakeDispatcher(); } } wake;
 
     Object* object = Find(ctx.r3.u32);
     if (object == nullptr) { ctx.r3.u32 = X_STATUS_INVALID_HANDLE; return; }
@@ -412,7 +443,7 @@ PPC_FUNC(__imp__NtClearEvent)
 {
     Kernel::CountImportOn("NtClearEvent", ctx.r3.u32);
     std::lock_guard<std::mutex> lock(Kernel::DispatcherLock());
-    struct Wake { ~Wake() { Kernel::DispatcherChanged().notify_all(); } } wake;
+    struct Wake { ~Wake() { Kernel::WakeDispatcher(); } } wake;
 
     Object* object = Find(ctx.r3.u32);
     if (object == nullptr) { ctx.r3.u32 = X_STATUS_INVALID_HANDLE; return; }
@@ -426,7 +457,7 @@ PPC_FUNC(__imp__NtPulseEvent)
     Kernel::CountImportOn("NtPulseEvent", ctx.r3.u32);
     CountSignal(ctx.r3.u32, uint32_t(ctx.lr));
     std::lock_guard<std::mutex> lock(Kernel::DispatcherLock());
-    struct Wake { ~Wake() { Kernel::DispatcherChanged().notify_all(); } } wake;
+    struct Wake { ~Wake() { Kernel::WakeDispatcher(); } } wake;
 
     Object* object = Find(ctx.r3.u32);
     if (object == nullptr) { ctx.r3.u32 = X_STATUS_INVALID_HANDLE; return; }
@@ -464,7 +495,7 @@ PPC_FUNC(__imp__NtCreateSemaphore)
 {
     Kernel::CountImport("NtCreateSemaphore");
     std::lock_guard<std::mutex> lock(Kernel::DispatcherLock());
-    struct Wake { ~Wake() { Kernel::DispatcherChanged().notify_all(); } } wake;
+    struct Wake { ~Wake() { Kernel::WakeDispatcher(); } } wake;
 
     Object object;
     object.type = ObjectType::Semaphore;
@@ -484,7 +515,7 @@ PPC_FUNC(__imp__NtReleaseSemaphore)
     Kernel::CountImportOn("NtReleaseSemaphore", ctx.r3.u32);
     CountSignal(ctx.r3.u32, uint32_t(ctx.lr));
     std::lock_guard<std::mutex> lock(Kernel::DispatcherLock());
-    struct Wake { ~Wake() { Kernel::DispatcherChanged().notify_all(); } } wake;
+    struct Wake { ~Wake() { Kernel::WakeDispatcher(); } } wake;
 
     Object* object = Find(ctx.r3.u32);
     if (object == nullptr) { ctx.r3.u32 = X_STATUS_INVALID_HANDLE; return; }
@@ -502,7 +533,7 @@ PPC_FUNC(__imp__NtCreateMutant)
 {
     Kernel::CountImport("NtCreateMutant");
     std::lock_guard<std::mutex> lock(Kernel::DispatcherLock());
-    struct Wake { ~Wake() { Kernel::DispatcherChanged().notify_all(); } } wake;
+    struct Wake { ~Wake() { Kernel::WakeDispatcher(); } } wake;
 
     Object object;
     object.type = ObjectType::Mutant;
@@ -521,7 +552,7 @@ PPC_FUNC(__imp__NtReleaseMutant)
     Kernel::CountImportOn("NtReleaseMutant", ctx.r3.u32);
     CountSignal(ctx.r3.u32, uint32_t(ctx.lr));
     std::lock_guard<std::mutex> lock(Kernel::DispatcherLock());
-    struct Wake { ~Wake() { Kernel::DispatcherChanged().notify_all(); } } wake;
+    struct Wake { ~Wake() { Kernel::WakeDispatcher(); } } wake;
 
     Object* object = Find(ctx.r3.u32);
     if (object == nullptr) { ctx.r3.u32 = X_STATUS_INVALID_HANDLE; return; }
@@ -543,23 +574,37 @@ PPC_FUNC(__imp__NtReleaseMutant)
 PPC_FUNC(__imp__NtWaitForSingleObjectEx)
 {
     Kernel::CountImportOn("NtWaitForSingleObjectEx", ctx.r3.u32);
-    Scheduler::Release();
-    struct Resume { ~Resume() { Scheduler::Acquire(); } } resume;
     Kernel::DeliverApcs(ctx, ctx.r5.u32 != 0);
     const uint32_t handle = ctx.r3.u32;
 
     // A file handle is signalled when its last I/O has finished, which every
     // I/O here has by the time the call returns.
     if (Kernel::IsFileHandle(handle)) { ctx.r3.u32 = X_STATUS_SUCCESS; return; }
-    CountWait(handle, uint32_t(ctx.lr));
     const uint32_t timeoutPtr = ctx.r6.u32;
 
     std::chrono::steady_clock::time_point deadline;
     bool infinite = false;
     const bool mayWait = TimeoutToDeadline(base, timeoutPtr, deadline, infinite);
 
-    EnterWait(handle, uint32_t(ctx.lr), infinite);
-    struct Leave { ~Leave() { LeaveWait(); } } leave;
+    // The hardware thread is handed over only when this actually blocks:
+    // the title's workers poll their job lock a million times a second
+    // between them, and a wait that is over at once is not a place another
+    // thread needs to run. Blocking is noted then too, for the reports of
+    // what everything is waiting on. The order matters at the end: the
+    // dispatcher lock goes before the hardware thread is taken back.
+    struct Blocking
+    {
+        uint32_t handle, from; bool infinite; bool began = false;
+        void Begin()
+        {
+            if (began) return;
+            began = true;
+            Scheduler::Release();
+            CountWait(handle, from);
+            EnterWait(handle, from, infinite);
+        }
+        ~Blocking() { if (began) { LeaveWait(); Scheduler::Acquire(); Timeline::Mark("unblocked", handle, from); } }
+    } blocking{ handle, uint32_t(ctx.lr), infinite };
 
     // A thread handle is not in the object table: threads keep their own. A
     // wait on one is a wait for that thread to end, and it completes when the
@@ -579,13 +624,12 @@ PPC_FUNC(__imp__NtWaitForSingleObjectEx)
                         return;
                     }
                     if (!mayWait) { ctx.r3.u32 = X_STATUS_TIMEOUT; return; }
+                    if (!blocking.began) { lock.unlock(); blocking.Begin(); lock.lock(); continue; }
                     if (infinite)
                     {
-                        Kernel::DispatcherChanged().wait_for(
-                            lock, std::chrono::milliseconds(20));
+                        Kernel::WaitDispatcher(lock, std::chrono::milliseconds(20));
                     }
-                    else if (Kernel::DispatcherChanged().wait_until(lock, deadline) ==
-                             std::cv_status::timeout)
+                    else if (Kernel::WaitDispatcherUntil(lock, deadline) == std::cv_status::timeout)
                     {
                         ctx.r3.u32 = X_STATUS_TIMEOUT;
                         return;
@@ -644,14 +688,16 @@ PPC_FUNC(__imp__NtWaitForSingleObjectEx)
 
         if (!mayWait) { ctx.r3.u32 = X_STATUS_TIMEOUT; return; }
 
+        // Blocking after all: the hardware thread goes, then the state is
+        // looked at again, since it may have changed meanwhile.
+        if (!blocking.began) { lock.unlock(); blocking.Begin(); lock.lock(); continue; }
+
         if (infinite)
         {
-            if (Kernel::DispatcherChanged().wait_for(lock, std::chrono::seconds(3)) ==
-                std::cv_status::timeout)
+            if (Kernel::WaitDispatcher(lock, std::chrono::seconds(3)) == std::cv_status::timeout)
                 ReportStalledWait("handle", handle, uint32_t(ctx.lr));
         }
-        else if (Kernel::DispatcherChanged().wait_until(lock, deadline) ==
-                 std::cv_status::timeout)
+        else if (Kernel::WaitDispatcherUntil(lock, deadline) == std::cv_status::timeout)
         {
             ctx.r3.u32 = X_STATUS_TIMEOUT;
             return;
@@ -667,13 +713,14 @@ PPC_FUNC(__imp__KeSetEvent)
     Kernel::CountImportOn("KeSetEvent", ctx.r3.u32);
     CountSignal(ctx.r3.u32, uint32_t(ctx.lr));
     std::lock_guard<std::mutex> lock(Kernel::DispatcherLock());
-    struct Wake { ~Wake() { Kernel::DispatcherChanged().notify_all(); } } wake;
+    struct Wake { ~Wake() { Kernel::WakeDispatcher(); } } wake;
 
     const uint32_t event = ctx.r3.u32;
     if (event == 0) { ctx.r3.u32 = 0; return; }
 
     const uint32_t previous = Guest::Read32(base, event + DISPATCH_SIGNAL_STATE);
     Guest::Write32(base, event + DISPATCH_SIGNAL_STATE, 1);
+    Timeline::Mark("set event", event, uint32_t(ctx.lr));
     ctx.r3.u32 = previous;
 }
 
@@ -682,7 +729,7 @@ PPC_FUNC(__imp__KeResetEvent)
 {
     Kernel::CountImportOn("KeResetEvent", ctx.r3.u32);
     std::lock_guard<std::mutex> lock(Kernel::DispatcherLock());
-    struct Wake { ~Wake() { Kernel::DispatcherChanged().notify_all(); } } wake;
+    struct Wake { ~Wake() { Kernel::WakeDispatcher(); } } wake;
 
     const uint32_t event = ctx.r3.u32;
     if (event == 0) { ctx.r3.u32 = 0; return; }
@@ -697,7 +744,7 @@ PPC_FUNC(__imp__KeInitializeSemaphore)
 {
     Kernel::CountImport("KeInitializeSemaphore");
     std::lock_guard<std::mutex> lock(Kernel::DispatcherLock());
-    struct Wake { ~Wake() { Kernel::DispatcherChanged().notify_all(); } } wake;
+    struct Wake { ~Wake() { Kernel::WakeDispatcher(); } } wake;
 
     const uint32_t semaphore = ctx.r3.u32;
     if (semaphore == 0) return;
@@ -714,7 +761,7 @@ PPC_FUNC(__imp__KeReleaseSemaphore)
     Kernel::CountImportOn("KeReleaseSemaphore", ctx.r3.u32);
     CountSignal(ctx.r3.u32, uint32_t(ctx.lr));
     std::lock_guard<std::mutex> lock(Kernel::DispatcherLock());
-    struct Wake { ~Wake() { Kernel::DispatcherChanged().notify_all(); } } wake;
+    struct Wake { ~Wake() { Kernel::WakeDispatcher(); } } wake;
 
     const uint32_t semaphore = ctx.r3.u32;
     if (semaphore == 0) { ctx.r3.u32 = 0; return; }
@@ -745,7 +792,8 @@ PPC_FUNC(__imp__KeWaitForSingleObject)
     const bool mayWait = TimeoutToDeadline(base, timeoutPtr, deadline, infinite);
 
     EnterWait(object, uint32_t(ctx.lr), infinite);
-    struct Leave { ~Leave() { LeaveWait(); } } leave;
+    struct Leave { uint32_t object, from; ~Leave() { LeaveWait(); Timeline::Mark("ke waited", object, from); } } leave{ object, uint32_t(ctx.lr) };
+    Timeline::Mark("ke wait", object, uint32_t(ctx.lr));
 
     std::unique_lock<std::mutex> lock(Kernel::DispatcherLock());
     for (;;)
@@ -763,12 +811,10 @@ PPC_FUNC(__imp__KeWaitForSingleObject)
 
         if (infinite)
         {
-            if (Kernel::DispatcherChanged().wait_for(lock, std::chrono::seconds(3)) ==
-                std::cv_status::timeout)
+            if (Kernel::WaitDispatcher(lock, std::chrono::seconds(3)) == std::cv_status::timeout)
                 ReportStalledWait("dispatcher object", object, uint32_t(ctx.lr));
         }
-        else if (Kernel::DispatcherChanged().wait_until(lock, deadline) ==
-                 std::cv_status::timeout)
+        else if (Kernel::WaitDispatcherUntil(lock, deadline) == std::cv_status::timeout)
         {
             ctx.r3.u32 = X_STATUS_TIMEOUT;
             return;
@@ -830,10 +876,9 @@ PPC_FUNC(__imp__KeWaitForMultipleObjects)
 
         if (infinite)
         {
-            Kernel::DispatcherChanged().wait(lock);
+            Kernel::WaitDispatcher(lock, std::chrono::seconds(3));
         }
-        else if (Kernel::DispatcherChanged().wait_until(lock, deadline) ==
-                 std::cv_status::timeout)
+        else if (Kernel::WaitDispatcherUntil(lock, deadline) == std::cv_status::timeout)
         {
             ctx.r3.u32 = X_STATUS_TIMEOUT;
             return;
@@ -1054,7 +1099,7 @@ bool Kernel::SignalHandle(uint32_t handle)
     if (handle == 0) return false;
 
     std::lock_guard<std::mutex> lock(Kernel::DispatcherLock());
-    struct Wake { ~Wake() { Kernel::DispatcherChanged().notify_all(); } } wake;
+    struct Wake { ~Wake() { Kernel::WakeDispatcher(); } } wake;
 
     Object* object = Find(handle);
     if (object == nullptr) return false;

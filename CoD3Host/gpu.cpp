@@ -30,6 +30,8 @@
 #include "edram.h"
 #include "shaders.h"
 #include "raster.h"
+#include "d3d11_backend.h"
+#include "timeline.h"
 
 #include <atomic>
 #include <chrono>
@@ -309,7 +311,12 @@ namespace
         // in copy mode. It is the only draw in the stream that this runtime can
         // carry out completely, because it moves pixels rather than making them.
         const uint32_t mode = Gpu::ReadRegister(Gpu::ApertureBase + 0x2208 * 4) & 7;
-        if (primitive == 8 && mode == 6) Edram::Resolve();
+        if (D3D11Backend::Enabled())
+        {
+            if (primitive == 8 && mode == 6) D3D11Backend::Resolve();
+            else D3D11Backend::Draw(initiator, indexBase, indexWord);
+        }
+        else if (primitive == 8 && mode == 6) Edram::Resolve();
         else Raster::Draw(initiator, indexBase, indexWord);
     }
 
@@ -417,6 +424,7 @@ namespace
 
         Guest::WritePhysical32(target, written);
         g_fences.fetch_add(1, std::memory_order_relaxed);
+        Timeline::Mark("fence", target, written);
 
         // Every destination, counted. The line below only ever printed the
         // first twelve of a run, which is enough to see where fences start
@@ -458,6 +466,7 @@ namespace
     // frames. Two milliseconds was enough to do exactly that.
     std::atomic<uint64_t> g_waits{ 0 };
     std::atomic<uint64_t> g_waitTimeouts{ 0 };
+    std::atomic<uint64_t> g_waitNanoseconds{ 0 };
 
     bool ConditionHolds(uint32_t function, uint32_t left, uint32_t reference)
     {
@@ -495,8 +504,13 @@ namespace
             return (value > 0) ? value : 200;
         }();
 
-        const auto deadline =
-            std::chrono::steady_clock::now() + std::chrono::microseconds(limit);
+        const auto started = std::chrono::steady_clock::now();
+        const auto deadline = started + std::chrono::microseconds(limit);
+        Timeline::Mark("cp wait", pollAddress, reference);
+        struct Marked { uint32_t address; ~Marked() { Timeline::Mark("cp waited", address); } } marked{ pollAddress };
+        struct Accounted { std::chrono::steady_clock::time_point since; ~Accounted() {
+            g_waitNanoseconds.fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - since).count()), std::memory_order_relaxed); } } accounted{ started };
         for (;;)
         {
             const uint32_t current = memory
@@ -507,6 +521,7 @@ namespace
             if (std::chrono::steady_clock::now() > deadline)
             {
                 g_waitTimeouts.fetch_add(1, std::memory_order_relaxed);
+                Timeline::Mark("cp gave up", pollAddress, current);
 
                 // What it was waiting for, once per distinct address. A wait
                 // the command processor abandons is the title's own driver
@@ -1040,6 +1055,7 @@ uint32_t Gpu::ProcessRing(uint32_t ringBase, uint32_t ringSizeDwords,
                 // leave the driver waiting for work that was never done.
                 const uint32_t target = ReadDword(cursor + 1);
                 const uint32_t targetDwords = ReadDword(cursor + 2) & 0xFFFFF;
+                Timeline::Mark("cp buffer", target, targetDwords);
                 t_lastIndirectAddress = target;
                 t_lastIndirectSize = ReadDword(cursor + 2);
                 t_lastIndirectSizeAt = ringBase + ((cursor + 2) % ringSizeDwords) * 4;
@@ -1481,9 +1497,9 @@ void Gpu::ReportPacketMix()
     }
 
     if (g_waits.load() != 0)
-        printf("waits: %llu, of which %llu gave up waiting\n",
+        printf("waits: %llu, of which %llu gave up waiting, %.2f s waiting\n",
             (unsigned long long)g_waits.load(),
-            (unsigned long long)g_waitTimeouts.load());
+            (unsigned long long)g_waitTimeouts.load(), g_waitNanoseconds.load() / 1e9);
 
     if (g_fences.load() != 0)
         printf("fences: %llu written\n", (unsigned long long)g_fences.load());

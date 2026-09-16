@@ -5,6 +5,7 @@
 #include "sampler.h"
 #include <utility>
 #include <mutex>
+#include <shared_mutex>
 #include <map>
 #include <algorithm>
 
@@ -985,8 +986,13 @@ void Kernel::Unimplemented(const char* name, PPCContext& ctx, uint8_t* base)
 
 namespace
 {
-    std::mutex g_importMutex;
-    std::map<const char*, uint64_t> g_importCounts;
+    // The counts are found under a shared lock and bumped atomically: three
+    // worker threads polling a job lock make a million kernel calls a second
+    // between them, and a plain mutex here was what every other thread's
+    // calls queued behind. A name is a string literal, so its address is
+    // its identity.
+    std::shared_mutex g_importMutex;
+    std::map<const char*, std::atomic<uint64_t>> g_importCounts;
 }
 
 namespace
@@ -1001,8 +1007,12 @@ namespace
         size_t next = 0;
     };
 
+    // Each thread writes its own entry without the lock, which only guards
+    // the map itself; the entries never move or go away. A report reads
+    // a ring that may be mid-write, which is fine for what it is for.
     std::mutex g_historyMutex;
     std::map<uint32_t, History> g_histories;
+    thread_local History* t_history = nullptr;
 }
 
 namespace
@@ -1056,15 +1066,28 @@ void Kernel::CountImportOn(const char* name, uint32_t subject)
     Scheduler::Checkpoint();
 
     {
-        std::lock_guard<std::mutex> lock(g_historyMutex);
-        History& history = g_histories[GetCurrentThreadId()];
+        if (t_history == nullptr)
+        {
+            std::lock_guard<std::mutex> lock(g_historyMutex);
+            t_history = &g_histories[GetCurrentThreadId()];
+        }
+        History& history = *t_history;
         history.names[history.next % HistoryLength] = name;
         history.subjects[history.next % HistoryLength] = subject;
         history.next++;
     }
 
-    std::lock_guard<std::mutex> lock(g_importMutex);
-    g_importCounts[name]++;
+    {
+        std::shared_lock<std::shared_mutex> lock(g_importMutex);
+        auto found = g_importCounts.find(name);
+        if (found != g_importCounts.end())
+        {
+            found->second.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+    }
+    std::unique_lock<std::shared_mutex> lock(g_importMutex);
+    g_importCounts[name].fetch_add(1, std::memory_order_relaxed);
 }
 
 void Kernel::CountImport(const char* name) { CountImportOn(name, 0); }
@@ -1156,9 +1179,9 @@ void Kernel::ReportImports()
 {
     std::vector<std::pair<uint64_t, const char*>> ordered;
     {
-        std::lock_guard<std::mutex> lock(g_importMutex);
+        std::shared_lock<std::shared_mutex> lock(g_importMutex);
         for (const auto& entry : g_importCounts)
-            ordered.push_back({ entry.second, entry.first });
+            ordered.push_back({ entry.second.load(std::memory_order_relaxed), entry.first });
     }
     if (ordered.empty()) return;
 

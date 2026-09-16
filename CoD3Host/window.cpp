@@ -13,6 +13,7 @@
 
 #include "kernel.h"
 #include "window.h"
+#include "d3d11_backend.h"
 #include <cstdlib>
 #include <cstdio>
 #include "gpu.h"
@@ -325,6 +326,13 @@ namespace
         GetClientRect(window, &client);
         const int width = client.right - client.left;
         const int height = client.bottom - client.top;
+
+        // The host GPU presents its own frame when it is drawing.
+        if (D3D11Backend::Enabled())
+        {
+            D3D11Backend::Present(window, width, height);
+            return;
+        }
 
         uint32_t sourceWidth = 0;
         uint32_t sourceHeight = 0;

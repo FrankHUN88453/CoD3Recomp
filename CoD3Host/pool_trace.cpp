@@ -10,6 +10,11 @@
 // that ends in the wait can be read off.
 
 #include "kernel.h"
+#include "scheduler.h"
+#include "pool_trace.h"
+#include "timeline.h"
+
+#include <chrono>
 
 #include <atomic>
 #include <cstdio>
@@ -52,11 +57,89 @@ namespace
     }
 }
 
+// sub_822EC168(wait): one turn of the title's wait for the GPU, a spin of
+// its own with no kernel call in it. The thread that would satisfy the
+// wait shares this thread's hardware thread, so the wait must stand aside
+// for it: the console's scheduler would preempt here, this runtime's only
+// hands over at kernel calls, and a spinning thread that never made one
+// held its hardware thread until the two second timeout let the other
+// run.
+extern "C" PPC_FUNC(__imp__sub_822EC168);
+PPC_FUNC(sub_822EC168)
+{
+    Scheduler::Checkpoint();
+    __imp__sub_822EC168(ctx, base);
+}
+
+// How the title's GPU pipeline spends its time, once a second: how long
+// the workers wait for the GPU, how often the replaying thread runs and
+// for how long, and how many buffers reach the ring. This is what says
+// which of them is the frame's bottleneck.
+namespace
+{
+    std::atomic<uint64_t> g_waitNanoseconds{ 0 }, g_waitCalls{ 0 };
+    std::atomic<uint64_t> g_replayNanoseconds{ 0 }, g_replayRuns{ 0 };
+    std::atomic<uint64_t> g_ringWrites{ 0 }, g_ringBuffers{ 0 };
+    std::atomic<uint64_t> g_kicks{ 0 }, g_recordings{ 0 };
+    int64_t Now()
+    {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+}
+
+void PoolTrace::Report()
+{
+    static uint64_t lastWait = 0, lastReplay = 0, lastRuns = 0, lastRing = 0, lastBuffers = 0, lastKicks = 0, lastRecordings = 0;
+    const uint64_t wait = g_waitNanoseconds.load(), replay = g_replayNanoseconds.load(), runs = g_replayRuns.load();
+    const uint64_t ring = g_ringWrites.load(), buffers = g_ringBuffers.load(), kicks = g_kicks.load(), recordings = g_recordings.load();
+    printf("pipeline: workers waited %.2f s for the GPU, the replay ran %llu times for %.2f s, "
+           "%llu ring writes of %llu buffers, %llu kicks, %llu recordings\n",
+        (wait - lastWait) / 1e9, (unsigned long long)(runs - lastRuns), (replay - lastReplay) / 1e9,
+        (unsigned long long)(ring - lastRing), (unsigned long long)(buffers - lastBuffers),
+        (unsigned long long)(kicks - lastKicks), (unsigned long long)(recordings - lastRecordings));
+    lastWait = wait; lastReplay = replay; lastRuns = runs; lastRing = ring; lastBuffers = buffers;
+    lastKicks = kicks; lastRecordings = recordings;
+}
+
+// The wait for the GPU (sub_822F16A0, wrapped in kernel_video.cpp) reports
+// how long it took here.
+void PoolTrace::Waited(uint64_t nanoseconds)
+{
+    g_waitNanoseconds.fetch_add(nanoseconds, std::memory_order_relaxed);
+    g_waitCalls.fetch_add(1, std::memory_order_relaxed);
+}
+
+// sub_82302A90(queue): the replaying thread's run over its queue, timed.
+extern "C" PPC_FUNC(__imp__sub_82302A90);
+PPC_FUNC(sub_82302A90)
+{
+    const int64_t started = Now();
+    Timeline::Mark("replay", ctx.r3.u32, ctx.r4.u32);
+    __imp__sub_82302A90(ctx, base);
+    Timeline::Mark("replayed", ctx.r3.u32);
+    g_replayNanoseconds.fetch_add(uint64_t(Now() - started), std::memory_order_relaxed);
+    g_replayRuns.fetch_add(1, std::memory_order_relaxed);
+}
+
+// sub_822F1E68(device, buffers, count): buffers written to the ring.
+extern "C" PPC_FUNC(__imp__sub_822F1E68);
+PPC_FUNC(sub_822F1E68)
+{
+    g_ringWrites.fetch_add(1, std::memory_order_relaxed);
+    g_ringBuffers.fetch_add(ctx.r5.u32, std::memory_order_relaxed);
+    Timeline::Mark("ring write", ctx.r4.u32, ctx.r5.u32);
+    __imp__sub_822F1E68(ctx, base);
+    Timeline::Mark("ring written", ctx.r4.u32, ctx.r5.u32);
+}
+
 // sub_822F2818(device): the current segment is kicked to the GPU.
 extern "C" PPC_FUNC(__imp__sub_822F2818);
 PPC_FUNC(sub_822F2818)
 {
     const uint32_t device = ctx.r3.u32;
+    g_kicks.fetch_add(1, std::memory_order_relaxed);
+    Timeline::Mark("kick", Guest::Read32(base, device + 40), uint32_t(ctx.lr));
     Line("kick", device, base, uint32_t(ctx.lr), 0);
     __imp__sub_822F2818(ctx, base);
 }
@@ -101,6 +184,8 @@ extern "C" PPC_FUNC(__imp__sub_82302DB0);
 PPC_FUNC(sub_82302DB0)
 {
     const uint32_t device = ctx.r3.u32;
+    g_recordings.fetch_add(1, std::memory_order_relaxed);
+    Timeline::Mark("record", uint32_t(ctx.lr));
     Line("record", device, base, uint32_t(ctx.lr), 0);
     __imp__sub_82302DB0(ctx, base);
     Line("recording", device, base, 0, 0);
@@ -111,6 +196,8 @@ PPC_FUNC(sub_82302E88)
 {
     const uint32_t device = ctx.r3.u32;
     Line("end rec", device, base, uint32_t(ctx.lr), 0);
+    Timeline::Mark("end rec", uint32_t(ctx.lr));
     __imp__sub_82302E88(ctx, base);
     Line("recorded", device, base, ctx.r3.u32, 0);
+    Timeline::Mark("recorded", ctx.r3.u32);
 }

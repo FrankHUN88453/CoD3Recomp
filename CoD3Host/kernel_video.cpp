@@ -25,6 +25,9 @@
 #include "shaders.h"
 #include "raster.h"
 #include "window.h"
+#include "d3d11_backend.h"
+#include "pool_trace.h"
+#include "timeline.h"
 
 #include <atomic>
 #include <chrono>
@@ -138,7 +141,9 @@ namespace
 
         g_handlerSince.store(NowMilliseconds());
         g_inHandler.store(true);
+        Timeline::Mark("interrupt", pending, armed);
         routine(context, Guest::Base);
+        Timeline::Mark("handled", pending, armed);
         g_inHandler.store(false);
     }
 
@@ -589,6 +594,9 @@ namespace
                 Edram::Report();
                 Shaders::Report();
                 Raster::Report();
+                D3D11Backend::Report();
+                PoolTrace::Report();
+                Timeline::Report();
                 Kernel::ReportImports();
                 Kernel::ReportApcs();
                 Scheduler::Report();
@@ -791,7 +799,11 @@ PPC_FUNC(sub_822F16A0)
         std::lock_guard<std::mutex> lock(g_poolWaitMutex);
         g_poolWaits[osId] = { ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, NowMilliseconds() };
     }
+    const int64_t started = NowMilliseconds();
+    Timeline::Mark("gpu wait", ctx.r4.u32, ctx.r5.u32);
     __imp__sub_822F16A0(ctx, base);
+    Timeline::Mark("gpu waited", ctx.r4.u32, ctx.r5.u32);
+    PoolTrace::Waited(uint64_t(NowMilliseconds() - started) * 1000000ull);
     std::lock_guard<std::mutex> lock(g_poolWaitMutex);
     g_poolWaits.erase(osId);
 }
@@ -894,7 +906,10 @@ PPC_FUNC(__imp__VdSwap)
         }
 
         if (surface != 0 && width > 1 && height > 1 && width <= 4096 && height <= 4096)
+        {
             Window::SetFrontBuffer(Guest::PhysicalAlias(surface), width, height);
+            D3D11Backend::Swap(surface, width, height);
+        }
     }
     ctx.r3.u32 = 0;
 }

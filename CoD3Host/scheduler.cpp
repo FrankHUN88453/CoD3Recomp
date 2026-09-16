@@ -25,6 +25,7 @@
 #include <chrono>
 #include <cstdio>
 #include <mutex>
+#include <thread>
 #include <Windows.h>
 #include <map>
 
@@ -45,6 +46,14 @@ namespace
     constexpr auto AcquireTimeout = std::chrono::seconds(2);
 
     std::timed_mutex g_slots[HardwareThreads];
+
+    // How many threads are waiting for each slot. A hand over is only a
+    // hand over if the waiter gets the slot: a thread that drops it and
+    // takes it straight back wins the race nearly every time, and the
+    // title's replaying thread, woken to feed the GPU, waited tens of
+    // milliseconds behind a worker spinning on the same hardware thread.
+    std::atomic<int> g_waiters[HardwareThreads];
+    std::atomic<uint64_t> g_handOvers{ 0 };
 
     thread_local int t_slot = -1;
     thread_local bool t_held = false;
@@ -78,7 +87,10 @@ namespace
         ApplyPending();
         if (t_slot < 0 || t_held || !g_enabled.load(std::memory_order_relaxed)) return;
 
-        if (g_slots[t_slot].try_lock_for(AcquireTimeout))
+        g_waiters[t_slot].fetch_add(1, std::memory_order_acq_rel);
+        const bool taken = g_slots[t_slot].try_lock() || g_slots[t_slot].try_lock_for(AcquireTimeout);
+        g_waiters[t_slot].fetch_sub(1, std::memory_order_acq_rel);
+        if (taken)
         {
             t_held = true;
         }
@@ -130,14 +142,22 @@ void Scheduler::Checkpoint()
     if (!t_held) return;
 
     // A thread that never calls anything blocking would otherwise keep its
-    // hardware thread to itself for as long as it spins. A tenth of a
-    // millisecond is short enough that the others are not kept waiting and long
-    // enough that handing over does not become the work.
+    // hardware thread to itself for as long as it spins. With nobody waiting
+    // there is nothing to do; with someone waiting the slot goes to them:
+    // dropped, and not taken back until they have it or a while has passed,
+    // since the one who just dropped it would otherwise take it straight
+    // back. Twenty microseconds between hand overs keeps this from being
+    // all a spinning thread does.
+    if (g_waiters[t_slot].load(std::memory_order_acquire) == 0) return;
     const auto now = std::chrono::steady_clock::now();
-    if (now - t_since < std::chrono::microseconds(100)) return;
+    if (now - t_since < std::chrono::microseconds(20)) return;
 
     g_checkpoints.fetch_add(1, std::memory_order_relaxed);
+    const int slot = t_slot;
     Drop();
+    for (int spins = 0; spins < 200 && g_waiters[slot].load(std::memory_order_acquire) > 0; spins++)
+        std::this_thread::yield();
+    g_handOvers.fetch_add(1, std::memory_order_relaxed);
     Take();
 }
 
@@ -151,7 +171,7 @@ void Scheduler::Report()
 
     printf("scheduling: %llu hardware thread hand overs, %llu moves between "
            "hardware threads, %llu times a slot could not be taken in time\n",
-        (unsigned long long)checkpoints,
+        (unsigned long long)g_handOvers.load(),
         (unsigned long long)g_moves.load(),
         (unsigned long long)timeouts);
     fflush(stdout);

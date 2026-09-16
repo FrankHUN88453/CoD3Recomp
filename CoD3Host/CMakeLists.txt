@@ -36,6 +36,9 @@ add_executable(CoD3 WIN32
     "kernel_audio.cpp"
     "kernel_misc.cpp"
     "pool_trace.cpp"
+    "timeline.cpp"
+    "d3d11_backend.cpp"
+    "xenos_hlsl.cpp"
     "gpu.cpp"
     "edram.cpp"
     "shaders.cpp"
@@ -63,6 +66,8 @@ target_link_libraries(CoD3 PRIVATE
     ole32           # IFileOpenDialog
     winmm           # sound out
     dbghelp         # the watchdog's stack walks
+    d3d11           # the host GPU
+    dxgi
     shell32)
 
 # The levels whose code was recompiled and linked in, for modules.cpp: one

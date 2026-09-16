@@ -334,7 +334,7 @@ PPC_FUNC(__imp__RtlEnterCriticalSection)
             Kernel::LeaveWait();
             return;
         }
-        Kernel::DispatcherChanged().wait_for(lock, std::chrono::milliseconds(1));
+        Kernel::WaitDispatcher(lock, std::chrono::milliseconds(1));
 
         // Two seconds on one critical section is a holder that is not
         // coming back: say which, held by whom, from where.
