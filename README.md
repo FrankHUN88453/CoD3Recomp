@@ -9,39 +9,48 @@ implemented, memory mapped I/O reaches the GPU register file, and a command
 processor decodes the packets the graphics driver queues.
 
 `CoD3.exe` installs the game from your own disc image and boots it into a window.
-The title reads its configuration, opens its main asset archive, and runs a real
-frame loop: around 760 draw calls a second, resolving a finished 1040 by 624
-frame out of EDRAM about fourteen times a second into the buffer it then
-presents.
+The first level, Saint-Lô, is playable: the menus, the loading screen, the
+opening cutscene and the fighting run at 30 to 60 frames a second on the
+host's own GPU through Direct3D 11, drawn from the title's own shaders
+translated to HLSL, with the terrain, the buildings, the soldiers, the grass,
+the sky, the shadows, the HUD and the saved checkpoints all working. Only the
+Saint-Lô level's code has been recompiled so far; the other fourteen levels
+need the same treatment before they load. The intro films do not play yet.
 
-**The loading screen is on screen.** The path runs end to end: packets decoded,
-register file tracked, the title's own shader microcode interpreted instruction
-by instruction, triangles rasterised into EDRAM, and the finished surface
-resolved out and presented. Nothing is approximated on the way: the geometry,
-the colours and the texture all come from the title's own data.
+![The level](level.png)
 
-![The first rendered frame](first-frame.png)
+### Keys and mouse
 
-It reaches its loading screen, animates it, streams its way through its asset
-archive, loads the sound banks and the animation data, and opens `frontEnd.cod`,
-the menu package, and streams about nine megabytes of it. It does not get
-loads it, and draws its loading screen: the text and the mark over a dark
-background, with quads, compressed textures and alpha blending all doing their
-part. Getting there meant giving the runtime the console's six hardware threads:
-guest threads that share one take turns, which is what stops two of them from
-being inside the same unlocked frame arena at once.
+The keyboard and mouse stand in for the console's pad. In a level the window
+takes the mouse and looks with it; Escape gives it back and pauses; a click
+takes it again. Every key can be changed in the settings menu.
 
-![The loading screen](loading-screen.png)
+| | |
+| --- | --- |
+| Mouse | look; Mouse 1 fires, Mouse 2 aims; the wheel changes weapon |
+| W A S D | move |
+| Space | jump |
+| C | crouch |
+| E / R | use / reload |
+| F | change weapon |
+| V | melee |
+| G / 4 | grenade / smoke |
+| Shift | sprint |
+| Tab | objectives |
+| Escape | pause |
+| Enter, arrows | the menus |
+| F11 | settings menu |
+| F12 | screenshot into `screenshots/` |
 
-It reaches its intro films: twenty seven files and 26.7 MB in, it opens
-`legal-us.wmv`, `ATVI.wmv`, `Treyarch.wmv` and `Attract.wmv`, the sequence that
-runs before the menu. It cannot play them, and that is where it stops. The runtime says so in detail, with the guest call
-chain and the globals involved, rather than leaving it to be guessed at.
+The settings menu (F11) has the render scale (a multiple of the title's 1040
+by 624, or by the window's height), a frame counter, the mouse sensitivity,
+the title's aim assist, the pad, and the keys. It keeps its values in
+`CoD3Recomp.ini` beside the executable. `CoD3.cfg` beside the executable
+holds console commands run at start (`seta com_maxfps 60` by default).
 
-It is a long way from playable. Depth testing and blending are ignored, sampling
-is nearest with no filtering, and most vertex and texture formats are not
-decoded. Each gap names itself at run time rather than quietly drawing something
-wrong.
+Saved games go to `saves/` beside the executable.
+
+A pad works as well when one is plugged in.
 
 Read [STATUS.md](STATUS.md) for what works, how it was measured, and what a
 playable build would take.
@@ -111,12 +120,15 @@ CoD3.exe --help
 | `CoD3Host/implemented_imports.txt` | Which imports are real. Add a name here when you implement one |
 | `CoD3Host/kernel_stubs.cpp` | Generated for everything not on that list |
 | `tools/XenonRecomp/` | The recompiler, with local fixes described in STATUS.md |
-| `tools/XenosRecomp/` | Shader recompiler. Cloned, not used yet |
+| `CoD3Host/xenos_hlsl.cpp` | The title's shader microcode translated to HLSL |
+| `CoD3Host/d3d11_backend.cpp` | The picture through Direct3D 11 |
+| `CoD3Host/overlay.cpp`, `settings.cpp` | The settings menu (Dear ImGui) and its file |
 | `tools/CoD3Scan/` | XEX analysis: finds required addresses, repairs function boundaries, lists imports |
 | `scripts/recompile.ps1` | The whole pipeline |
 | `scripts/verify.ps1` | Checks the recompiler against Xenia's instruction tests |
 | `tools/PpcAsm/` | A PowerPC assembler, built from the project's own opcode tables |
 | `CoD3Host/gpu.cpp` | The GPU register aperture and the PM4 command processor |
+| `thirdparty/imgui/` | Dear ImGui, for the menu |
 | `CoD3Host/sampler.cpp` | Names the guest function each thread is in, without debug symbols |
 | `CoD3RecompLib/include/cod3_mmio.h` | Routes guest register access to the GPU instead of RAM |
 | `docs/kernel-imports.txt` | The 179 imports a runtime has to provide |

@@ -7,10 +7,43 @@ compiled as a native x86-64 binary. That is the same approach
 [Unleashed Recompiled](https://github.com/hedge-dev/UnleashedRecomp) took for
 Sonic Unleashed.
 
-**There is no playable build, and getting one is a long project.** The guest code
-translates, compiles, and runs. What does not exist is the runtime it needs
-underneath: booting stops within moments at the first Xbox 360 kernel call. See
-*What is missing* below for the honest size of that.
+## Where it is (September 2026)
+
+The first level, Saint-Lô, plays: menus, loading, the opening cutscene, the
+fighting, checkpoints saved and loaded, at 30 to 60 frames a second through a
+Direct3D 11 backend that runs the title's own shaders translated to HLSL.
+Keyboard, mouse and pad work; a settings menu (F11) holds the keys, the mouse
+sensitivity, the render scale and a frame counter; F12 takes a screenshot.
+
+What it took, beyond what the sections below describe, in the order found:
+
+- **The swap packet.** `VdSwap` must fill the sixty four words the driver
+  reserves for it; left empty they were parsed as whatever the memory held,
+  which included impossible waits on the display scaler's registers, and every
+  such wait was a five second stall.
+- **Two-operand scalar ALU operations** read lanes w and x of the shared third
+  operand when the vector operation takes two operands (Xenia's rule) but lanes
+  z and w when it takes three (mad, the conditional moves, dp2add). Both cases
+  appear in this title; neither open translator has the second.
+- **Strips end at the reset index** (`VGT_MULTI_PRIM_IB_RESET_INDX`, enabled by
+  bit 21 of `PA_SU_SC_MODE_CNTL`). Widening the title's 16-bit indices to 32
+  had turned the cut into a vertex, and every grass blade was joined to the next.
+- **An 8_8_8_8 texture's x component is its lowest byte,** blue; the title's
+  swizzle 0x60A puts the red first. Reordering the bytes as well swapped them
+  back.
+- **`RB_MODECONTROL` = 5 is colour and depth** for this title, not depth only.
+- **One frame of latency.** The vertical blank runs at sixty hertz here whether
+  or not the GPU has kept up, so `VdSwap` waits until the GPU has reached the
+  swap before it; two frames ahead, the title overwrote the dynamic vertex data
+  the GPU was still drawing from, and the cutscene's letterbox bar flickered.
+- **Saved games** are folders under `saves/content`; the storage device the
+  title asks for is that folder, mounted under the root name the title gives.
+
+Still open: the intro films (WMV) are skipped; the other fourteen levels are
+not recompiled; the mission title card at the start of a level is not shown;
+the software rasteriser (`COD3_GPU=soft`) has regressed to black.
+
+The sections that follow are the history of getting here, oldest first.
 
 ## What works
 
