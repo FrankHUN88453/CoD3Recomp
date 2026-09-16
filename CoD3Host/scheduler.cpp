@@ -31,7 +31,9 @@
 
 namespace
 {
-    constexpr int HardwareThreads = 6;
+    // Six, as the console has, and two more that nothing on the console
+    // has: a thread put on one of those runs alongside everything.
+    constexpr int HardwareThreads = 8;
     // Waiting for a slot.
     //
     // Fifty milliseconds was chosen so nothing could wait forever, and it did

@@ -109,7 +109,22 @@ namespace
         Kernel::SetCurrentContext(&ctx);
         Kernel::RecordThreadPointer(GetCurrentThreadId(), threadPointer);
         Kernel::ArmWatchpoints();
-        Scheduler::Attach(Guest::CurrentProcessor(ctx));
+        // The thread that feeds the GPU, the replay of the recorded command
+        // lists at sub_82302C80, gets a hardware thread of its own rather
+        // than the one the title puts it on, which it shares with a render
+        // worker: the console preempts the worker the moment the GPU asks,
+        // this runtime only at the worker's next kernel call, and the GPU
+        // waited milliseconds for every list. It reads the lists and writes
+        // the ring, nothing the workers share a cursor over. COD3_HELPERSLOT
+        // moves it back (a number) or elsewhere.
+        int processor = Guest::CurrentProcessor(ctx);
+        if (start.startAddress == 0x82302C80u)
+        {
+            static const char* const helperSlot = getenv("COD3_HELPERSLOT");
+            processor = helperSlot != nullptr ? int(strtol(helperSlot, nullptr, 10)) : 6;
+            printf("thread: the GPU feeder runs on hardware thread %d\n", processor);
+        }
+        Scheduler::Attach(processor);
         struct Leave { ~Leave() { Scheduler::Detach(); } } leave;
         ctx.fpscr.loadFromHost();
 

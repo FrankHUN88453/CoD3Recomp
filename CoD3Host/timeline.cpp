@@ -55,19 +55,23 @@ void Timeline::Mark(const char* what, uint32_t a, uint32_t b)
     }
     const int64_t now = Now();
     if (now - since < 8000000000ll) return;
+    if (g_printed.load(std::memory_order_relaxed)) return;
+    // A ring: the last moments before whatever asks for the report, which
+    // is the first wait the command processor abandons, or the end.
     const uint32_t index = g_count.fetch_add(1, std::memory_order_relaxed);
-    if (index >= Capacity) return;
     if (index == 0) g_start = now;
-    g_entries[index] = { now, GetCurrentThreadId(), what, a, b };
+    g_entries[index % Capacity] = { now, GetCurrentThreadId(), what, a, b };
 }
 
 void Timeline::Report()
 {
-    if (!Enabled() || g_count.load() < Capacity || g_printed.exchange(true)) return;
-    printf("timeline: %u moments, microseconds from the first, os thread, what, values\n", Capacity);
-    for (uint32_t i = 0; i < Capacity; i++)
+    if (!Enabled() || g_printed.exchange(true)) return;
+    const uint32_t count = g_count.load();
+    const uint32_t shown = count < Capacity ? count : Capacity;
+    printf("timeline: the last %u moments, microseconds from the first recorded, os thread, what, values\n", shown);
+    for (uint32_t i = 0; i < shown; i++)
     {
-        const Entry& e = g_entries[i];
+        const Entry& e = g_entries[(count - shown + i) % Capacity];
         printf("t %10.1f  os %-6u %-14s %08X %08X\n", (e.nanoseconds - g_start) / 1000.0, e.thread, e.what, e.a, e.b);
     }
     fflush(stdout);

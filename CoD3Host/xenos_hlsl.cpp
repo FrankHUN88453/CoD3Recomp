@@ -584,7 +584,7 @@ namespace
                 const uint32_t opcode = uint32_t(instruction >> 44) & 0xF;
                 switch (opcode)
                 {
-                case 0: case 12: case 13:
+                case 0: case 12: case 15:
                     i++;
                     break;
                 case 1: ExecBody(instruction); i++; break;
@@ -602,15 +602,19 @@ namespace
                     i++;
                     break;
                 }
-                case 5: case 6:
+                case 5: case 6: case 13: case 14:
                 {
+                    // 13 and 14 are the "clean" predicated execs, which the
+                    // predicate's own value does not change inside: the same
+                    // here. They were taken for no-ops, and the blocks of
+                    // the grass and the trees that sit in them never ran.
                     const bool condition = ((instruction >> 42) & 1) != 0;
                     Line(Format("if (p0 == %s) {", condition ? "true" : "false"));
                     indent++;
                     ExecBody(instruction);
                     indent--;
                     Line("}");
-                    if (opcode == 6 && inLoop) Line(finish);
+                    if ((opcode == 6 || opcode == 14) && inLoop) Line(finish);
                     i++;
                     break;
                 }
@@ -668,7 +672,7 @@ namespace
                 {
                     flow.push_back(instruction);
                     const uint32_t opcode = uint32_t(instruction >> 44) & 0xF;
-                    if (opcode >= 1 && opcode <= 6)
+                    if ((opcode >= 1 && opcode <= 6) || opcode == 13 || opcode == 14)
                     {
                         const uint32_t address = uint32_t(instruction) & 0xFFF;
                         if (address < firstTarget) firstTarget = address;
@@ -689,7 +693,7 @@ namespace
                 for (size_t i = 0; i + 1 < flow.size(); i++)
                 {
                     const uint32_t opcode = uint32_t(flow[i] >> 44) & 0xF;
-                    if (opcode == 2 || opcode == 4 || opcode == 6) endsInside = true;
+                    if (opcode == 2 || opcode == 4 || opcode == 6 || opcode == 14) endsInside = true;
                 }
                 if (endsInside)
                 {
@@ -720,7 +724,7 @@ namespace
                 indent++;
                 switch (opcode)
                 {
-                case 0: case 12: case 13:
+                case 0: case 12: case 15:
                     Line(next);
                     break;
                 case 1: ExecBody(instruction); Line(next); break;
@@ -737,7 +741,7 @@ namespace
                     Line(opcode == 4 ? finish : next);
                     break;
                 }
-                case 5: case 6:
+                case 5: case 6: case 13: case 14:
                 {
                     const bool condition = ((instruction >> 42) & 1) != 0;
                     Line(Format("if (p0 == %s) {", condition ? "true" : "false"));
@@ -745,7 +749,7 @@ namespace
                     ExecBody(instruction);
                     indent--;
                     Line("}");
-                    Line(opcode == 6 ? finish : next);
+                    Line((opcode == 6 || opcode == 14) ? finish : next);
                     break;
                 }
                 case 7:   // loop start: the loop constant holds count, start and step

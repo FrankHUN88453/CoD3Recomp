@@ -905,10 +905,45 @@ PPC_FUNC(__imp__VdSwap)
             fflush(stdout);
         }
 
+        // The swap goes into the stream, not on the screen here.
+        //
+        // The driver reserves sixty four words of its command buffer for
+        // this call, hands it the first of them in r3 and moves its cursor
+        // to the last of them when it returns (its cursor is the last word
+        // written, and every writer stores ahead of it): on the console the
+        // kernel fills them with the packets that change the picture. Nothing was written
+        // into them here, and the command processor read whatever the
+        // memory held: zeros at first, which parse as writes of register
+        // zero and leave the stream misaligned by a word at the end of the
+        // run, and later the packets of whatever the memory was used for
+        // before. Draws of one point, interrupts nobody had asked for,
+        // waits on the display scaler's registers with a mask the reference
+        // could never satisfy: those came from here, and a wait like that
+        // was every stall of five seconds.
+        //
+        // So: one packet the command processor knows, and the rest filler,
+        // and the picture changes when the GPU reaches it, after the frame's
+        // draws, rather than when the CPU finished recording them.
         if (surface != 0 && width > 1 && height > 1 && width <= 4096 && height <= 4096)
         {
-            Window::SetFrontBuffer(Guest::PhysicalAlias(surface), width, height);
-            D3D11Backend::Swap(surface, width, height);
+            const uint32_t buffer = ctx.r3.u32;
+            if (buffer != 0)
+            {
+                constexpr uint32_t Words = 64;
+                uint32_t offset = 0;
+                auto put = [&](uint32_t value) { Guest::Write32(base, buffer + offset * 4, value); offset++; };
+                put(0xC0000000u | (3u << 16) | (0x64u << 8));   // SWAP, four words
+                put(0x50415753u);                   // 'SWAP'
+                put(surface);
+                put(width);
+                put(height);
+                while (offset < Words) put(0x80000000u);
+            }
+            else
+            {
+                Window::SetFrontBuffer(Guest::PhysicalAlias(surface), width, height);
+                D3D11Backend::Swap(surface, width, height);
+            }
         }
     }
     ctx.r3.u32 = 0;

@@ -233,6 +233,7 @@ namespace
     {
         ComPtr<ID3D11VertexShader> shader;
         XenosHlsl::Translation translation;
+        std::vector<uint8_t> code;   // kept for the stream out probe
         uint64_t hash = 0;
         bool ok = false;
         bool pending = false;
@@ -456,7 +457,10 @@ namespace
         }
         const std::vector<uint8_t> code = ProgramBytes(entry, "vs_5_0", "vertex program");
         if (!code.empty() && SUCCEEDED(g_device->CreateVertexShader(code.data(), code.size(), nullptr, &entry.shader)))
+        {
             entry.ok = true;
+            entry.code = code;
+        }
         return entry;
     }
 
@@ -1497,6 +1501,64 @@ namespace
         WriteBmp(name, pixels, w, h);
     }
 
+    // COD3_D3DVSPROBE=hex: the first draws of the vertex program whose hash
+    // starts so are run again through a stream out of the program's own
+    // outputs, and the first vertices' positions and interpolators are
+    // printed: what the program made of its inputs, without guessing.
+    ComPtr<ID3D11GeometryShader> g_probeGeometry;
+    ComPtr<ID3D11Buffer> g_probeBuffer, g_probeStaging;
+    const uint64_t* g_probeHashOf = nullptr;
+
+    void ProbeVertexOutputs(const std::vector<uint8_t>& vertexCode, uint32_t vertexCount, bool indexed, uint32_t indexCount)
+    {
+        constexpr uint32_t Stride = 17 * 16, Vertices = 12;
+        if (!g_probeGeometry)
+        {
+            D3D11_SO_DECLARATION_ENTRY entries[17];
+            entries[0] = { 0, "SV_Position", 0, 0, 4, 0 };
+            for (UINT i = 0; i < 16; i++) entries[1 + i] = { 0, "TEXCOORD", i, 0, 4, 0 };
+            const UINT strides[1] = { Stride };
+            if (FAILED(g_device->CreateGeometryShaderWithStreamOutput(vertexCode.data(), vertexCode.size(), entries, 17, strides, 1,
+                D3D11_SO_NO_RASTERIZED_STREAM, nullptr, &g_probeGeometry)))
+            {
+                printf("d3d11 probe: no stream out geometry program\n");
+                return;
+            }
+            D3D11_BUFFER_DESC desc{};
+            desc.ByteWidth = Stride * Vertices * 8;
+            desc.Usage = D3D11_USAGE_DEFAULT;
+            desc.BindFlags = D3D11_BIND_STREAM_OUTPUT;
+            g_device->CreateBuffer(&desc, nullptr, &g_probeBuffer);
+            desc.Usage = D3D11_USAGE_STAGING;
+            desc.BindFlags = 0;
+            desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            g_device->CreateBuffer(&desc, nullptr, &g_probeStaging);
+        }
+        if (!g_probeGeometry || !g_probeBuffer || !g_probeStaging) return;
+        ID3D11Buffer* so = g_probeBuffer.Get();
+        const UINT offset = 0;
+        g_context->GSSetShader(g_probeGeometry.Get(), nullptr, 0);
+        g_context->SOSetTargets(1, &so, &offset);
+        // Points, so every vertex named comes out once, in order.
+        g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_POINTLIST);
+        const uint32_t count = std::min(indexed ? indexCount : vertexCount, Vertices);
+        if (indexed) g_context->DrawIndexed(count, 0, 0); else g_context->Draw(count, 0);
+        ID3D11Buffer* none = nullptr;
+        g_context->SOSetTargets(1, &none, &offset);
+        g_context->GSSetShader(nullptr, nullptr, 0);
+        g_context->CopyResource(g_probeStaging.Get(), g_probeBuffer.Get());
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        if (FAILED(g_context->Map(g_probeStaging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return;
+        for (uint32_t v = 0; v < count; v++)
+        {
+            const float* f = reinterpret_cast<const float*>(static_cast<const uint8_t*>(mapped.pData) + v * Stride);
+            printf("d3d11 probe: vertex %u position %g %g %g %g  o0 %g %g %g %g  o1 %g %g %g %g  o2 %g %g %g %g\n", v,
+                f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7], f[8], f[9], f[10], f[11], f[12], f[13], f[14], f[15]);
+        }
+        g_context->Unmap(g_probeStaging.Get(), 0);
+        fflush(stdout);
+    }
+
     // COD3_D3DPROBE=1: reads a texture back and says how much of it is not
     // black, for finding where a black frame goes black.
     void Probe(const char* what, ID3D11Texture2D* texture)
@@ -2071,6 +2133,36 @@ namespace
             g_context->Draw(indexCount, UINT(indexOffset));
         }
         phases.Mark(8);
+        {
+            static const char* const probeWanted = getenv("COD3_D3DVSPROBE");
+            static int probed = 0;
+            if (probeWanted != nullptr && probed < 6)
+            {
+                char name[24];
+                snprintf(name, sizeof(name), "%016llx", (unsigned long long)vertexShader.hash);
+                if (strncmp(name, probeWanted, strlen(probeWanted)) == 0)
+                {
+                    probed++;
+                    printf("d3d11 probe: draw %u of %u, program %s\n", primitive, indexCount, name);
+                    for (const XenosHlsl::TextureFetch& fetch : vertexShader.translation.textureFetches)
+                    {
+                        uint32_t w[6];
+                        for (uint32_t i = 0; i < 6; i++) w[i] = Reg(0x4800 + fetch.slot * 6 + i);
+                        const uint8_t* bytes = Guest::Base + Guest::PhysicalAlias(w[1] & 0xFFFFF000u);
+                        printf("d3d11 probe: vertex stage texture %u words %08X %08X %08X %08X %08X %08X, first bytes:", fetch.slot, w[0], w[1], w[2], w[3], w[4], w[5]);
+                        for (uint32_t i = 0; i < 32; i++) printf("%s%02X", (i % 4) == 0 ? " " : "", bytes[i]);
+                        printf("\n");
+                    }
+                    printf("d3d11 probe: c24..47:");
+                    for (uint32_t i = 24 * 4; i < 48 * 4; i++) printf("%s %g", (i % 4) == 0 ? " |" : "", RegFloat(0x4000 + i));
+                    printf("\n");
+                    printf("d3d11 probe: c252..255:");
+                    for (uint32_t i = 252 * 4; i < 256 * 4; i++) printf("%s %g", (i % 4) == 0 ? " |" : "", RegFloat(0x4000 + i));
+                    printf("\n");
+                    ProbeVertexOutputs(vertexShader.code, indexCount, !indices.empty(), uint32_t(indices.size()));
+                }
+            }
+        }
         if (views[0] != nullptr)
         {
             if (ColorTarget* color = GetColorTarget(Reg(0x2001), pitch, scale))

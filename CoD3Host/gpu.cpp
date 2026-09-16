@@ -32,6 +32,7 @@
 #include "raster.h"
 #include "d3d11_backend.h"
 #include "timeline.h"
+#include "window.h"
 
 #include <atomic>
 #include <chrono>
@@ -458,6 +459,17 @@ namespace
         else g_pendingInterrupts.fetch_add(1, std::memory_order_relaxed);
     }
 
+    // The swap packet VdSwap writes into the driver's reservation: the
+    // picture changes here, when the GPU reaches it, so a frame is shown
+    // once its draws are done and never before.
+    void SwapPacket(uint32_t magic, uint32_t surface, uint32_t width, uint32_t height)
+    {
+        if (magic != 0x50415753u) return;
+        if (surface == 0 || width <= 1 || height <= 1 || width > 4096 || height > 4096) return;
+        Window::SetFrontBuffer(Guest::PhysicalAlias(surface), width, height);
+        D3D11Backend::Swap(surface, width, height);
+    }
+
     void WriteFence(uint32_t initiator, uint32_t address, uint32_t value)
     {
         const uint32_t target = address & ~3u;
@@ -547,8 +559,11 @@ namespace
         // guessed.
         static const long limit = []() -> long {
             const char* text = getenv("COD3_GPUWAIT");
-            const long value = (text != nullptr) ? strtol(text, nullptr, 10) : 200;
-            return (value > 0) ? value : 200;
+            // Five seconds: the console waits as long as it takes, and a wait
+            // given up is the next packet run against a buffer the CPU is
+            // still writing, which ended in a corrupt stream and a hang.
+            const long value = (text != nullptr) ? strtol(text, nullptr, 10) : 5000000;
+            return (value > 0) ? value : 5000000;
         }();
 
         const auto started = std::chrono::steady_clock::now();
@@ -598,6 +613,8 @@ namespace
                             memory ? "memory" : "register", pollAddress,
                             current, reference, mask, function);
                         PrintRecent();
+                        // The moments before it, if they are being kept.
+                        Timeline::Report();
                     }
                 }
                 return;
@@ -910,6 +927,7 @@ void Gpu::WriteRegister(uint32_t address, uint32_t value)
     if (mirrorTo != 0)
     {
         Guest::WritePhysical32(mirrorTo, value);
+        Timeline::Mark("scratch", mirrorTo, value);
 
         static std::atomic<int> announced{ 0 };
         if (announced.fetch_add(1) < 40)
@@ -1164,6 +1182,7 @@ uint32_t Gpu::ProcessRing(uint32_t ringBase, uint32_t ringSizeDwords,
                 break;
             case OpSwap:
                 local.swaps++;
+                SwapPacket(ReadDword(cursor + 1), ReadDword(cursor + 2), ReadDword(cursor + 3), ReadDword(cursor + 4));
                 break;
             case OpInterrupt:
                 // The stream asking for the CPU to be interrupted.
@@ -1612,7 +1631,15 @@ namespace
                         Guest::Read32(Guest::Base, base + (cursor + 6) * 4));
                 }
                 else if (opcode == OpSwap)
+                {
                     local.swaps++;
+                    if (cursor + 4 < dwords)
+                        SwapPacket(
+                            Guest::Read32(Guest::Base, base + (cursor + 1) * 4),
+                            Guest::Read32(Guest::Base, base + (cursor + 2) * 4),
+                            Guest::Read32(Guest::Base, base + (cursor + 3) * 4),
+                            Guest::Read32(Guest::Base, base + (cursor + 4) * 4));
+                }
                 else if (opcode == OpIndirectBuffer && cursor + 2 < dwords)
                 {
                     t_lastIndirectAddress = Guest::Read32(Guest::Base, base + (cursor + 1) * 4);
