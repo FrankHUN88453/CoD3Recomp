@@ -58,6 +58,51 @@ namespace
         g_skipReasons[reason]++;
     }
 
+    // COD3_D3DFRAME=N: the draws, resolves and presents from the Nth present
+    // to the one after next are printed, which is a frame of the title's
+    // however it lies against the presents.
+    // COD3_D3DFRAME=auto picks the frame itself: the one after the first
+    // present with three hundred draws or more, ten seconds into a level,
+    // which is a frame of the level rather than of its loading screen,
+    // whatever the timing of the run.
+    std::atomic<int64_t> g_frameWanted{ -2 };
+    std::atomic<uint64_t> g_drawsAtPresent{ 0 };
+    std::atomic<uint64_t> g_swaps{ 0 };   // the title's swaps: its frames, where the window presents at its own rate
+
+    bool FrameLogged()
+    {
+        static const bool parsed = []() {
+            const char* text = getenv("COD3_D3DFRAME");
+            if (text == nullptr) g_frameWanted.store(-1);
+            else if (strcmp(text, "auto") == 0) g_frameWanted.store(-2);
+            else g_frameWanted.store(strtol(text, nullptr, 10));
+            return true;
+        }();
+        (void)parsed;
+        const int64_t wanted = g_frameWanted.load(std::memory_order_relaxed);
+        if (wanted < 0) return false;
+        const int64_t present = int64_t(g_swaps.load(std::memory_order_relaxed));
+        return present >= wanted && present < wanted + 2;
+    }
+
+    void FrameSwapped()
+    {
+        const uint64_t draws = g_draws.load(std::memory_order_relaxed);
+        const uint64_t inFrame = draws - g_drawsAtPresent.exchange(draws);
+        const uint64_t present = g_swaps.load(std::memory_order_relaxed);
+        // A level, ten seconds after its files started opening.
+        static int64_t levelSince = 0;
+        if (levelSince == 0 && Kernel::Stats().filesOpened.load(std::memory_order_relaxed) >= 40)
+            levelSince = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        const bool inLevel = levelSince != 0 &&
+            std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count() - levelSince >= 10;
+        if (g_frameWanted.load(std::memory_order_relaxed) == -2 && inLevel && inFrame >= 300)
+        {
+            g_frameWanted.store(int64_t(present) + 1);
+            printf("d3d11: frame %llu had %llu draws, the next two are logged\n", (unsigned long long)present, (unsigned long long)inFrame);
+        }
+    }
+
     void ReportOnce(const char* what, uint32_t detail)
     {
         static std::map<std::string, bool> seen;
@@ -410,9 +455,17 @@ namespace
         " d.o4 = a.o4 + c.o4 - b.o4; d.o5 = a.o5 + c.o5 - b.o5; d.o6 = a.o6 + c.o6 - b.o6; d.o7 = a.o7 + c.o7 - b.o7;"
         " d.o8 = a.o8 + c.o8 - b.o8; d.o9 = a.o9 + c.o9 - b.o9; d.o10 = a.o10 + c.o10 - b.o10; d.o11 = a.o11 + c.o11 - b.o11;"
         " d.o12 = a.o12 + c.o12 - b.o12; d.o13 = a.o13 + c.o13 - b.o13; d.o14 = a.o14 + c.o14 - b.o14; d.o15 = a.o15 + c.o15 - b.o15; return d; }\n"
+        // The three corners can come in any order: the diagonal is the
+        // longest edge on the screen, the corner off it is mirrored across
+        // the diagonal for the fourth, and the strip starts from that
+        // corner so the first triangle keeps the winding it came with.
         "[maxvertexcount(4)]\n"
         "void main(triangle V input[3], inout TriangleStream<V> stream) {\n"
-        "    stream.Append(input[1]); stream.Append(input[0]); stream.Append(input[2]); stream.Append(fourth(input[0], input[1], input[2]));\n"
+        "    float2 p0 = input[0].position.xy / input[0].position.w, p1 = input[1].position.xy / input[1].position.w, p2 = input[2].position.xy / input[2].position.w;\n"
+        "    float d01 = dot(p1 - p0, p1 - p0), d12 = dot(p2 - p1, p2 - p1), d02 = dot(p2 - p0, p2 - p0);\n"
+        "    uint c = (d02 >= d01 && d02 >= d12) ? 1 : (d01 >= d12) ? 2 : 0;\n"
+        "    uint a = (c + 1) % 3, b = (c + 2) % 3;\n"
+        "    stream.Append(input[c]); stream.Append(input[a]); stream.Append(input[b]); stream.Append(fourth(input[a], input[c], input[b]));\n"
         "    stream.RestartStrip(); }\n";
 
     ID3D11GeometryShader* RectangleShader()
@@ -1006,8 +1059,25 @@ namespace
 
     // The bytes of a block compressed texture, untiled and with each pair of
     // bytes put the right way round, as the host format wants them.
+    // Where a texture's first level lies when its levels are packed into
+    // one tile: a texture of sixteen texels or fewer on a side shares the
+    // tile with its own mips, and the first level is not at the corner but
+    // sixteen texels along, the smaller levels in the corner before it.
+    // From Xenia's texture_info.cc, which had it from graph paper.
+    void PackedBaseOffset(const uint32_t fetch[6], uint32_t width, uint32_t height, uint32_t& x, uint32_t& y)
+    {
+        x = 0; y = 0;
+        if (((fetch[5] >> 11) & 1) == 0) return;   // the levels are not packed
+        uint32_t log2Width = 0, log2Height = 0;
+        while ((1u << log2Width) < width) log2Width++;
+        while ((1u << log2Height) < height) log2Height++;
+        if (std::min(log2Width, log2Height) > 4) return;
+        if (log2Width > log2Height) y = 16; else x = 16;
+    }
+
     bool LinearBlocks(const uint8_t* data, uint32_t width, uint32_t height, uint32_t pitch,
-                      uint32_t blockBytes, bool tiled, std::vector<uint8_t>& out, uint32_t& rowBytes)
+                      uint32_t blockBytes, bool tiled, uint32_t packedX, uint32_t packedY,
+                      std::vector<uint8_t>& out, uint32_t& rowBytes)
     {
         const uint32_t blockShift = blockBytes == 8 ? 3 : 4;
         const uint32_t blocksAcross = std::max(pitch / 4, 1u);
@@ -1019,8 +1089,9 @@ namespace
         {
             for (uint32_t bx = 0; bx < blocksWide; bx++)
             {
-                const uint32_t offset = tiled ? Edram::TiledOffset(bx, by, blocksAcross, blockShift)
-                                              : (by * blocksAcross + bx) * blockBytes;
+                const uint32_t sx = bx + packedX / 4, sy = by + packedY / 4;
+                const uint32_t offset = tiled ? Edram::TiledOffset(sx, sy, blocksAcross, blockShift)
+                                              : (sy * blocksAcross + sx) * blockBytes;
                 uint8_t* to = out.data() + size_t(by) * rowBytes + size_t(bx) * blockBytes;
                 for (uint32_t i = 0; i < blockBytes; i++) to[i] = data[offset + (i ^ 1)];
             }
@@ -1053,6 +1124,8 @@ namespace
         const uint64_t key = (base & 0x1FFFFFFFu) | (uint64_t(format) << 32) | (uint64_t(width & 0xFFF) << 40) | (uint64_t(height & 0xFFF) << 52);
         Texture& entry = g_textures[key];
         const uint8_t* data = Guest::Base + Guest::PhysicalAlias(base);
+        uint32_t packedX = 0, packedY = 0;
+        PackedBaseOffset(fetch, width, height, packedX, packedY);
 
         DXGI_FORMAT hostFormat = DXGI_FORMAT_UNKNOWN;
         std::vector<uint8_t> linear;
@@ -1072,7 +1145,8 @@ namespace
             for (uint32_t y = 0; y < height; y++)
                 for (uint32_t x = 0; x < width; x++)
                 {
-                    const uint32_t offset = tiled ? Edram::TiledOffset(x, y, pitch, 2) : (y * pitch + x) * 4;
+                    const uint32_t offset = tiled ? Edram::TiledOffset(x + packedX, y + packedY, pitch, 2)
+                                                  : ((y + packedY) * pitch + x + packedX) * 4;
                     uint32_t raw;
                     memcpy(&raw, data + offset, 4);
                     uint32_t word = raw;
@@ -1096,7 +1170,8 @@ namespace
             for (uint32_t y = 0; y < height; y++)
                 for (uint32_t x = 0; x < width; x++)
                 {
-                    const uint32_t offset = tiled ? Edram::TiledOffset(x, y, pitch, 0) : (y * pitch + x);
+                    const uint32_t offset = tiled ? Edram::TiledOffset(x + packedX, y + packedY, pitch, 0)
+                                                  : ((y + packedY) * pitch + x + packedX);
                     linear[size_t(y) * rowBytes + x] = data[offset];
                 }
             break;
@@ -1104,12 +1179,12 @@ namespace
         case 18: case 19: case 20:   // DXT1, DXT3, DXT5
         {
             const uint32_t blockBytes = format == 18 ? 8 : 16;
-            sourceBytes = size_t(std::max(pitch / 4, 1u)) * ((height + 3) / 4) * blockBytes;
+            sourceBytes = size_t(std::max(pitch / 4, 1u)) * ((std::max(height, packedY + height) + 3) / 4) * blockBytes;
             const uint64_t fingerprint = Fingerprint(data, sourceBytes);
             if (entry.resource && entry.fingerprint == fingerprint) return entry.resource.Get();
             entry.fingerprint = fingerprint;
             hostFormat = format == 18 ? DXGI_FORMAT_BC1_UNORM : format == 19 ? DXGI_FORMAT_BC2_UNORM : DXGI_FORMAT_BC3_UNORM;
-            LinearBlocks(data, width, height, pitch, blockBytes, tiled, linear, rowBytes);
+            LinearBlocks(data, width, height, pitch, blockBytes, tiled, packedX, packedY, linear, rowBytes);
             break;
         }
         default:
@@ -1138,6 +1213,65 @@ namespace
         entry.format = format;
         g_textureUploads.fetch_add(1);
         return entry.resource.Get();
+    }
+
+    // COD3_D3DDRAWDUMP=prefix, with COD3_D3DFRAME: the colour target after
+    // every draw of the logged frame, at a quarter size, as prefix-NNNN.bmp,
+    // so a frame can be watched being built and the draw that puts a wrong
+    // thing on the screen found.
+    void DumpTargetAfterDraw(ID3D11Texture2D* texture, uint32_t width, uint32_t height)
+    {
+        static const char* const prefix = getenv("COD3_D3DDRAWDUMP");
+        if (prefix == nullptr || texture == nullptr || !FrameLogged()) return;
+        static int number = 0;
+        if (number >= 2000) return;
+        D3D11_TEXTURE2D_DESC desc{};
+        texture->GetDesc(&desc);
+        if (desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM && desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM) return;
+        desc.Usage = D3D11_USAGE_STAGING;
+        desc.BindFlags = 0;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        desc.MiscFlags = 0;
+        ComPtr<ID3D11Texture2D> staging;
+        if (FAILED(g_device->CreateTexture2D(&desc, nullptr, &staging))) return;
+        g_context->CopyResource(staging.Get(), texture);
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        if (FAILED(g_context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return;
+        const uint32_t w = std::min(width, desc.Width) / 4, h = std::min(height, desc.Height) / 4;
+        std::vector<uint8_t> pixels(size_t(w) * h * 4);
+        const bool rgba = desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM;
+        for (uint32_t y = 0; y < h; y++)
+        {
+            const uint8_t* row = static_cast<const uint8_t*>(mapped.pData) + size_t(y) * 4 * mapped.RowPitch;
+            for (uint32_t x = 0; x < w; x++)
+            {
+                const uint8_t* from = row + size_t(x) * 16;
+                uint8_t* to = pixels.data() + (size_t(y) * w + x) * 4;
+                to[0] = rgba ? from[2] : from[0]; to[1] = from[1]; to[2] = rgba ? from[0] : from[2]; to[3] = 255;
+            }
+        }
+        g_context->Unmap(staging.Get(), 0);
+        char name[512];
+        snprintf(name, sizeof(name), "%s-%04d.bmp", prefix, number++);
+        BITMAPFILEHEADER file{};
+        BITMAPINFOHEADER info{};
+        info.biSize = sizeof(info);
+        info.biWidth = int(w);
+        info.biHeight = -int(h);
+        info.biPlanes = 1;
+        info.biBitCount = 32;
+        info.biCompression = BI_RGB;
+        info.biSizeImage = DWORD(pixels.size());
+        file.bfType = 0x4D42;
+        file.bfOffBits = sizeof(file) + sizeof(info);
+        file.bfSize = file.bfOffBits + info.biSizeImage;
+        if (FILE* out = fopen(name, "wb"))
+        {
+            fwrite(&file, sizeof(file), 1, out);
+            fwrite(&info, sizeof(info), 1, out);
+            fwrite(pixels.data(), 1, pixels.size(), out);
+            fclose(out);
+        }
     }
 
     // COD3_D3DPROBE=1: reads a texture back and says how much of it is not
@@ -1361,7 +1495,16 @@ namespace
                 constants.textureSize[fetch.slot][1] = float(height);
                 constants.textureSize[fetch.slot][2] = 1.0f / float(width);
                 constants.textureSize[fetch.slot][3] = 1.0f / float(height);
-                constants.textureAdjustment[fetch.slot][0] = (words[3] >> 1) & 0xFFF;
+                // A surface the resolve made is sampled by the title with
+                // red and blue swapped: the resolve writes the console's
+                // memory in one byte order and the texture fetch reads it in
+                // another, and the swizzle in the fetch constant undoes
+                // that. The surfaces here never go through memory and keep
+                // their channels, so the swap is left out.
+                uint32_t swizzle = (words[3] >> 1) & 0xFFF;
+                if (swizzle == 0x60A && (words[1] & 0x3F) == 6 && g_resolved.count((words[1] & 0xFFFFF000u) & 0x1FFFFFFFu))
+                    swizzle = 0x688;
+                constants.textureAdjustment[fetch.slot][0] = swizzle;
                 constants.textureAdjustment[fetch.slot][1] = (words[0] >> 2) & 0xFF;
             }
         }
@@ -1429,9 +1572,15 @@ namespace
 
         g_draws.fetch_add(1, std::memory_order_relaxed);
         {
+            // The first two dozen draws of the run, and, with
+            // COD3_D3DFRAME=N, every draw of the Nth present's frame with
+            // its programs and textures: what a frame is made of, for
+            // finding which draw a wrong thing on the screen comes from.
             static int announced = 0;
-            if (announced++ < 24)
+            const bool thisFrame = FrameLogged();
+            if (announced++ < 24 || thisFrame)
             {
+                if (thisFrame) printf("frame %llu: ", (unsigned long long)g_presents.load(std::memory_order_relaxed));
                 printf("d3d11: draw %u of %u indices (%s), vte %03X viewport %.0f %.0f %.0f %.0f, target %u %ux%u, "
                        "scissor %u,%u-%u,%u, depth %08X blend %08X mask %X, vs %zu ps %zu\n",
                     primitive, indexCount, sourceSelect == 0 ? "indexed" : "plain", Reg(0x2206),
@@ -1440,6 +1589,34 @@ namespace
                     Reg(0x2081) & 0x7FFF, (Reg(0x2081) >> 16) & 0x7FFF, Reg(0x2082) & 0x7FFF, (Reg(0x2082) >> 16) & 0x7FFF,
                     depthControl, Reg(0x2201), colorMask,
                     vertexShader.translation.hlsl.size(), pixelShader ? pixelShader->translation.hlsl.size() : 0u);
+                if (thisFrame)
+                {
+                    printf("   vs %016llx ps %016llx, mode %u, cull %08X, alpha %08X, %s\n",
+                        (unsigned long long)Hash(vertexShader.translation.hlsl),
+                        pixelShader ? (unsigned long long)Hash(pixelShader->translation.hlsl) : 0ull,
+                        Reg(0x2208), Reg(0x2205), Reg(0x2202), indices.empty() ? "plain" : "indexed");
+                    if (pixelShader)
+                        for (const XenosHlsl::TextureFetch& fetch : pixelShader->translation.textureFetches)
+                        {
+                            uint32_t w[6];
+                            for (uint32_t i = 0; i < 6; i++) w[i] = Reg(0x4800 + fetch.slot * 6 + i);
+                            const uint32_t base = w[1] & 0xFFFFF000u;
+                            const uint32_t width = (w[2] & 0x1FFF) + 1, height = ((w[2] >> 13) & 0x1FFF) + 1;
+                            printf("   texture %u: format %u %ux%u at %08X%s swizzle %03X signs %02X%s, words %08X %08X %08X %08X %08X %08X\n", fetch.slot, w[1] & 0x3F,
+                                width, height, base,
+                                g_resolved.count(base & 0x1FFFFFFFu) ? " (resolved)" : "",
+                                (w[3] >> 1) & 0xFFF, (w[0] >> 2) & 0xFF, (w[0] & 3) != 2 ? " (not a texture)" : "",
+                                w[0], w[1], w[2], w[3], w[4], w[5]);
+                            // A tiny texture's bytes as they lie, to be read against its picture.
+                            if (width * height <= 256 && base != 0)
+                            {
+                                const uint8_t* bytes = Guest::Base + Guest::PhysicalAlias(base);
+                                printf("     bytes:");
+                                for (uint32_t i = 0; i < 64; i++) printf("%s%02X", (i % 8) == 0 ? " " : "", bytes[i]);
+                                printf("\n");
+                            }
+                        }
+                }
                 fflush(stdout);
             }
         }
@@ -1453,6 +1630,11 @@ namespace
         else
         {
             g_context->Draw(indexCount, 0);
+        }
+        if (views[0] != nullptr)
+        {
+            if (ColorTarget* color = GetColorTarget(Reg(0x2001), pitch, scale))
+                DumpTargetAfterDraw(color->texture.Get(), targetWidth, targetHeight);
         }
         {
             static int probes = 0;
@@ -1515,10 +1697,11 @@ namespace
         g_resolves.fetch_add(1, std::memory_order_relaxed);
         {
             static int announced = 0;
-            if (announced++ < 12)
+            if (announced++ < 12 || FrameLogged())
             {
-                printf("d3d11: resolve control %08X to %08X, %u,%u-%u,%u, pitch %u, clears %d%d\n",
-                    control, destBase, x0, y0, x1, y1, pitch, colorClear ? 1 : 0, depthClear ? 1 : 0);
+                printf("%sd3d11: resolve control %08X to %08X, %u,%u-%u,%u, pitch %u, clears %d%d, colour %08X depth %08X\n",
+                    FrameLogged() ? "frame: " : "",
+                    control, destBase, x0, y0, x1, y1, pitch, colorClear ? 1 : 0, depthClear ? 1 : 0, Reg(0x2001), Reg(0x2002));
                 fflush(stdout);
             }
         }
@@ -1763,6 +1946,7 @@ namespace
         DumpFrame(back.Get(), clientWidth, clientHeight);
         g_swapChain->Present(0, 0);
         DrainDebugMessages();
+        if (FrameLogged()) printf("frame: present %llu\n", (unsigned long long)g_presents.load(std::memory_order_relaxed));
         g_presents.fetch_add(1, std::memory_order_relaxed);
         return true;
     }
@@ -1811,6 +1995,9 @@ void D3D11Backend::Swap(uint32_t frontBufferPhysical, uint32_t width, uint32_t h
     g_frontBuffer.store(frontBufferPhysical);
     g_frontWidth.store(width);
     g_frontHeight.store(height);
+    if (FrameLogged()) printf("frame: swap %llu of %08X\n", (unsigned long long)g_swaps.load(std::memory_order_relaxed), frontBufferPhysical);
+    FrameSwapped();
+    g_swaps.fetch_add(1, std::memory_order_relaxed);
 }
 
 bool D3D11Backend::Present(void* hwnd, int clientWidth, int clientHeight)
