@@ -6,6 +6,7 @@
 #include "edram.h"
 
 #include <algorithm>
+#include <cmath>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -51,6 +52,22 @@ namespace
     std::atomic<uint64_t> g_bufferUploads{ 0 }, g_bufferBytes{ 0 }, g_textureUploads{ 0 };
     std::map<std::string, uint64_t> g_skipReasons;
 
+    // Where a draw's time goes, phase by phase, for the report: a thousand
+    // draws a frame make the cost of each the frame rate.
+    const char* const PhaseNames[] = { "snapshot", "programs", "targets", "states", "constants", "textures", "buffers", "indices", "draw call", "after" };
+    constexpr int PhaseCount = 10;
+    std::atomic<uint64_t> g_phaseNanoseconds[PhaseCount];
+    struct PhaseClock
+    {
+        std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+        void Mark(int phase)
+        {
+            const auto now = std::chrono::steady_clock::now();
+            g_phaseNanoseconds[phase].fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(now - last).count()), std::memory_order_relaxed);
+            last = now;
+        }
+    };
+
     void Skip(const char* reason)
     {
         g_drawsSkipped.fetch_add(1, std::memory_order_relaxed);
@@ -66,6 +83,7 @@ namespace
     // which is a frame of the level rather than of its loading screen,
     // whatever the timing of the run.
     std::atomic<int64_t> g_frameWanted{ -2 };
+    long g_autoSeconds = 10;
     std::atomic<uint64_t> g_drawsAtPresent{ 0 };
     std::atomic<uint64_t> g_swaps{ 0 };   // the title's swaps: its frames, where the window presents at its own rate
 
@@ -74,7 +92,12 @@ namespace
         static const bool parsed = []() {
             const char* text = getenv("COD3_D3DFRAME");
             if (text == nullptr) g_frameWanted.store(-1);
-            else if (strcmp(text, "auto") == 0) g_frameWanted.store(-2);
+            else if (strncmp(text, "auto", 4) == 0)
+            {
+                // auto, or autoN for N seconds into the level rather than ten.
+                g_frameWanted.store(-2);
+                if (text[4] != 0) g_autoSeconds = strtol(text + 4, nullptr, 10);
+            }
             else g_frameWanted.store(strtol(text, nullptr, 10));
             return true;
         }();
@@ -95,7 +118,7 @@ namespace
         if (levelSince == 0 && Kernel::Stats().filesOpened.load(std::memory_order_relaxed) >= 40)
             levelSince = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
         const bool inLevel = levelSince != 0 &&
-            std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count() - levelSince >= 10;
+            std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count() - levelSince >= g_autoSeconds;
         if (g_frameWanted.load(std::memory_order_relaxed) == -2 && inLevel && inFrame >= 300)
         {
             g_frameWanted.store(int64_t(present) + 1);
@@ -119,13 +142,13 @@ namespace
 
     constexpr uint32_t SnapshotFirst = 0x2000;
     constexpr uint32_t SnapshotCount = 0x3000;
-    uint32_t g_registers[SnapshotCount];
 
-    void Snapshot() { Gpu::SnapshotRegisters(SnapshotFirst, SnapshotCount, g_registers); }
+    // The registers are read straight from the file: the draws run on the
+    // command thread, which is the thread that writes them.
+    void Snapshot() {}
     uint32_t Reg(uint32_t index)
     {
-        if (index >= SnapshotFirst && index < SnapshotFirst + SnapshotCount)
-            return g_registers[index - SnapshotFirst];
+        if (index < 0x10000) return Gpu::RegisterFile()[index].load(std::memory_order_relaxed);
         return Gpu::ReadRegister(Gpu::ApertureBase + index * 4);
     }
     float RegFloat(uint32_t index)
@@ -654,6 +677,10 @@ namespace
         const bool cullBack = (modeControl & 2) != 0;
         desc.CullMode = cullFront && cullBack ? D3D11_CULL_BACK   // everything: nothing would show; the nearest sense
                       : cullFront ? D3D11_CULL_FRONT : cullBack ? D3D11_CULL_BACK : D3D11_CULL_NONE;
+        static const char* const cullExperiment = getenv("COD3_D3DCULL");   // none, or flip: an experiment
+        if (cullExperiment != nullptr && strcmp(cullExperiment, "none") == 0) desc.CullMode = D3D11_CULL_NONE;
+        if (cullExperiment != nullptr && strcmp(cullExperiment, "flip") == 0 && desc.CullMode != D3D11_CULL_NONE)
+            desc.CullMode = desc.CullMode == D3D11_CULL_BACK ? D3D11_CULL_FRONT : D3D11_CULL_BACK;
         // FACE: nought means a counter clockwise triangle is a front face.
         desc.FrontCounterClockwise = ((modeControl >> 2) & 1) == 0 ? TRUE : FALSE;
         desc.DepthClipEnable = FALSE;
@@ -1219,11 +1246,82 @@ namespace
     // every draw of the logged frame, at a quarter size, as prefix-NNNN.bmp,
     // so a frame can be watched being built and the draw that puts a wrong
     // thing on the screen found.
-    void DumpTargetAfterDraw(ID3D11Texture2D* texture, uint32_t width, uint32_t height)
+    int g_dumpNumber = 0;
+
+    void WriteBmp(const char* name, const std::vector<uint8_t>& pixels, uint32_t w, uint32_t h)
+    {
+        BITMAPFILEHEADER file{};
+        BITMAPINFOHEADER info{};
+        info.biSize = sizeof(info);
+        info.biWidth = int(w);
+        info.biHeight = -int(h);
+        info.biPlanes = 1;
+        info.biBitCount = 32;
+        info.biCompression = BI_RGB;
+        info.biSizeImage = DWORD(pixels.size());
+        file.bfType = 0x4D42;
+        file.bfOffBits = sizeof(file) + sizeof(info);
+        file.bfSize = file.bfOffBits + info.biSizeImage;
+        if (FILE* out = fopen(name, "wb"))
+        {
+            fwrite(&file, sizeof(file), 1, out);
+            fwrite(&info, sizeof(info), 1, out);
+            fwrite(pixels.data(), 1, pixels.size(), out);
+            fclose(out);
+        }
+    }
+
+    // The depth alongside, as grey, when COD3_D3DDRAWDUMP has a z on the end.
+    void DumpDepthAfterDraw(const char* prefix, int number, ID3D11Texture2D* depth, uint32_t width, uint32_t height)
+    {
+        if (depth == nullptr) return;
+        D3D11_TEXTURE2D_DESC desc{};
+        depth->GetDesc(&desc);
+        if (desc.Format != DXGI_FORMAT_R32G8X24_TYPELESS) return;
+        desc.Usage = D3D11_USAGE_STAGING;
+        desc.BindFlags = 0;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        desc.MiscFlags = 0;
+        ComPtr<ID3D11Texture2D> staging;
+        if (FAILED(g_device->CreateTexture2D(&desc, nullptr, &staging))) return;
+        g_context->CopyResource(staging.Get(), depth);
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        if (FAILED(g_context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return;
+        const uint32_t w = std::min(width, desc.Width) / 4, h = std::min(height, desc.Height) / 4;
+        std::vector<uint8_t> pixels(size_t(w) * h * 4);
+        uint32_t zero = 0, tiny = 0, little = 0, middle = 0, one = 0, other = 0;
+        float lowest = 2.0f, highest = -1.0f;
+        for (uint32_t y = 0; y < h; y++)
+        {
+            const uint8_t* row = static_cast<const uint8_t*>(mapped.pData) + size_t(y) * 4 * mapped.RowPitch;
+            for (uint32_t x = 0; x < w; x++)
+            {
+                float z;
+                memcpy(&z, row + size_t(x) * 32, 4);
+                if (z == 0.0f) zero++; else if (z < 1e-4f) tiny++; else if (z < 1e-2f) little++; else if (z < 1.0f) middle++; else if (z == 1.0f) one++; else other++;
+                if (z < lowest) lowest = z;
+                if (z > highest) highest = z;
+                // Grey on a log scale: the reversed float depth of a level is
+                // little numbers, and linear grey shows nothing of it.
+                const float shade = z <= 0.0f ? 0.0f : z >= 1.0f ? 1.0f : 1.0f + std::log10(z) / 6.0f;
+                const uint8_t grey = uint8_t(std::min(std::max(shade, 0.0f), 1.0f) * 255.0f);
+                uint8_t* to = pixels.data() + (size_t(y) * w + x) * 4;
+                to[0] = grey; to[1] = grey; to[2] = z < 0.0f ? 255 : z > 1.0f ? 0 : grey; to[3] = 255;
+            }
+        }
+        g_context->Unmap(staging.Get(), 0);
+        printf("frame: depth after dump %d: zero %u, under 1e-4 %u, under 1e-2 %u, under 1 %u, one %u, other %u, range %g..%g\n",
+            number, zero, tiny, little, middle, one, other, lowest, highest);
+        char name[512];
+        snprintf(name, sizeof(name), "%s-%04d-z.bmp", prefix, number);
+        WriteBmp(name, pixels, w, h);
+    }
+
+    void DumpTargetAfterDraw(ID3D11Texture2D* texture, ID3D11Texture2D* depth, uint32_t width, uint32_t height)
     {
         static const char* const prefix = getenv("COD3_D3DDRAWDUMP");
         if (prefix == nullptr || texture == nullptr || !FrameLogged()) return;
-        static int number = 0;
+        int& number = g_dumpNumber;
         if (number >= 2000) return;
         D3D11_TEXTURE2D_DESC desc{};
         texture->GetDesc(&desc);
@@ -1251,27 +1349,11 @@ namespace
             }
         }
         g_context->Unmap(staging.Get(), 0);
+        static const bool withDepth = getenv("COD3_D3DDRAWDUMPZ") != nullptr;
+        if (withDepth) DumpDepthAfterDraw(prefix, number, depth, width, height);
         char name[512];
         snprintf(name, sizeof(name), "%s-%04d.bmp", prefix, number++);
-        BITMAPFILEHEADER file{};
-        BITMAPINFOHEADER info{};
-        info.biSize = sizeof(info);
-        info.biWidth = int(w);
-        info.biHeight = -int(h);
-        info.biPlanes = 1;
-        info.biBitCount = 32;
-        info.biCompression = BI_RGB;
-        info.biSizeImage = DWORD(pixels.size());
-        file.bfType = 0x4D42;
-        file.bfOffBits = sizeof(file) + sizeof(info);
-        file.bfSize = file.bfOffBits + info.biSizeImage;
-        if (FILE* out = fopen(name, "wb"))
-        {
-            fwrite(&file, sizeof(file), 1, out);
-            fwrite(&info, sizeof(info), 1, out);
-            fwrite(pixels.data(), 1, pixels.size(), out);
-            fclose(out);
-        }
+        WriteBmp(name, pixels, w, h);
     }
 
     // COD3_D3DPROBE=1: reads a texture back and says how much of it is not
@@ -1337,6 +1419,7 @@ namespace
 
     void DrawLocked(uint32_t initiator, uint32_t indexBase, uint32_t indexWord)
     {
+        PhaseClock phases;
         Snapshot();
         const uint32_t primitive = initiator & 0x3F;
         const uint32_t sourceSelect = (initiator >> 6) & 3;
@@ -1348,12 +1431,23 @@ namespace
         if (modeControl == 0) { Skip("render backend off"); return; }
         const bool depthOnly = modeControl == 5;
 
+        phases.Mark(0);
         // Points and the primitives this does not draw yet.
         D3D11_PRIMITIVE_TOPOLOGY topology;
         bool rectangles = false;
         bool convertQuads = false, convertFan = false;
         switch (primitive)
         {
+        case 1:
+        {
+            // Points: the level draws single pixel points by the hundred a
+            // frame, which the host draws as such. A point wider than a
+            // pixel would want a sprite, and is noted when it turns up.
+            topology = D3D11_PRIMITIVE_TOPOLOGY_POINTLIST;
+            const uint32_t size = Reg(0x2280);
+            if ((size & 0xFFFF) > 8 || (size >> 16) > 8) ReportOnce("point size in eighths of a pixel, drawn as a pixel", size);
+            break;
+        }
         case 2: topology = D3D11_PRIMITIVE_TOPOLOGY_LINELIST; break;
         case 3: topology = D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP; break;
         case 4: topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST; break;
@@ -1361,7 +1455,16 @@ namespace
         case 6: topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP; break;
         case 8: topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST; rectangles = true; break;
         case 13: topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST; convertQuads = true; break;
-        default: Skip(primitive == 1 ? "point list" : "primitive type"); return;
+        default:
+            if (FrameLogged())
+            {
+                // What the points would need: their size, and whether the
+                // pixel program takes the sprite coordinates.
+                printf("frame: point list of %u (%s), point size %08X min max %08X, program control %08X, context misc %08X, mode %u, blend %08X\n",
+                    indexCount, sourceSelect == 0 ? "indexed" : "plain", Reg(0x2280), Reg(0x2281), Reg(0x2180), Reg(0x2181), modeControl, Reg(0x2201));
+            }
+            Skip(primitive == 1 ? "point list" : "primitive type");
+            return;
         }
 
         // The programs.
@@ -1379,6 +1482,7 @@ namespace
         const uint32_t pitch = surfaceInfo & 0x3FFF;
         if (pitch == 0) { Skip("no surface pitch"); return; }
 
+        phases.Mark(1);
         // Targets.
         ID3D11RenderTargetView* views[4] = {};
         uint32_t targetCount = 0;
@@ -1411,6 +1515,7 @@ namespace
         }
         if (targetCount == 0 && depthView == nullptr) { Skip("no target"); return; }
 
+        phases.Mark(2);
         // Unbind anything about to be a target from the samplers.
         ID3D11ShaderResourceView* nothing[32] = {};
         g_context->PSSetShaderResources(0, 32, nothing);
@@ -1451,13 +1556,25 @@ namespace
             g_context->OMSetDepthStencilState(DepthState(depthView ? depthControl : 0, stencilRef), stencilRef & 0xFF);
         }
 
-        // Constants: the float file, the booleans, and this draw's own.
+        phases.Mark(3);
+        // Constants: the float file, the booleans, and this draw's own. The
+        // file's ranges go up only when something was written to them
+        // since the last draw.
         {
-            const uint32_t* floats = &g_registers[0x4000 - SnapshotFirst];
-            g_context->UpdateSubresource(ConstantBuffer(g_floatConstants[0], 4096), 0, nullptr, floats, 0, 0);
-            g_context->UpdateSubresource(ConstantBuffer(g_floatConstants[1], 4096), 0, nullptr, floats + 1024, 0, 0);
-            // The booleans and the loop constants together: 8 words and 32.
-            g_context->UpdateSubresource(ConstantBuffer(g_boolConstants, 160), 0, nullptr, &g_registers[0x4900 - SnapshotFirst], 0, 0);
+            static uint64_t uploaded[3] = { ~0ull, ~0ull, ~0ull };
+            const std::atomic<uint32_t>* file = Gpu::RegisterFile();
+            uint32_t words[1024];
+            for (uint32_t range = 0; range < 3; range++)
+            {
+                const uint64_t writes = Gpu::ConstantWrites(range);
+                if (writes == uploaded[range]) continue;
+                uploaded[range] = writes;
+                const uint32_t first = range == 0 ? 0x4000 : range == 1 ? 0x4400 : 0x4900;
+                const uint32_t count = range == 2 ? 40 : 1024;
+                for (uint32_t i = 0; i < count; i++) words[i] = file[first + i].load(std::memory_order_relaxed);
+                if (range < 2) g_context->UpdateSubresource(ConstantBuffer(g_floatConstants[range], 4096), 0, nullptr, words, 0, 0);
+                else g_context->UpdateSubresource(ConstantBuffer(g_boolConstants, 160), 0, nullptr, words, 0, 0);   // 8 booleans words and 32 loop words
+            }
         }
 
         DrawConstants constants{};
@@ -1479,6 +1596,7 @@ namespace
             constants.flags[2] = Reg(0x210E);
         }
 
+        phases.Mark(4);
         // Textures and samplers the pixel program samples.
         if (pixelShader != nullptr)
         {
@@ -1508,6 +1626,7 @@ namespace
                 constants.textureAdjustment[fetch.slot][1] = (words[0] >> 2) & 0xFF;
             }
         }
+        phases.Mark(5);
         // And the vertex buffers the vertex program fetches.
         for (const XenosHlsl::VertexFetch& fetch : vertexShader.translation.vertexFetches)
         {
@@ -1533,6 +1652,7 @@ namespace
         g_context->IASetInputLayout(nullptr);
         g_context->IASetPrimitiveTopology(topology);
 
+        phases.Mark(6);
         // Indices: the title's, byte swapped, or none. Quads and fans become
         // triangle lists here.
         std::vector<uint32_t> indices;
@@ -1571,6 +1691,7 @@ namespace
         }
 
         g_draws.fetch_add(1, std::memory_order_relaxed);
+        phases.Mark(7);
         {
             // The first two dozen draws of the run, and, with
             // COD3_D3DFRAME=N, every draw of the Nth present's frame with
@@ -1580,17 +1701,52 @@ namespace
             const bool thisFrame = FrameLogged();
             if (announced++ < 24 || thisFrame)
             {
-                if (thisFrame) printf("frame %llu: ", (unsigned long long)g_presents.load(std::memory_order_relaxed));
-                printf("d3d11: draw %u of %u indices (%s), vte %03X viewport %.0f %.0f %.0f %.0f, target %u %ux%u, "
+                if (thisFrame) printf("frame %llu (dump %d): ", (unsigned long long)g_presents.load(std::memory_order_relaxed), g_dumpNumber);
+                printf("d3d11: draw %u of %u indices (%s), vte %03X viewport %.0f %.0f %.0f %.0f z %g %g clip %08X dinfo %08X, target %u %ux%u, "
                        "scissor %u,%u-%u,%u, depth %08X blend %08X mask %X, vs %zu ps %zu\n",
                     primitive, indexCount, sourceSelect == 0 ? "indexed" : "plain", Reg(0x2206),
-                    RegFloat(0x210F), RegFloat(0x2110), RegFloat(0x2111), RegFloat(0x2112),
+                    RegFloat(0x210F), RegFloat(0x2110), RegFloat(0x2111), RegFloat(0x2112), RegFloat(0x2113), RegFloat(0x2114), Reg(0x2204), Reg(0x2002),
                     targetCount, targetWidth, targetHeight,
                     Reg(0x2081) & 0x7FFF, (Reg(0x2081) >> 16) & 0x7FFF, Reg(0x2082) & 0x7FFF, (Reg(0x2082) >> 16) & 0x7FFF,
                     depthControl, Reg(0x2201), colorMask,
                     vertexShader.translation.hlsl.size(), pixelShader ? pixelShader->translation.hlsl.size() : 0u);
                 if (thisFrame)
                 {
+                    for (const XenosHlsl::VertexFetch& fetch : vertexShader.translation.vertexFetches)
+                    {
+                        const uint32_t word0 = Reg(0x4800 + fetch.slot * 2), word1 = Reg(0x4800 + fetch.slot * 2 + 1);
+                        printf("   vertex slot %u at %08X, %u dwords, endian %u\n", fetch.slot, word0 & ~3u, (word1 >> 2) & 0xFFFFFF, word1 & 3);
+                    }
+                }
+                if (thisFrame && (indexCount <= 4 || vertexShader.translation.hlsl.size() == 12077))
+                {
+                    // A small draw's vertices, as words: a clearing
+                    // rectangle's depth is in them.
+                    for (const XenosHlsl::VertexFetch& fetch : vertexShader.translation.vertexFetches)
+                    {
+                        const uint32_t word0 = Reg(0x4800 + fetch.slot * 2), word1 = Reg(0x4800 + fetch.slot * 2 + 1);
+                        const uint8_t* data = Guest::Base + Guest::PhysicalAlias(word0 & ~3u);
+                        printf("   vertex slot %u: %08X %08X, words", fetch.slot, word0, word1);
+                        for (uint32_t i = 0; i < 16; i++) { uint32_t v; memcpy(&v, data + i * 4, 4); printf(" %08X", _byteswap_ulong(v)); }
+                        printf("\n");
+                    }
+                }
+                if (thisFrame)
+                {
+                    // The projection's z and w rows, the usual places: what
+                    // the depth comes from.
+                    static int constantDumps = 0;
+                    if (vertexShader.translation.hlsl.size() == 12077 && constantDumps++ < 3)
+                    {
+                        printf("   c0..31:");
+                        for (uint32_t i = 0; i < 32 * 4; i++) printf("%s %g", (i % 4) == 0 ? " |" : "", RegFloat(0x4000 + i));
+                        printf("\n");
+                    }
+                    printf("   c252..255:"); for (uint32_t i = 252 * 4; i < 256 * 4; i++) printf("%s %g", (i % 4) == 0 ? " |" : "", RegFloat(0x4000 + i)); printf("\n");
+                    printf("   c12..15:");
+                    for (uint32_t i = 12 * 4; i < 16 * 4; i++) printf("%s %g", (i % 4) == 0 ? " |" : "", RegFloat(0x4000 + i));
+                    printf("\n");
+                    printf("   microcode vs_%016llx ps_%016llx\n", (unsigned long long)Shaders::LastHash(false), (unsigned long long)Shaders::LastHash(true));
                     printf("   vs %016llx ps %016llx, mode %u, cull %08X, alpha %08X, %s\n",
                         (unsigned long long)Hash(vertexShader.translation.hlsl),
                         pixelShader ? (unsigned long long)Hash(pixelShader->translation.hlsl) : 0ull,
@@ -1631,11 +1787,16 @@ namespace
         {
             g_context->Draw(indexCount, 0);
         }
+        phases.Mark(8);
         if (views[0] != nullptr)
         {
             if (ColorTarget* color = GetColorTarget(Reg(0x2001), pitch, scale))
-                DumpTargetAfterDraw(color->texture.Get(), targetWidth, targetHeight);
+            {
+                DepthTarget* depth = depthView != nullptr ? GetDepthTarget(Reg(0x2002), pitch, scale) : nullptr;
+                DumpTargetAfterDraw(color->texture.Get(), depth != nullptr ? depth->texture.Get() : nullptr, targetWidth, targetHeight);
+            }
         }
+        struct After { PhaseClock& phases; ~After() { phases.Mark(9); } } after{ phases };
         {
             static int probes = 0;
             static const int firstProbe = []() {
@@ -2021,6 +2182,9 @@ void D3D11Backend::Report()
         (unsigned long long)g_textureUploads.load());
     printf("        %.2f s compiling programs, %llu programs from the disk cache, %u compiling now\n", g_compileMilliseconds.load() / 1000.0,
         (unsigned long long)g_shadersFromDisk.load(), g_compilePending.load());
+    printf("        draw phases:");
+    for (int i = 0; i < PhaseCount; i++) printf(" %s %.2f s", PhaseNames[i], g_phaseNanoseconds[i].load() / 1e9);
+    printf("\n");
     printf("        %.2f s in draws, %.2f s in resolves, %.2f s in presents\n",
         g_drawNanoseconds.load() / 1e9, g_resolveNanoseconds.load() / 1e9, g_presentNanoseconds.load() / 1e9);
     if (!g_skipReasons.empty())

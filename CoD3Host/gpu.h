@@ -2,6 +2,7 @@
 
 // The GPU register file and command processor.
 
+#include <atomic>
 #include <cstdint>
 
 namespace Gpu
@@ -29,6 +30,13 @@ namespace Gpu
 
     // A copy of a range of registers, by index, taken under the lock once.
     void SnapshotRegisters(uint32_t firstIndex, uint32_t count, uint32_t* out);
+
+    // The register file itself, 0x10000 words indexed by register number,
+    // for a reader on the command thread that wants no copy; and how many
+    // writes the constants have had, by range: 0 the vertex floats, 1 the
+    // pixel floats, 2 the booleans and loops.
+    const std::atomic<uint32_t>* RegisterFile();
+    uint64_t ConstantWrites(uint32_t range);
 
     // How many interrupts the command stream has asked for since this was last
     // called, and clears the count. The command thread raises them.

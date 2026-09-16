@@ -46,8 +46,25 @@
 
 namespace
 {
-    std::mutex g_registerMutex;
-    std::map<uint32_t, uint32_t> g_registers;   // keyed by aperture byte address
+    // The register file: a flat array indexed by the register number, each
+    // an atomic word. It was a map keyed by address under a mutex, and the
+    // walk of it for every draw's snapshot was most of a draw's time; a
+    // thousand draws a frame made it the frame rate.
+    constexpr uint32_t RegisterCount = 0x10000;
+    std::atomic<uint32_t> g_registerFile[RegisterCount];
+
+    // How many times the constants have been written, in three ranges:
+    // the vertex program's floats, the pixel program's, and the booleans
+    // and loops. A draw uploads a range only when the count has moved.
+    std::atomic<uint64_t> g_constantWrites[3];
+    std::mutex g_registerMutex;   // for the trace map below, not the file
+
+    inline bool RegisterIndex(uint32_t address, uint32_t& index)
+    {
+        if (address < Gpu::ApertureBase || address >= Gpu::ApertureBase + RegisterCount * 4) return false;
+        index = (address - Gpu::ApertureBase) / 4;
+        return true;
+    }
 
     std::mutex g_statisticsMutex;
     Gpu::Statistics g_statistics;
@@ -108,6 +125,8 @@ namespace
     constexpr uint32_t OpImLoad          = 0x27;
     constexpr uint32_t OpImLoadImmediate = 0x2B;
     constexpr uint32_t OpSetConstant     = 0x2D;
+    constexpr uint32_t OpSetConstant2    = 0x55;
+    constexpr uint32_t OpSetShaderConstants = 0x56;
     constexpr uint32_t OpLoadAluConstant = 0x2F;
     constexpr uint32_t OpInvalidateState = 0x3B;
     constexpr uint32_t OpWaitRegMem      = 0x3C;
@@ -135,6 +154,8 @@ namespace
         case OpImLoad:          return "IM_LOAD";
         case OpImLoadImmediate: return "IM_LOAD_IMMEDIATE";
         case OpSetConstant:     return "SET_CONSTANT";
+        case OpSetConstant2:    return "SET_CONSTANT2";
+        case OpSetShaderConstants: return "SET_SHADER_CONSTANTS";
         case OpLoadAluConstant: return "LOAD_ALU_CONSTANT";
         case OpDrawIndx2:       return "DRAW_INDX_2";
         case OpInvalidateState: return "INVALIDATE_STATE";
@@ -563,18 +584,53 @@ namespace
     // values, then which block they belong in and where in it they start,
     // then how many. The films set their pixel shader's colour matrix this
     // way, where everything else in the title writes constants inline.
+    // Where a constant packet's offset and type word points: the ALU
+    // constants, the fetch constants, the booleans, the loops, or the
+    // registers themselves. The booleans and loops sit above the fetch
+    // constants at 0x4900 and 0x4908, where the programs read them.
+    bool ConstantIndex(uint32_t offsetAndType, uint32_t& index)
+    {
+        index = offsetAndType & 0x7FF;
+        switch ((offsetAndType >> 16) & 0xFF)
+        {
+        case 0:  index += 0x4000; return true;   // ALU constants
+        case 1:  index += 0x4800; return true;   // fetch constants
+        case 2:  index += 0x4900; return true;   // boolean constants
+        case 3:  index += 0x4908; return true;   // loop constants
+        case 4:  index += 0x2000; return true;   // registers
+        default: return false;
+        }
+    }
+
+    // COD3_TRACECONST=1: every constant packet twenty seconds into a level,
+    // a few thousand of them, with where it lands and its first words.
+    bool TraceConstants()
+    {
+        static const bool wanted = []() {
+            const char* text = getenv("COD3_TRACECONST");
+            return text != nullptr && text[0] != 0 && text[0] != '0';
+        }();
+        if (!wanted) return false;
+        static int64_t levelSince = 0;
+        const int64_t now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (levelSince == 0 && Kernel::Stats().filesOpened.load(std::memory_order_relaxed) >= 40) levelSince = now;
+        if (levelSince == 0 || now - levelSince < 14) return false;
+        static std::atomic<int> lines{ 0 };
+        return lines.fetch_add(1) < 30000;
+    }
+
     void LoadConstantsFromMemory(uint32_t address, uint32_t offsetAndType, uint32_t count)
     {
-        uint32_t index = offsetAndType & 0x7FF;
-        switch (offsetAndType >> 16)
-        {
-        case 0:  index += 0x4000; break;   // ALU constants
-        case 1:  index += 0x4800; break;   // fetch constants
-        case 2:  index += 0x2000; break;   // boolean constants
-        case 3:  index += 0x2200; break;   // loop constants
-        default: return;
-        }
+        uint32_t index;
+        if (!ConstantIndex(offsetAndType, index)) return;
         count &= 0xFFF;
+        if (TraceConstants())
+        {
+            const uint32_t source = Guest::PhysicalAlias(address & ~3u);
+            printf("const: load %08X -> %04X x%u:", offsetAndType, index, count);
+            for (uint32_t i = 0; i < count && i < 8; i++) { const uint32_t v = Guest::Read32(Guest::Base, source + i * 4); float f; memcpy(&f, &v, 4); printf(" %g", f); }
+            printf("\n");
+        }
         const uint32_t source = Guest::PhysicalAlias(address & ~3u);
         t_writeSource = "a LOAD_ALU_CONSTANT packet";
         for (uint32_t i = 0; i < count; i++)
@@ -702,33 +758,28 @@ uint32_t Mmio::Load32(uint32_t address)
         std::lock_guard<std::mutex> lock(g_readCountMutex);
         g_readCounts[address]++;
     }
-    std::lock_guard<std::mutex> lock(g_registerMutex);
-    auto found = g_registers.find(address);
-    return found != g_registers.end() ? found->second : 0;
+    uint32_t index;
+    return RegisterIndex(address, index) ? g_registerFile[index].load(std::memory_order_relaxed) : 0;
 }
 
 void Gpu::SnapshotRegisters(uint32_t firstIndex, uint32_t count, uint32_t* out)
 {
-    // One walk of the map under the lock, instead of one lock per register.
-    // The rasteriser reads registers for every pixel of every band on every
-    // core, and a mutex taken that often is what the cores spend their time
-    // on rather than the pixels.
-    memset(out, 0, size_t(count) * sizeof(uint32_t));
-    const uint32_t firstAddress = ApertureBase + firstIndex * 4;
-    const uint32_t endAddress = firstAddress + count * 4;
-
-    std::lock_guard<std::mutex> lock(g_registerMutex);
-    for (auto it = g_registers.lower_bound(firstAddress);
-         it != g_registers.end() && it->first < endAddress; ++it)
-        out[(it->first - firstAddress) / 4] = it->second;
+    // A copy of the range, word by word: the rasteriser reads registers for
+    // every pixel of every band on every core, and the Direct3D backend for
+    // every draw.
+    for (uint32_t i = 0; i < count; i++)
+        out[i] = firstIndex + i < RegisterCount ? g_registerFile[firstIndex + i].load(std::memory_order_relaxed) : 0;
 }
 
 uint32_t Gpu::ReadRegister(uint32_t address)
 {
-    std::lock_guard<std::mutex> lock(g_registerMutex);
-    auto found = g_registers.find(address);
-    return found != g_registers.end() ? found->second : 0;
+    uint32_t index;
+    return RegisterIndex(address, index) ? g_registerFile[index].load(std::memory_order_relaxed) : 0;
 }
+
+const std::atomic<uint32_t>* Gpu::RegisterFile() { return g_registerFile; }
+
+uint64_t Gpu::ConstantWrites(uint32_t range) { return range < 3 ? g_constantWrites[range].load(std::memory_order_relaxed) : 0; }
 
 namespace
 {
@@ -747,8 +798,12 @@ void Gpu::WriteRegister(uint32_t address, uint32_t value)
     uint32_t mirrorTo = 0;
     if (address == RegisterWritePointer && g_submitHook != nullptr) g_submitHook();
     {
-        std::lock_guard<std::mutex> lock(g_registerMutex);
-        g_registers[address] = value;
+        uint32_t fileIndex;
+        if (!RegisterIndex(address, fileIndex)) return;
+        g_registerFile[fileIndex].store(value, std::memory_order_relaxed);
+        if (fileIndex >= 0x4000 && fileIndex < 0x4400) g_constantWrites[0].fetch_add(1, std::memory_order_relaxed);
+        else if (fileIndex >= 0x4400 && fileIndex < 0x4800) g_constantWrites[1].fetch_add(1, std::memory_order_relaxed);
+        else if (fileIndex >= 0x4900 && fileIndex < 0x4930) g_constantWrites[2].fetch_add(1, std::memory_order_relaxed);
 
         // COD3_TRACEREG=1: every register written once a level is loading,
         // and how often, for the ones this runtime does not act on.
@@ -758,6 +813,7 @@ void Gpu::WriteRegister(uint32_t address, uint32_t value)
         }();
         if (traceRegisters && Kernel::Stats().filesOpened.load(std::memory_order_relaxed) >= 40)
         {
+            std::lock_guard<std::mutex> lock(g_registerMutex);
             const uint32_t index = (address - ApertureBase) / 4;
             if (index < 0x2400 && (index < 0x4000 || index >= 0x4800))
                 g_registerWrites[index]++;
@@ -810,8 +866,8 @@ void Gpu::WriteRegister(uint32_t address, uint32_t value)
         if (index >= 0x578 && index < 0x580)
         {
             const uint32_t which = index - 0x578;
-            const uint32_t mask = g_registers[ApertureBase + 0x1DC * 4];
-            const uint32_t block = g_registers[ApertureBase + 0x1DD * 4];
+            const uint32_t mask = g_registerFile[0x1DC].load(std::memory_order_relaxed);
+            const uint32_t block = g_registerFile[0x1DD].load(std::memory_order_relaxed);
             if (((mask >> which) & 1) != 0 && block != 0)
                 mirrorTo = (block & ~3u) + which * 4;
         }
@@ -1004,11 +1060,13 @@ uint32_t Gpu::ProcessRing(uint32_t ringBase, uint32_t ringSizeDwords,
             {
             case OpDrawIndx:
                 local.draws++;
+                if (TraceConstants()) printf("const: draw indexed\n");
                 DecodeDraw(ReadDword(cursor + 2), ReadDword(cursor + 3),
                            ReadDword(cursor + 4));
                 break;
             case OpDrawIndx2:
                 local.draws++;
+                if (TraceConstants()) printf("const: draw\n");
                 DecodeDraw(ReadDword(cursor + 1));
                 break;
             case OpImLoadImmediate:
@@ -1022,6 +1080,37 @@ uint32_t Gpu::ProcessRing(uint32_t ringBase, uint32_t ringSizeDwords,
                 LoadConstantsFromMemory(ReadDword(cursor + 1), ReadDword(cursor + 2),
                                         ReadDword(cursor + 3));
                 break;
+            case OpSetConstant:
+            {
+                // The constants in the packet itself, after the offset and
+                // type word: two and a half million of these a run went by
+                // uncounted, and the level's geometry was projected through
+                // whatever the constants held from before.
+                uint32_t index;
+                if (ConstantIndex(ReadDword(cursor + 1), index))
+                {
+                    if (TraceConstants())
+                    {
+                        printf("const: set %08X -> %04X x%u:", ReadDword(cursor + 1), index, count - 1);
+                        for (uint32_t i = 0; i + 1 < count && i < 8; i++) { const uint32_t v = ReadDword(cursor + 2 + i); float f; memcpy(&f, &v, 4); printf(" %g", f); }
+                        printf("\n");
+                    }
+                    t_writeSource = "a SET_CONSTANT packet";
+                    for (uint32_t i = 0; i + 1 < count; i++)
+                        WriteRegister(ApertureBase + (index + i) * 4, ReadDword(cursor + 2 + i));
+                }
+                break;
+            }
+            case OpSetConstant2:
+            case OpSetShaderConstants:
+            {
+                // The same with the register index given whole.
+                const uint32_t index = ReadDword(cursor + 1) & 0xFFFF;
+                t_writeSource = "a SET_CONSTANT2 packet";
+                for (uint32_t i = 0; i + 1 < count; i++)
+                    WriteRegister(ApertureBase + (index + i) * 4, ReadDword(cursor + 2 + i));
+                break;
+            }
             case OpEventWriteShd:
                 WriteFence(ReadDword(cursor + 1), ReadDword(cursor + 2),
                            ReadDword(cursor + 3));
@@ -1371,6 +1460,7 @@ namespace
                 else if (opcode == OpDrawIndx && cursor + 2 < dwords)
                 {
                     local.draws++;
+                    if (TraceConstants()) printf("const: draw indexed\n");
                     DecodeDraw(
                         Guest::Read32(Guest::Base, base + (cursor + 2) * 4),
                         cursor + 3 < dwords
@@ -1381,6 +1471,7 @@ namespace
                 else if (opcode == OpDrawIndx2 && cursor + 1 < dwords)
                 {
                     local.draws++;
+                    if (TraceConstants()) printf("const: draw\n");
                     const uint32_t w1 = Guest::Read32(Guest::Base, base + (cursor + 1) * 4);
                     DumpDraw("DRAW_INDX_2", header, w1,
                         cursor + 2 < dwords ? Guest::Read32(Guest::Base, base + (cursor + 2) * 4) : 0);
@@ -1404,6 +1495,35 @@ namespace
                         Guest::Read32(Guest::Base, base + (cursor + 1) * 4),
                         Guest::Read32(Guest::Base, base + (cursor + 2) * 4),
                         Guest::Read32(Guest::Base, base + (cursor + 3) * 4));
+                }
+                else if (opcode == OpSetConstant && cursor + 1 < dwords)
+                {
+                    // Constants in the packet: nearly all of the level's are
+                    // set this way, and nearly all of the stream is in these
+                    // buffers, so this is where the projection matrices of
+                    // the level's geometry arrive.
+                    const uint32_t count = ((header >> 16) & 0x3FFF) + 1;
+                    uint32_t index;
+                    if (ConstantIndex(Guest::Read32(Guest::Base, base + (cursor + 1) * 4), index))
+                    {
+                        if (TraceConstants())
+                        {
+                            printf("const: set %08X -> %04X x%u:", Guest::Read32(Guest::Base, base + (cursor + 1) * 4), index, count - 1);
+                            for (uint32_t i = 0; i + 1 < count && i < 8; i++) { const uint32_t v = Guest::Read32(Guest::Base, base + (cursor + 2 + i) * 4); float f; memcpy(&f, &v, 4); printf(" %g", f); }
+                            printf("\n");
+                        }
+                        t_writeSource = "a SET_CONSTANT packet";
+                        for (uint32_t i = 0; i + 1 < count && cursor + 2 + i < dwords; i++)
+                            Gpu::WriteRegister(Gpu::ApertureBase + (index + i) * 4, Guest::Read32(Guest::Base, base + (cursor + 2 + i) * 4));
+                    }
+                }
+                else if ((opcode == OpSetConstant2 || opcode == OpSetShaderConstants) && cursor + 1 < dwords)
+                {
+                    const uint32_t count = ((header >> 16) & 0x3FFF) + 1;
+                    const uint32_t index = Guest::Read32(Guest::Base, base + (cursor + 1) * 4) & 0xFFFF;
+                    t_writeSource = "a SET_CONSTANT2 packet";
+                    for (uint32_t i = 0; i + 1 < count && cursor + 2 + i < dwords; i++)
+                        Gpu::WriteRegister(Gpu::ApertureBase + (index + i) * 4, Guest::Read32(Guest::Base, base + (cursor + 2 + i) * 4));
                 }
                 else if (opcode == OpWaitRegMem && cursor + 4 < dwords)
                 {

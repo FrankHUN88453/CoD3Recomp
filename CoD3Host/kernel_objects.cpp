@@ -475,8 +475,14 @@ PPC_FUNC(__imp__NtPulseEvent)
     // exactly where a run goes quiet with its workers asleep.
     {
         int waiting = 0;
-        for (const auto& entry : g_blocked)
-            if (entry.second.object == ctx.r3.u32) waiting++;
+        {
+            // Under its own lock: the waiters add and remove themselves
+            // from other threads, and a walk over a map being changed
+            // ended in a read of nowhere.
+            std::lock_guard<std::mutex> traffic(g_trafficMutex);
+            for (const auto& entry : g_blocked)
+                if (entry.second.object == ctx.r3.u32) waiting++;
+        }
         static std::atomic<int> announced{ 0 };
         if (announced.fetch_add(1) < 120)
         {
