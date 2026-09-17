@@ -192,7 +192,7 @@ namespace
             switch (vectorOpcode)
             {
             case 0:  vector = Format("(%s + %s)", a.c_str(), b.c_str()); break;
-            case 1:  vector = Format("(%s * %s)", a.c_str(), b.c_str()); break;
+            case 1:  vector = Format("mulL(%s, %s)", a.c_str(), b.c_str()); break;
             case 2:  vector = Format("max(%s, %s)", a.c_str(), b.c_str()); break;
             case 3:  vector = Format("min(%s, %s)", a.c_str(), b.c_str()); break;
             case 4:  vector = Format("select4(%s == %s)", a.c_str(), b.c_str()); break;
@@ -202,16 +202,16 @@ namespace
             case 8:  vector = Format("frac(%s)", a.c_str()); break;
             case 9:  vector = Format("trunc(%s)", a.c_str()); break;
             case 10: vector = Format("floor(%s)", a.c_str()); break;
-            case 11: vector = Format("(%s * %s + %s)", a.c_str(), b.c_str(), c.c_str()); break;
+            case 11: vector = Format("(mulL(%s, %s) + %s)", a.c_str(), b.c_str(), c.c_str()); break;
             // The conditional moves are written as a blend by a mask rather
             // than a component wise ternary: the host's compiler has an
             // internal error on the ternary when an operand is negated.
             case 12: vector = Format("blend4(select4(%s == 0.0), %s, %s)", a.c_str(), b.c_str(), c.c_str()); break;
             case 13: vector = Format("blend4(select4(%s >= 0.0), %s, %s)", a.c_str(), b.c_str(), c.c_str()); break;
             case 14: vector = Format("blend4(select4(%s > 0.0), %s, %s)", a.c_str(), b.c_str(), c.c_str()); break;
-            case 15: vector = Format("dot(%s, %s).xxxx", a.c_str(), b.c_str()); break;
-            case 16: vector = Format("dot((%s).xyz, (%s).xyz).xxxx", a.c_str(), b.c_str()); break;
-            case 17: vector = Format("(dot((%s).xy, (%s).xy) + (%s).x).xxxx", a.c_str(), b.c_str(), c.c_str()); break;
+            case 15: vector = Format("dot(mulL(%s, %s), float4(1.0, 1.0, 1.0, 1.0)).xxxx", a.c_str(), b.c_str()); break;
+            case 16: vector = Format("dot(mulL(%s, %s).xyz, float3(1.0, 1.0, 1.0)).xxxx", a.c_str(), b.c_str()); break;
+            case 17: vector = Format("(dot(mulL(%s, %s).xy, float2(1.0, 1.0)) + (%s).x).xxxx", a.c_str(), b.c_str(), c.c_str()); break;
             case 18: vector = Format("cubeMap(%s, %s)", a.c_str(), b.c_str()); break;
             case 19: vector = Format("max4(%s).xxxx", a.c_str()); break;
             case 20: vector = Format("((%s).w == 0.0 ? 0.0 : (%s).x + 1.0).xxxx", a.c_str(), b.c_str()); vectorSetsPredicate = true;
@@ -256,8 +256,8 @@ namespace
             {
             case 0:  scalar = Format("(%s + %s)", sa.c_str(), sb.c_str()); break;
             case 1:  scalar = Format("(%s + ps)", s1.c_str()); break;
-            case 2:  scalar = Format("(%s * %s)", sa.c_str(), sb.c_str()); break;
-            case 3:  scalar = Format("(%s * ps)", s1.c_str()); break;
+            case 2:  scalar = Format("mulL1(%s, %s)", sa.c_str(), sb.c_str()); break;
+            case 3:  scalar = Format("mulL1(%s, ps)", s1.c_str()); break;
             case 4:  scalar = Format("((ps == -3.402823466e38 || isnan(ps) || isnan(%s) || %s <= 0.0) ? -3.402823466e38 : %s * ps)",
                                      sb.c_str(), sb.c_str(), sa.c_str()); break;
             case 5:  scalar = Format("max(%s, %s)", sa.c_str(), sb.c_str()); break;
@@ -310,7 +310,8 @@ namespace
                 if (absoluteConstants) { constant = "abs(" + constant + ")"; other = "abs(" + other + ")"; }
                 if (negate3) { constant = "(-" + constant + ")"; other = "(-" + other + ")"; }
                 const char* op = scalarOpcode < 44 ? "*" : scalarOpcode < 46 ? "+" : "-";
-                scalar = Format("(%s %s %s)", constant.c_str(), op, other.c_str());
+                if (scalarOpcode < 44) scalar = Format("mulL1(%s, %s)", constant.c_str(), other.c_str());
+                else scalar = Format("(%s %s %s)", constant.c_str(), op, other.c_str());
                 break;
             }
             case 48: scalar = Format("sin(%s)", s1.c_str()); break;
@@ -867,6 +868,13 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
     hlsl += "float max4(float4 v) { return max(max(v.x, v.y), max(v.z, v.w)); }\n";
     hlsl += "float4 blend4(float4 mask, float4 whenSet, float4 whenClear) { return whenSet * mask + whenClear * (1.0 - mask); }\n";
     hlsl += "float blend1(bool set, float whenSet, float whenClear) { float mask = set ? 1.0 : 0.0; return whenSet * mask + whenClear * (1.0 - mask); }\n";
+    // The console multiplies the Direct3D 9 way: a zero times anything is
+    // zero, infinity and NaN included. A title's normalisation of a zero
+    // vector, rsq of zero times the components, comes out zero there and
+    // would come out NaN here, and a NaN position is a triangle across the
+    // whole screen on some drivers. (Xenia keeps the same rule.)
+    hlsl += "float4 mulL(float4 a, float4 b) { float4 r = a * b; return (a == 0.0 || b == 0.0) ? float4(0.0, 0.0, 0.0, 0.0) : r; }\n";
+    hlsl += "float mulL1(float a, float b) { float r = a * b; return (a == 0.0 || b == 0.0) ? 0.0 : r; }\n";
     // A sign chosen by a condition is flipped on the bits: a select between
     // x and -x is a negated select operand to the host's compiler, which it
     // then rejects in its own output.

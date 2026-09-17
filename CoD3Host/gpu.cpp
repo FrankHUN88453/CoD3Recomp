@@ -347,6 +347,26 @@ namespace
         }
         DumpDrawState(primitive);
 
+        {
+            static const char* const wantedProgram = getenv("COD3_TRACEDRAWVS");
+            // COD3_TRACEDRAWVSALL=1: one short line per draw of that program
+            // instead, with the swap it is in and a few constants, for
+            // finding the draw whose constants are not the others'.
+            static const bool everyDraw = getenv("COD3_TRACEDRAWVSALL") != nullptr;
+            if (wantedProgram != nullptr && everyDraw && Kernel::Stats().filesOpened.load(std::memory_order_relaxed) >= 40)
+            {
+                char name[24];
+                snprintf(name, sizeof(name), "%016llx", (unsigned long long)Shaders::LastHash(false));
+                if (strncmp(name, wantedProgram, strlen(wantedProgram)) == 0)
+                {
+                    auto f = [](uint32_t index) { const uint32_t bits = Gpu::ReadRegister(Gpu::ApertureBase + (0x4000 + index) * 4); float v; memcpy(&v, &bits, 4); return v; };
+                    printf("drawvs: swap %llu count %u c12 %g %g %g %g c15 %g %g %g %g c84 %g %g %g %g c85 %g %g c255 %g %g %g %g\n",
+                        (unsigned long long)Kernel::Stats().swapsReached.load(std::memory_order_relaxed), initiator >> 16,
+                        f(48), f(49), f(50), f(51), f(60), f(61), f(62), f(63), f(336), f(337), f(338), f(339), f(340), f(341), f(1020), f(1021), f(1022), f(1023));
+                }
+            }
+        }
+
         // COD3_TRACEDRAWS=1: every draw in a level, with the initiator, the
         // mode, the programs and the depth control, a few thousand of them.
         if (TraceConstants())

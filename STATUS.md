@@ -38,10 +38,26 @@ What it took, beyond what the sections below describe, in the order found:
   the GPU was still drawing from, and the cutscene's letterbox bar flickered.
 - **Saved games** are folders under `saves/content`; the storage device the
   title asks for is that folder, mounted under the root name the title gives.
+- **The fence counter is the fences' to write.** The title's render thread
+  waits on the first word of its write-back block until it equals the number
+  of the last command buffer it submitted; every indirect buffer ends with a
+  fence that writes its number there. From the days before the fences were
+  carried out, the command thread was still writing the submitted number there
+  itself every millisecond, which told the title the GPU had finished
+  everything the moment it was handed over. The title then wrote the next
+  frame's vertices and constants over memory the command thread had not read
+  yet: a triangle across the whole screen in about one frame in twelve, found
+  by dumping every third frame of an eighty second run and scoring each for
+  flat area (`scripts/flatframes.py`). `COD3_FENCELIE=1` brings it back for
+  comparison.
+- **The console multiplies the Direct3D 9 way:** zero times anything is zero,
+  infinity and NaN included, and the translation does the same (`mulL`).
 
 Still open: the intro films (WMV) are skipped; the other fourteen levels are
 not recompiled; the mission title card at the start of a level is not shown;
-the software rasteriser (`COD3_GPU=soft`) has regressed to black.
+the software rasteriser (`COD3_GPU=soft`) has regressed to black, and so has
+the Direct3D 11 backend's path for devices without constant buffer offsetting
+(`COD3_D3DNORING=1` shows it: the HUD alone on black).
 
 The sections that follow are the history of getting here, oldest first.
 

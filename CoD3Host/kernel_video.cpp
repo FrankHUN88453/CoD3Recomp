@@ -321,12 +321,22 @@ namespace
                 }
             }
 
-            // What the title waits on is not that register. It spins comparing
-            // its own write pointer at 0x2A1C against whatever is at the
-            // address in 0x2A10, and a GPU that has caught up publishes exactly
-            // the write pointer. Publishing anything past it makes the title's
-            // unsigned distance arithmetic wrap and it spins forever.
-            const uint32_t context = video.interruptContext.load();
+            // The word the title's render thread spins on is the first of the
+            // block its device points at (0x2A10), against the number it keeps
+            // at 0x2A1C. Before the fences were carried out this loop wrote
+            // that number there itself, so the wait would end. The word is the
+            // title's fence counter: every indirect buffer ends with a fence
+            // that writes its sequence number there, and 0x2A1C is the last
+            // one submitted. Writing the submitted number there from here,
+            // every millisecond, told the title the GPU had finished
+            // everything the moment it was submitted, and the title, trusting
+            // it, wrote the next frame's vertices and constants over memory
+            // this thread had not read yet: every twelfth frame or so, a
+            // triangle across the whole screen, and once in a while a soldier
+            // in pieces. The fences say it themselves now, in order, and this
+            // stays only behind COD3_FENCELIE=1 for comparison.
+            static const bool fenceLie = getenv("COD3_FENCELIE") != nullptr;
+            const uint32_t context = fenceLie ? video.interruptContext.load() : 0;
             if (context != 0)
             {
                 const uint32_t readPointerAt =
@@ -622,6 +632,40 @@ namespace
                     (unsigned long long)gpu.draws);
                 swapsBefore = swaps;
                 fflush(stdout);
+
+                // COD3_SCANMEM=text: every ten seconds, where that text is
+                // in the guest's memory, with what is around it: for finding
+                // the title's own data by a string it holds.
+                static const char* const scanFor = getenv("COD3_SCANMEM");
+                if (scanFor != nullptr && scanFor[0] != 0 && (frame / 60) % 10 == 5)
+                {
+                    const size_t needle = strlen(scanFor);
+                    int found = 0;
+                    uint64_t address = 0;
+                    while (address < 0x100000000ull && found < 20)
+                    {
+                        MEMORY_BASIC_INFORMATION info{};
+                        if (VirtualQuery(Guest::Base + address, &info, sizeof(info)) == 0) break;
+                        const uint64_t regionEnd = uint64_t(static_cast<uint8_t*>(info.BaseAddress) - Guest::Base) + info.RegionSize;
+                        if ((info.State & MEM_COMMIT) != 0 && (info.Protect & (PAGE_READWRITE | PAGE_READONLY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)) != 0)
+                        {
+                            const uint8_t* at = static_cast<const uint8_t*>(info.BaseAddress);
+                            for (size_t i = 0; i + needle <= info.RegionSize && found < 20; i++)
+                            {
+                                if (at[i] != uint8_t(scanFor[0]) || memcmp(at + i, scanFor, needle) != 0) continue;
+                                const uint64_t guest = uint64_t(at + i - Guest::Base);
+                                std::string around;
+                                for (size_t k = (i >= 48 ? i - 48 : 0); k < i + needle + 80 && k < info.RegionSize; k++)
+                                    around += (at[k] >= 32 && at[k] < 127) ? char(at[k]) : (at[k] == 0 ? '|' : '.');
+                                printf("scan: \"%s\" at 0x%08llX: %s\n", scanFor, (unsigned long long)guest, around.c_str());
+                                found++;
+                            }
+                        }
+                        address = regionEnd;
+                    }
+                    if (found == 0) printf("scan: \"%s\" is nowhere in guest memory\n", scanFor);
+                    fflush(stdout);
+                }
             }
 
             std::this_thread::sleep_until(nextFrame);

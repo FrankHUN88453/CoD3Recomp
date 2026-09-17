@@ -444,19 +444,26 @@ namespace
         {
             entry.translation = XenosHlsl::Translate(words, false);
             entry.hash = Hash(entry.translation.hlsl);
-            // COD3_D3DSKIPVS=hex,hex: the vertex programs whose hash starts so.
+            // COD3_D3DSKIPVS=hex,hex: the vertex programs whose hash starts
+            // so, the HLSL's or the microcode's (the one the traces print,
+            // which a change to the translator does not move).
             static const char* const skips = getenv("COD3_D3DSKIPVS");
             if (skips != nullptr)
             {
-                char name[24];
+                uint64_t microcode = 1469598103934665603ull;
+                for (uint32_t word : words)
+                    for (int shift = 24; shift >= 0; shift -= 8) { microcode ^= uint8_t(word >> shift); microcode *= 1099511628211ull; }
+                char name[24], micro[24];
                 snprintf(name, sizeof(name), "%016llx", (unsigned long long)entry.hash);
+                snprintf(micro, sizeof(micro), "%016llx", (unsigned long long)microcode);
                 for (const char* at = skips; *at != 0;)
                 {
                     const char* end = strchr(at, ',');
                     const size_t length = end != nullptr ? size_t(end - at) : strlen(at);
-                    if (length > 0 && strncmp(name, at, length) == 0) entry.skipped = true;
+                    if (length > 0 && (strncmp(name, at, length) == 0 || strncmp(micro, at, length) == 0)) entry.skipped = true;
                     at = end != nullptr ? end + 1 : at + length;
                 }
+                if (entry.skipped) printf("d3d11: vertex program %s (microcode %s) is skipped\n", name, micro);
             }
             if (!entry.translation.ok)
             {
@@ -600,7 +607,10 @@ namespace
         if (g_constantRingTried) return g_constantRingUsable;
         g_constantRingTried = true;
         D3D11_FEATURE_DATA_D3D11_OPTIONS options{};
-        if (FAILED(g_device->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS, &options, sizeof(options))) ||
+        // COD3_D3DNORING=1: the constants updated in place instead, for
+        // telling the ring's faults from the rest.
+        if (getenv("COD3_D3DNORING") != nullptr ||
+            FAILED(g_device->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS, &options, sizeof(options))) ||
             !options.ConstantBufferOffsetting || FAILED(g_context.As(&g_ringContext)))
         {
             printf("d3d11: constant buffer offsetting is not available; constants are updated in place\n");
@@ -619,11 +629,27 @@ namespace
 
     // Appends bytes to the ring and says where they start, in bytes; the
     // ring is discarded and started over when it is full.
+    // Room for one draw's appends, all of them, before any is made: a wrap
+    // discards the buffer, and every offset remembered from before it then
+    // names whatever the new one holds. The wrap used to happen inside a
+    // draw's appends, so the other stage's file, not dirty and not
+    // re-appended, stayed bound to where it had been in the old buffer.
+    // Returns true when it wrapped, and then everything remembered is stale.
+    bool RingReserve(uint32_t bytes)
+    {
+        const uint32_t aligned = (bytes + 255) & ~255u;
+        if (g_constantRingOffset != 0 && g_constantRingOffset + aligned <= ConstantRingBytes) return false;
+        g_constantRingOffset = 0;
+        g_ringFloatAt[0] = g_ringFloatAt[1] = 0xFFFFFFFFu;
+        g_ringDrawAt = 0xFFFFFFFFu;
+        return true;
+    }
+
     uint32_t RingAppend(const void* data, uint32_t bytes)
     {
         const uint32_t aligned = (bytes + 255) & ~255u;
         D3D11_MAP mode = D3D11_MAP_WRITE_NO_OVERWRITE;
-        if (g_constantRingOffset + aligned > ConstantRingBytes) { g_constantRingOffset = 0; mode = D3D11_MAP_WRITE_DISCARD; }
+        if (g_constantRingOffset + aligned > ConstantRingBytes) { g_constantRingOffset = 0; }
         if (g_constantRingOffset == 0) mode = D3D11_MAP_WRITE_DISCARD;
         D3D11_MAPPED_SUBRESOURCE mapped{};
         if (FAILED(g_context->Map(g_constantRing.Get(), 0, mode, 0, &mapped))) return 0xFFFFFFFFu;
@@ -1122,7 +1148,10 @@ namespace
                 printf("d3d11: buffer %08X (%u bytes) changed at swap %llu%s\n", physical, bytes,
                     (unsigned long long)g_swaps.load(std::memory_order_relaxed), entry.buffer ? "" : " (first)");
         }
-        if (entry.buffer && entry.bytes >= bytes && entry.fingerprint == fingerprint)
+        // COD3_D3DFRESHVB=1: every buffer uploaded again for every draw, no
+        // fingerprint trusted, for telling a stale buffer from the rest.
+        static const bool fresh = getenv("COD3_D3DFRESHVB") != nullptr;
+        if (!fresh && entry.buffer && entry.bytes >= bytes && entry.fingerprint == fingerprint)
             return entry.resource.Get();
 
         std::vector<uint32_t> words((bytes + 3) / 4);
@@ -1841,10 +1870,16 @@ namespace
             }
             const std::atomic<uint32_t>* file = Gpu::RegisterFile();
             uint32_t words[1024];
+            // The ring's room for this draw, first: both files and the
+            // draw's own block. After a wrap nothing remembered is valid, so
+            // both files go up whether or not they changed.
+            const bool wrapped = ConstantRing() && RingReserve(4096 * 2 + 2048);
             for (uint32_t range = 0; range < 3; range++)
             {
                 uint32_t spanFirst, spanEnd;
-                if (!Gpu::TakeConstantSpan(range, spanFirst, spanEnd)) continue;
+                const bool dirty = Gpu::TakeConstantSpan(range, spanFirst, spanEnd);
+                if (!dirty && !(wrapped && range < 2)) continue;
+                if (!dirty) { spanFirst = 0; spanEnd = 1024; }
                 const uint32_t first = range == 0 ? 0x4000 : range == 1 ? 0x4400 : 0x4900;
                 const uint32_t count = range == 2 ? 40 : 1024;
                 if (range < 2 && ConstantRing())
@@ -1864,7 +1899,11 @@ namespace
                     spanEnd = std::min((spanEnd + 3) & ~3u, count);
                     for (uint32_t i = spanFirst; i < spanEnd; i++) words[i - spanFirst] = file[first + i].load(std::memory_order_relaxed);
                     D3D11_BOX box{ spanFirst * 4, 0, 0, spanEnd * 4, 1, 1 };
-                    context1->UpdateSubresource1(buffer, 0, &box, words, 0, 0, D3D11_COPY_NO_OVERWRITE);
+                    // No flag: NO_OVERWRITE promised the GPU was not reading
+                    // the span, and the previous draw was, so its constants
+                    // changed under it (COD3_D3DNORING=1 showed the picture
+                    // in random colours). The runtime keeps the copies apart.
+                    context1->UpdateSubresource1(buffer, 0, &box, words, 0, 0, 0);
                 }
                 else
                 {
