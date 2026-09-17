@@ -106,6 +106,23 @@ if ($Diagnostics) {
     Write-Host '    clean: every instruction translated' -ForegroundColor Green
 }
 
+# A branch the recompiler could not place lands as "// ERROR <address>" and a
+# return: the function it is in is cut short (see the functions list in the
+# config). None is the goal; each one is a function doing less than it should.
+$Errors = (Select-String -Path "$PpcDir\ppc_recomp.*.cpp" -Pattern '// ERROR [0-9A-F]+').Count
+if ($Errors -gt 0) {
+    Write-Host "    $Errors branches out of their function (grep '// ERROR' in $PpcDir); extend those functions in the config" -ForegroundColor Yellow
+}
+
+# --- 3b. The seams the recompiler cannot express -------------------------
+# The engine's script threads resume in the middle of a function; the host
+# runs them on fibers, and patch_recomp.py wires the resume point into
+# sub_824A6150. Without it the script scheduler spins forever at the first
+# level, so this is not optional.
+Write-Host '==> Patching the coroutine seam' -ForegroundColor Cyan
+python (Join-Path $Root 'scripts\patch_recomp.py') main
+if ($LASTEXITCODE -ne 0) { throw 'patch_recomp.py main failed' }
+
 # --- 4. Compile ------------------------------------------------------------
 if ($BuildLib -or $BuildHost) {
     # The kernel stubs are generated from the import list, so a XEX with

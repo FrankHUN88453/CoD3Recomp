@@ -52,10 +52,22 @@ What it took, beyond what the sections below describe, in the order found:
   comparison.
 - **The console multiplies the Direct3D 9 way:** zero times anything is zero,
   infinity and NaN included, and the translation does the same (`mulL`).
+- **The mission title card** ("THE BLOODIEST BATTLE OF THE WAR / SAINT LO,
+  FRANCE / July 19, 1944 / 1800 HRS") is a front-end panel
+  (`SP_chapter_title_screen.PANEL`, four text lines in the `garamond` font)
+  whose lines the level script sets through hud elements of types eleven to
+  fourteen. The setter, `sub_824C0CD8`, is a four-case switch whose cases all
+  branch to a shared tail after the last case; the analyser had bounded the
+  function at that tail, the recompiler marked each branch `// ERROR` and
+  returned instead, and the four lines never reached the panel. Extending the
+  function in the config (with three others cut the same way) drew the card.
+  `grep '// ERROR' CoD3RecompLib/ppc/*.cpp` after a recompile finds any more;
+  `recompile.ps1` counts them. The level DLL still has 922 of them in a few
+  large functions (0x890B91C0.., 0x89195508..); nothing seen depends on them
+  yet.
 
 Still open: the intro films (WMV) are skipped; the other fourteen levels are
-not recompiled; the mission title card at the start of a level is not shown;
-the software rasteriser (`COD3_GPU=soft`) has regressed to black, and so has
+not recompiled; the software rasteriser (`COD3_GPU=soft`) has regressed to black, and so has
 the Direct3D 11 backend's path for devices without constant buffer offsetting
 (`COD3_D3DNORING=1` shows it: the HUD alone on black).
 

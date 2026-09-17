@@ -35,6 +35,7 @@ add_executable(CoD3 WIN32
     "kernel_video.cpp"
     "kernel_audio.cpp"
     "kernel_misc.cpp"
+    "title_trace.cpp"
     "pool_trace.cpp"
     "timeline.cpp"
     "d3d11_backend.cpp"

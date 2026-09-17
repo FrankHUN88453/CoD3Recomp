@@ -56,6 +56,14 @@ setjmp_address  = 0x82351CC0
 # the recompiler's own out-of-range switch reports, then bounded by the
 # end of each case body (its blr / unconditional branch). All starts were verified
 # to follow padding or a terminator instruction.
+#
+# That bound is wrong when the case bodies end in a branch to a shared
+# tail that lies after the last case: the tail is then cut off, the
+# recompiler marks each branch to it "ERROR" and returns instead, and the
+# function does nothing. The chapter title screen's text setter was one
+# (0x824C0CD8): the level's four lines were set and never reached the
+# panel. Four entries below are extended to the blr of their tails; grep
+# the generated code for "// ERROR" after a recompile to find any more.
 functions = [
     { address = 0x820C76C0, size = 0x9C }, # was 0x24, 13 cases
     { address = 0x820CED30, size = 0xB0 }, # was 0x20, 4 cases
@@ -79,7 +87,7 @@ functions = [
     { address = 0x82194F88, size = 0x2F4 }, # was 0x24, 105 cases
     { address = 0x821D4078, size = 0x110 }, # was 0x2C, 12 cases
     { address = 0x821D42D0, size = 0xC8 }, # was 0x20, 14 cases
-    { address = 0x821D43A0, size = 0x49C }, # was 0xE0, 179 cases
+    { address = 0x821D43A0, size = 0x4D8 }, # was 0xE0, 179 cases; the compares after the table run to 0x821D4878
     { address = 0x821D4920, size = 0x364 }, # was 0x3C, 177 cases
     { address = 0x821FBE00, size = 0x228 }, # was 0x20, 95 cases
     { address = 0x8220CFE8, size = 0xC8 }, # was 0x20, 12 cases
@@ -105,10 +113,12 @@ functions = [
     { address = 0x824BDDE8, size = 0x70 }, # was 0x28, 4 cases
     { address = 0x824BDE58, size = 0xCC }, # was 0x28, 4 cases
     { address = 0x824BDF28, size = 0xBC }, # was 0x28, 4 cases
-    { address = 0x824BE118, size = 0x168 }, # was 0x30, 64 cases
-    { address = 0x824C0CD8, size = 0x58 }, # was 0x28, 4 cases
+    { address = 0x824BE118, size = 0x1D8 }, # was 0x30, 64 cases; the button mask compares after the table run to 0x824BE2F0
+    { address = 0x824C0CD8, size = 0x88 }, # was 0x28, 4 cases; the cases share a tail at 0x824C0D34 (the chapter title text)
     { address = 0x824C3460, size = 0x74 }, # was 0x24, 6 cases
-    { address = 0x824C40B8, size = 0xC8 }, # was 0x3C, 5 cases
+    { address = 0x824C40B8, size = 0x100 }, # was 0x3C, 5 cases; the last case continues past 0x824C4180 to the blr at 0x824C41B4
+    { address = 0x824C4180, size = 0x34 },  # its own function as well (a case of the one above branches into its tail); kept for whoever calls it
+    { address = 0x824C41B4, size = 0x4 },   # an empty method, likewise inside the range above
     { address = 0x824C5150, size = 0xF4 }, # was 0x3C, 29 cases
     { address = 0x824C8618, size = 0x2D8 }, # was 0x44, 12 cases
     { address = 0x825386D8, size = 0x198 }, # was 0x5C, 21 cases

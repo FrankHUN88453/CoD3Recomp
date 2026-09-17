@@ -2546,6 +2546,9 @@ namespace
         // COD3_FRAMEDUMP_KEEP=N cycles through N files rather than forty.
         static const int keep = []() { const char* t = getenv("COD3_FRAMEDUMP_KEEP"); const int v = t ? int(strtol(t, nullptr, 10)) : 40; return v > 0 ? v : 40; }();
         snprintf(name, sizeof(name), "%s-%03d.bmp", path, (counter / every) % keep);
+        // Which of the title's swaps the file shows, for finding a frame in
+        // the files and then logging its draws with COD3_D3DFRAME=N.
+        printf("d3d11: frame dump %03d at present %d, swap %llu\n", (counter / every) % keep, counter - 1, (unsigned long long)g_swaps.load(std::memory_order_relaxed));
         BITMAPFILEHEADER file{};
         BITMAPINFOHEADER info{};
         info.biSize = sizeof(info);

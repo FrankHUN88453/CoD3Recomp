@@ -124,7 +124,7 @@ CoD3.exe --help
 | `CoD3Host/d3d11_backend.cpp` | The picture through Direct3D 11 |
 | `CoD3Host/overlay.cpp`, `settings.cpp` | The settings menu (Dear ImGui) and its file |
 | `tools/CoD3Scan/` | XEX analysis: finds required addresses, repairs function boundaries, lists imports |
-| `scripts/recompile.ps1` | The whole pipeline |
+| `scripts/recompile.ps1` | The whole pipeline, the coroutine patch (`scripts/patch_recomp.py main`) included; running XenonRecomp by hand needs that patch afterwards or the first level's scripts spin forever |
 | `scripts/verify.ps1` | Checks the recompiler against Xenia's instruction tests |
 | `tools/PpcAsm/` | A PowerPC assembler, built from the project's own opcode tables |
 | `CoD3Host/gpu.cpp` | The GPU register aperture and the PM4 command processor |

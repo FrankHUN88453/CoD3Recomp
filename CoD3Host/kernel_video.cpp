@@ -666,6 +666,34 @@ namespace
                     if (found == 0) printf("scan: \"%s\" is nowhere in guest memory\n", scanFor);
                     fflush(stdout);
                 }
+                // COD3_DUMPMEM=hexaddress,bytes,second: that much of guest
+                // memory, once, that many seconds in (five by default), as
+                // words and text.
+                static const char* const dumpMem = getenv("COD3_DUMPMEM");
+                static bool dumped = false;
+                static const long dumpSecond = []() {
+                    const char* t = getenv("COD3_DUMPMEM"); if (t == nullptr) return 5L;
+                    const char* comma = strchr(t, ','); if (comma == nullptr) return 5L;
+                    comma = strchr(comma + 1, ','); return comma != nullptr ? strtol(comma + 1, nullptr, 10) : 5L; }();
+                if (dumpMem != nullptr && !dumped && long(frame / 60) == dumpSecond)
+                {
+                    dumped = true;
+                    char* end = nullptr;
+                    const uint32_t at = uint32_t(strtoul(dumpMem, &end, 16));
+                    const uint32_t bytes = (end != nullptr && *end == ',') ? uint32_t(strtoul(end + 1, nullptr, 0)) : 256u;
+                    for (uint32_t offset = 0; offset < bytes; offset += 16)
+                    {
+                        MEMORY_BASIC_INFORMATION info{};
+                        if (VirtualQuery(Guest::Base + at + offset, &info, sizeof(info)) == 0 || (info.State & MEM_COMMIT) == 0) { printf("dump: %08X is not committed\n", at + offset); break; }
+                        const uint8_t* row = Guest::Base + at + offset;
+                        printf("dump: %08X:", at + offset);
+                        for (uint32_t i = 0; i < 16; i += 4) printf(" %02X%02X%02X%02X", row[i], row[i + 1], row[i + 2], row[i + 3]);
+                        printf("  ");
+                        for (uint32_t i = 0; i < 16; i++) putchar((row[i] >= 32 && row[i] < 127) ? row[i] : '.');
+                        printf("\n");
+                    }
+                    fflush(stdout);
+                }
             }
 
             std::this_thread::sleep_until(nextFrame);
