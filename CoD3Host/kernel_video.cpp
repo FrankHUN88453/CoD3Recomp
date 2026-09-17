@@ -666,6 +666,44 @@ namespace
                     if (found == 0) printf("scan: \"%s\" is nowhere in guest memory\n", scanFor);
                     fflush(stdout);
                 }
+                // COD3_MAP=name[,second]: the level started from the front
+                // end at that second (twelve by default; the main menu is
+                // up by then with COD3_PAD="5:start 8:a") by the console
+                // command the chapter select itself uses, "spmap name",
+                // through the title's va (sub_824534B0, a format and its
+                // arguments, the text kept in the title's own pool) and
+                // Cbuf_AddText (sub_824644D0). This thread has a guest
+                // context and a stack of its own, so it can call them; the
+                // command runs on the title's own thread on its next pass
+                // over the buffer.
+                static const char* const mapWanted = getenv("COD3_MAP");
+                static bool mapStarted = false;
+                if (mapWanted != nullptr && !mapStarted)
+                {
+                    std::string name(mapWanted);
+                    long second = 12;
+                    if (const size_t comma = name.find(','); comma != std::string::npos) { second = strtol(name.c_str() + comma + 1, nullptr, 10); name.resize(comma); }
+                    if (long(frame / 60) == second && !name.empty() && name.size() < 64)
+                    {
+                        mapStarted = true;
+                        PPCFunc* format = Guest::Lookup(0x824534B0);   // va(fmt, ...): the text, in the title's string pool
+                        PPCFunc* addText = Guest::Lookup(0x824644D0);  // Cbuf_AddText(text)
+                        if (format != nullptr && addText != nullptr)
+                        {
+                            const std::string command = "spmap " + name + "\n";
+                            const uint32_t text = stackTop - 0x80;
+                            for (size_t i = 0; i <= command.size(); i++) Guest::Base[text + i] = uint8_t(i < command.size() ? command[i] : 0);
+                            ctx.r1.u32 = stackTop - 0x100;
+                            ctx.r3.u32 = text;
+                            format(ctx, Guest::Base);
+                            ctx.r1.u32 = stackTop - 0x100;
+                            addText(ctx, Guest::Base);
+                            printf("video: \"spmap %s\" put on the title's command buffer" "\n", name.c_str());
+                        }
+                        else printf("video: COD3_MAP: the title's Cbuf_AddText is not recompiled code" "\n");
+                        fflush(stdout);
+                    }
+                }
                 // COD3_DUMPMEM=hexaddress,bytes,second: that much of guest
                 // memory, once, that many seconds in (five by default), as
                 // words and text.

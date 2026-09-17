@@ -24,14 +24,15 @@ invalid_instructions = [
     { data = 0x00000000, size = 4 }, # padding
 ]
 
-# Bounded by CoD3Scan --fixfuncs from the recompiler's reports.
+# Bounded by CoD3Scan --fixfuncs from the recompiler's reports and by
+# scripts/level_functions.py (config/saint_lo_functions.toml).
 functions = [
-    { address = 0x8903B2F0, size = 0xB54 },  # to 0x8903BE44; was cut at 0x8903BE20
-    { address = 0x890B91C0, size = 0x14F8 }, # to 0x890BA6B8; was 0xA7C (cut at 0x890B9C3C), the tail at 0x890BA1A4
-    { address = 0x89195508, size = 0xA678 }, # to 0x8919FB80; was 0x73B0 (cut at 0x8919C8B8), the tail at 0x8919D2F4
-    { address = 0x89234650, size = 0x128 },  # to 0x89234778; was cut at 0x89234760
-    { address = 0x8923A0D8, size = 0x174 },  # to 0x8923A24C; was cut at 0x8923A1F4
-    { address = 0x8923A478, size = 0x27C },  # to 0x8923A6F4; was cut at 0x8923A6DC
-    { address = 0x8923ADB0, size = 0x208 },  # to 0x8923AFB8; was cut at 0x8923AEFC and 0x8923AF1C
-    { address = 0x89241230, size = 0x81C },  # to 0x89241A4C; was cut at 0x892418B0 and 0x892418E8
+    { address = 0x8903B2F0, size = 0xB54 },
+    { address = 0x890B91C0, size = 0x14F8 },
+    { address = 0x89195508, size = 0xA678 },
+    { address = 0x89234650, size = 0x128 },
+    { address = 0x8923A0D8, size = 0x174 },
+    { address = 0x8923A478, size = 0x27C },
+    { address = 0x8923ADB0, size = 0x208 },
+    { address = 0x89241230, size = 0x81C },
 ]

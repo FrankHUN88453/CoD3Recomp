@@ -13,9 +13,10 @@ The first level, Saint-Lô, is playable: the menus, the loading screen, the
 opening cutscene and the fighting run at 30 to 60 frames a second on the
 host's own GPU through Direct3D 11, drawn from the title's own shaders
 translated to HLSL, with the terrain, the buildings, the soldiers, the grass,
-the sky, the shadows, the HUD and the saved checkpoints all working. Only the
-Saint-Lô level's code has been recompiled so far; the other fourteen levels
-need the same treatment before they load. The intro films do not play yet.
+the sky, the shadows, the HUD and the saved checkpoints all working. All
+fifteen levels' code is recompiled and every level loads and plays, the
+mission title cards, the mission failed screen and the checkpoints with them.
+The intro films do not play yet.
 
 ![The level](level.png)
 
@@ -106,6 +107,15 @@ CoD3.exe --game "D:\path\Call of Duty 3 (USA, Europe)"
 CoD3.exe --list-iso "D:\path\Call of Duty 3.iso"
 CoD3.exe --help
 ```
+
+A level can be started straight from the main menu, the way the chapter
+select does it, with `COD3_MAP=<level>[,<second>]` in the environment: at that
+second (twelve by default) the title's own `spmap <level>` console command is
+put on its command buffer. The main menu has to be up by then, which
+`COD3_PAD="5:start 8:a"` (Start at five seconds, A at eight) sees to in a
+scripted run. The level names are the folders under `sp`: `saint_lo`,
+`island`, `nightd`, `crssrds`, `hostage`, `mayenne`, `forest`, `falaise`,
+`fuelplnt`, `chambois`, `mace2`, `laison`, `stbert`, `blkbrn`, `credits`.
 
 ## Layout
 

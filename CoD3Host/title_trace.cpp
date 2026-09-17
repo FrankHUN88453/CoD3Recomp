@@ -90,3 +90,21 @@ PPC_FUNC(sub_824ACC90)
     }
     __imp__sub_824ACC90(ctx, base);
 }
+
+// The front end's level launcher, sub_82517840: runs "spmap <name>" for
+// the name in the pending map buffer, once its gates let it.
+extern "C" PPC_FUNC(__imp__sub_82517840);
+PPC_FUNC(sub_82517840)
+{
+    static int shown = 0;
+    const char* pending = Text(base, 0x829C3A48);
+    const bool interesting = pending[0] != 0;
+    __imp__sub_82517840(ctx, base);
+    if (Wanted() && interesting && shown++ < 20)
+    {
+        printf("title: launcher saw \"%s\", returned %u, gate object %08X (+40 %08X vs %08X), loading flag %08X\n", pending, ctx.r3.u32,
+            Guest::Read32(base, 0x829C39E8), Guest::Read32(base, 0x829C39E8) ? Guest::Read32(base, Guest::Read32(base, 0x829C39E8) + 40) : 0,
+            Guest::Read32(base, 0x82A56CF0), Guest::Read32(base, 0x829C3A24));
+        fflush(stdout);
+    }
+}

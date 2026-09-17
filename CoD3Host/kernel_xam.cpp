@@ -666,6 +666,22 @@ PPC_FUNC(__imp__XamShowDirtyDiscErrorUI)
     Kernel::CountImport("XamShowDirtyDiscErrorUI");
     printf("\nThe game reported a dirty or unreadable disc. The installed copy\n");
     printf("is missing something it expected to find.\n");
+    // Who decided so: the title's own frames above this call, and what
+    // this thread asked the kernel for just before.
+    {
+        CONTEXT host{};
+        RtlCaptureContext(&host);
+        uint32_t functions[12] = {};
+        const int count = Sampler::WalkGuestStack(&host, functions, 12);
+        printf("  called from 0x%08X;", uint32_t(ctx.lr));
+        if (count > 0)
+        {
+            printf(" guest call chain, innermost first:");
+            for (int i = 0; i < count; i++) printf("%ssub_%08X", i == 0 ? " " : " <- ", functions[i]);
+        }
+        printf("\n");
+        Kernel::ReportRecentCalls(GetCurrentThreadId());
+    }
     fflush(stdout);
     Guest::Shutdown();
     Kernel::Exit(1);

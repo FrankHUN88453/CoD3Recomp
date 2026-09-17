@@ -115,6 +115,20 @@ functions = [
     { address = 0x824BDF28, size = 0xBC }, # was 0x28, 4 cases
     { address = 0x824BE118, size = 0x1D8 }, # was 0x30, 64 cases; the button mask compares after the table run to 0x824BE2F0
     { address = 0x824C0CD8, size = 0x88 }, # was 0x28, 4 cases; the cases share a tail at 0x824C0D34 (the chapter title text)
+    # Switches without a bounds check before the table, which XenonAnalyse
+    # reads by length since the change in tools/XenonRecomp/XenonAnalyse;
+    # bounded by CoD3Scan --fixfuncs from the recompiler's reports.
+    { address = 0x823C2118, size = 0xFC }, # was 0x18, 18 cases
+    { address = 0x82465C78, size = 0x48 }, # was 0x18, 4 cases
+    { address = 0x824675A8, size = 0x78 }, # was 0x18, 6 cases
+    { address = 0x824C0A48, size = 0x48 }, # was 0x18, 4 cases
+    # Cut into pieces elsewhere (a later piece branches back into the
+    # function); found by scripts/level_functions.py's method on the title.
+    { address = 0x821CF918, size = 0x90 },
+    { address = 0x823484C0, size = 0x81C },
+    { address = 0x8235B8D0, size = 0x174 },
+    { address = 0x8235BC70, size = 0x27C },
+    { address = 0x8235C5A8, size = 0x208 },
     { address = 0x824C3460, size = 0x74 }, # was 0x24, 6 cases
     { address = 0x824C40B8, size = 0x100 }, # was 0x3C, 5 cases; the last case continues past 0x824C4180 to the blr at 0x824C41B4
     { address = 0x824C4180, size = 0x34 },  # its own function as well (a case of the one above branches into its tail); kept for whoever calls it

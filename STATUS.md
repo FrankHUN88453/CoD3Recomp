@@ -9,9 +9,12 @@ Sonic Unleashed.
 
 ## Where it is (September 2026)
 
-The first level, Saint-Lô, plays: menus, loading, the opening cutscene, the
-fighting, checkpoints saved and loaded, at 30 to 60 frames a second through a
-Direct3D 11 backend that runs the title's own shaders translated to HLSL.
+Every level plays: menus, loading, the cutscenes, the fighting, the mission
+title cards, checkpoints saved and loaded, mission failed and restarted, at 30
+to 60 frames a second through a Direct3D 11 backend that runs the title's own
+shaders translated to HLSL. All fifteen level DLLs are recompiled and linked
+in (`recompile_level.ps1 -All`), each level's functions prefixed with its name
+because every DLL is based at the same address.
 Keyboard, mouse and pad work; a settings menu (F11) holds the keys, the mouse
 sensitivity, the render scale and a frame counter; F12 takes a screenshot.
 
@@ -63,6 +66,22 @@ What it took, beyond what the sections below describe, in the order found:
   function in the config (with three others cut the same way) drew the card.
   `grep '// ERROR' CoD3RecompLib/ppc/*.cpp` after a recompile finds any more;
   `recompile.ps1` counts them.
+- **Ten jump tables the analyser never saw.** A switch whose index the
+  compiler knew to be in range has no bounds check before its table, and
+  XenonAnalyse, which sized tables from that check, skipped them; the
+  recompiler then made each `bctr` a call to whatever the table held, and
+  the log said "call: through a pointer to X, which is not a function". One
+  was the entity type dispatch (0x823E6610), whose skipped cases left the
+  Island level's entity lists tangled and its game thread in an endless
+  unlink. XenonAnalyse now sizes such a table from the table itself (it runs
+  up to the first case's code, which its lowest entry names).
+- **Reads past the end of a file are padded with zeros** to the length asked
+  for, the way a whole-sector read off the disc comes back: the streamer reads
+  archives in 409600 byte units, the Island level has a 196608 byte one, and
+  the end of file it met there was reported as a dirty disc.
+- **Any level from the main menu:** `COD3_MAP=<level>` puts the title's own
+  `spmap` command on its command buffer once the menu is up; the levels were
+  checked with it, seventy five seconds each.
 - **The T-pose.** The level DLL had 922 such marks, nearly all in two large
   functions (0x890B91C0 and 0x89195508, compare chains over hashed names
   whose "not found" tails had been cut into separate pieces) and six smaller
@@ -71,8 +90,7 @@ What it took, beyond what the sections below describe, in the order found:
   merged by `recompile_level.ps1`) he sits, turns and gestures. The marks
   that remain in the level are in fragments nothing calls.
 
-Still open: the intro films (WMV) are skipped; the other fourteen levels are
-not recompiled; the software rasteriser (`COD3_GPU=soft`) has regressed to black, and so has
+Still open: the intro films (WMV) are skipped; the software rasteriser (`COD3_GPU=soft`) has regressed to black, and so has
 the Direct3D 11 backend's path for devices without constant buffer offsetting
 (`COD3_D3DNORING=1` shows it: the HUD alone on black).
 

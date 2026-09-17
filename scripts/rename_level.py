@@ -1,10 +1,13 @@
-"""Makes a recompiled level DLL linkable next to the title's own code.
+"""Makes a recompiled level DLL linkable next to the title's own code and
+the other levels'.
 
 XenonRecomp names guest functions by address, so a level's sub_89xxxxxx
-functions never clash with the title's sub_82xxxxxx ones. What it names the
-same in every output are the register save/restore helpers and the function
-table, and both would collide at link time. This renames them with the
-level's name. Run after XenonRecomp:  python scripts/rename_level.py saint_lo
+functions never clash with the title's sub_82xxxxxx ones; but every level
+DLL is based at 0x89000000, so two levels' functions do clash with each
+other, as do the register save/restore helpers, the entry point and the
+function table, which are named the same in every output. This prefixes
+them all with the level's name. Run after XenonRecomp:
+python scripts/rename_level.py saint_lo
 """
 import pathlib
 import re
@@ -24,12 +27,17 @@ def main() -> int:
         return 1
 
     helpers = re.compile(r"__(save|rest)(gprlr|fpr|vmx)_")
+    # The level's own functions, by their address in the DLL's range, in
+    # every spelling (sub_, __imp__sub_); the title's (sub_82...) are left
+    # as they are, so the level can call them. Idempotent.
+    own = re.compile(rf"(?<!{level}_)sub_(89[0-9A-F]{{6}})\b")
     changed = 0
     for path in list(folder.glob("*.cpp")) + list(folder.glob("*.h")):
         text = path.read_text(encoding="ascii")
         updated = helpers.sub(lambda m: f"__{level}_{m.group(1)}{m.group(2)}_", text)
+        updated = own.sub(lambda m: f"{level}_sub_{m.group(1)}", updated)
         # The entry point is named _xstart in every output.
-        updated = updated.replace("_xstart", f"_{level}_xstart")
+        updated = re.sub(rf"(?<!{level})_xstart", f"_{level}_xstart", updated)
         if path.name == "ppc_func_mapping.cpp":
             updated = updated.replace("PPCFuncMapping PPCFuncMappings[]",
                                       f"PPCFuncMapping PPCFuncMappings_{level}[]")

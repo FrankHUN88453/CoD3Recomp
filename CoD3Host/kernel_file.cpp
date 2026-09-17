@@ -312,6 +312,14 @@ namespace
             const std::string lines = Settings::TitleConfigLines();
             if (!lines.empty()) { extra.push_back('\n'); extra.insert(extra.end(), lines.begin(), lines.end()); }
         }
+        // COD3_EXEC="command;command": console commands for this run only,
+        // for a scripted run that wants a level straight away (spmap island).
+        if (const char* exec = getenv("COD3_EXEC"))
+        {
+            std::string lines(exec);
+            for (char& c : lines) if (c == ';') c = '\n';
+            extra.push_back('\n'); extra.insert(extra.end(), lines.begin(), lines.end());
+        }
         if (extra.empty()) return {};
 
         std::vector<uint8_t> combined;
@@ -648,6 +656,24 @@ PPC_FUNC(__imp__NtReadFile)
             ctx.r3.u32 = X_STATUS_END_OF_FILE;
             return;
         }
+    }
+
+    // A read that runs past the end of one of the game's files is filled
+    // with zeros to its full length and reported as all read, the way a
+    // whole-sector read off the disc comes back. The island level asks for
+    // 409600 bytes of a 196608 byte archive (its streamer reads in that
+    // unit), and given the end of file it then met it reported a dirty
+    // disc; given the zeros it plays. Saved games keep the exact count.
+    // COD3_NOPADREADS=1 turns it off.
+    static const bool padReads = getenv("COD3_NOPADREADS") == nullptr;
+    if (padReads && read < length && file.overlay.empty() && file.guestPath.rfind("savedrive:", 0) != 0)
+    {
+        static std::atomic<int> announced{ 0 };
+        if (announced.fetch_add(1) < 20)
+            printf("file: read of %u at %llu of %s (%llu bytes) padded with %u zeros\n", length, (unsigned long long)file.position,
+                file.guestPath.c_str(), (unsigned long long)file.size, length - read);
+        memset(Guest::Ptr(buffer) + read, 0, length - read);
+        read = length;
     }
 
     file.position += read;
