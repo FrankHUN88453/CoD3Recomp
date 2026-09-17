@@ -32,3 +32,6 @@ tools/XenosRecomp/
 # Frame dumps and captures.
 *.bmp
 shots/
+
+# Python bytecode.
+__pycache__/
