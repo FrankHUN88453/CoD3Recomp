@@ -81,7 +81,27 @@ foreach ($name in $Levels) {
     & $Analyse $Private $SwitchToml | Out-Null
 
     # 3. Recompile until the function boundaries are right.
-    $functions = @()
+    #
+    # config/<name>_functions.toml, when it exists, holds boundaries kept by
+    # hand: functions the analyser cut where their cases branch to a shared
+    # tail after the last case (the recompiler marks each such branch
+    # "// ERROR" and returns instead). Its entries win over the scan's.
+    $KeptPath = Join-Path $Root "CoD3RecompLib\config\${name}_functions.toml"
+    $kept = @()
+    if (Test-Path $KeptPath) {
+        foreach ($line in (Get-Content $KeptPath)) {
+            if ($line -match '^\s*\{ address = 0x[0-9A-F]+, size = 0x[0-9A-F]+ \},.*$') { $kept += $line.TrimEnd() }
+        }
+        Write-Host "    $($kept.Count) function boundaries kept by hand from $KeptPath"
+    }
+    function Merge-Functions([string[]]$scan, [string[]]$hand) {
+        $byAddress = [ordered]@{}
+        foreach ($line in ($scan + $hand)) {
+            if ($line -match 'address = (0x[0-9A-F]+)') { $byAddress[$Matches[1]] = $line }
+        }
+        return @($byAddress.Values | Sort-Object)
+    }
+    $functions = Merge-Functions @() $kept
     for ($pass = 1; $pass -le 4; $pass++) {
         $toml = @(
             "# Call of Duty 3 (Xbox 360) - the $name level's own code: sp\$name\$name.dll",
@@ -121,8 +141,12 @@ foreach ($name in $Levels) {
             if ($line -match '^\s*\{ address = 0x[0-9A-F]+, size = 0x[0-9A-F]+ \},.*$') { $found += $line.TrimEnd() }
         }
         if ($found.Count -eq 0) { throw "$name`: functions to fix were reported but CoD3Scan found none" }
-        $functions = ($functions + $found) | Sort-Object -Unique
+        $functions = Merge-Functions ($functions + $found) $kept
         Write-Host ("    pass {0}: {1} function boundaries fixed" -f $pass, $found.Count)
+    }
+    $errors = (Select-String -Path "$Out\ppc_recomp.*.cpp" -Pattern '// ERROR [0-9A-F]+').Count
+    if ($errors -gt 0) {
+        Write-Host "    $errors branches out of their function remain (grep '// ERROR' in $Out); extend those functions in $KeptPath" -ForegroundColor Yellow
     }
     $count = (Select-String -Path "$Out\ppc_recomp.*.cpp" -Pattern '^PPC_FUNC_IMPL').Count
     $unknown = Select-String -Path $Log -Pattern 'Unrecognized instruction' | Measure-Object | Select-Object -ExpandProperty Count

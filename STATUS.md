@@ -62,9 +62,14 @@ What it took, beyond what the sections below describe, in the order found:
   returned instead, and the four lines never reached the panel. Extending the
   function in the config (with three others cut the same way) drew the card.
   `grep '// ERROR' CoD3RecompLib/ppc/*.cpp` after a recompile finds any more;
-  `recompile.ps1` counts them. The level DLL still has 922 of them in a few
-  large functions (0x890B91C0.., 0x89195508..); nothing seen depends on them
-  yet.
+  `recompile.ps1` counts them.
+- **The T-pose.** The level DLL had 922 such marks, nearly all in two large
+  functions (0x890B91C0 and 0x89195508, compare chains over hashed names
+  whose "not found" tails had been cut into separate pieces) and six smaller
+  ones. The sergeant who sits on the crate at the start stood rigid with his
+  arms out instead; with the functions whole (`config/saint_lo_functions.toml`,
+  merged by `recompile_level.ps1`) he sits, turns and gestures. The marks
+  that remain in the level are in fragments nothing calls.
 
 Still open: the intro films (WMV) are skipped; the other fourteen levels are
 not recompiled; the software rasteriser (`COD3_GPU=soft`) has regressed to black, and so has
