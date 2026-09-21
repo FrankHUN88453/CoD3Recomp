@@ -58,6 +58,7 @@ add_executable(CoD3 WIN32
     "../thirdparty/imgui/backends/imgui_impl_dx11.cpp"
     "../thirdparty/imgui/backends/imgui_impl_win32.cpp"
     "audio_out.cpp"
+    "xma.cpp"
     "parallel.cpp"
     "watchdog.cpp"
     "modules.cpp"
@@ -80,6 +81,18 @@ target_link_libraries(CoD3 PRIVATE
     d3dcompiler     # the menu's own shaders (Dear ImGui)
     windowscodecs   # screenshots as PNG
     shell32)
+
+# FFmpeg's headers, for XMA decoding through its avcodec, loaded at run time
+# (xma.cpp). Without them the build decodes nothing and says so.
+find_path(COD3_FFMPEG_INCLUDE libavcodec/avcodec.h
+    PATHS "$ENV{FFMPEG_DIR}/include" "C:/ffmpeg/include" "${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/ffmpeg/include")
+if (COD3_FFMPEG_INCLUDE)
+    message(STATUS "CoD3: XMA decoding through FFmpeg, headers at ${COD3_FFMPEG_INCLUDE}")
+    target_include_directories(CoD3 PRIVATE "${COD3_FFMPEG_INCLUDE}")
+    target_compile_definitions(CoD3 PRIVATE COD3_HAVE_FFMPEG_HEADERS=1)
+else()
+    message(STATUS "CoD3: no FFmpeg headers, XMA sound will be silent")
+endif()
 
 # Dear ImGui, for the settings menu, from thirdparty/imgui.
 target_include_directories(CoD3 PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/imgui")

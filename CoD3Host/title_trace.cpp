@@ -108,3 +108,21 @@ PPC_FUNC(sub_82517840)
         fflush(stdout);
     }
 }
+
+// The XMA voice's decode step, sub_823B8C60(voice, destination, ?, &count):
+// one context job and the copy of what it produced.
+extern "C" PPC_FUNC(__imp__sub_823B8C60);
+PPC_FUNC(sub_823B8C60)
+{
+    static int shown = 0;
+    const uint32_t voice = ctx.r3.u32, dest = ctx.r4.u32, arg5 = ctx.r5.u32, countPtr = ctx.r6.u32;
+    const uint32_t before = countPtr ? Guest::Read32(base, countPtr) : 0;
+    __imp__sub_823B8C60(ctx, base);
+    if (getenv("COD3_XMATRACE") != nullptr && shown++ < 60)
+    {
+        printf("title: xma step voice %08X dest %08X r5 %08X count %u -> returned %u, count now %u, dest words %08X %08X\n",
+            voice, dest, arg5, before, ctx.r3.u32, countPtr ? Guest::Read32(base, countPtr) : 0,
+            Guest::Read32(base, dest), Guest::Read32(base, dest + 4));
+        fflush(stdout);
+    }
+}

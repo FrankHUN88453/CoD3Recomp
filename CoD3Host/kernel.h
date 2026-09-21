@@ -242,6 +242,7 @@ namespace Kernel
     // The audio render callback is driven from a thread of its own.
     void StopAudioPump();
     uint64_t AudioCallbacks();
+    void ReportXma();   // the codec contexts, in the periodic report
 }
 
 namespace Guest

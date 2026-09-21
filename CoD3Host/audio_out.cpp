@@ -44,6 +44,7 @@ namespace
     // mixes nothing but its XMA voices, and that decoder is not here, every
     // sample leaving this file is a zero and the speakers are correctly silent.
     std::atomic<int> g_peak{ 0 };
+    std::atomic<uint32_t> g_nonzeroBytes{ 0 };   // the most of a frame's bytes ever seen nonzero
 
     // A big endian float out of guest memory.
     float GuestFloat(uint32_t address)
@@ -139,6 +140,15 @@ bool Audio::SubmitFrame(uint32_t guestAddress)
     // two the usual way, with the centre and the surrounds shared between them
     // at about seven tenths, which keeps the total energy the same.
     const uint32_t channelBytes = SamplesPerChannel * 4;
+    {
+        // How much of the frame is anything at all, for the report: a mixer
+        // that writes nothing and one whose layout this misreads look the
+        // same at the speakers and different here.
+        const uint8_t* bytes = Guest::Ptr(guestAddress);
+        uint32_t nonzero = 0;
+        for (uint32_t i = 0; i < SamplesPerChannel * Channels * 4; i++) nonzero += bytes[i] != 0;
+        if (nonzero > g_nonzeroBytes.load(std::memory_order_relaxed)) g_nonzeroBytes.store(nonzero, std::memory_order_relaxed);
+    }
     for (uint32_t i = 0; i < SamplesPerChannel; i++)
     {
         const uint32_t offset = guestAddress + i * 4;
@@ -176,7 +186,8 @@ void Audio::Report()
     const uint64_t played = g_played.load();
     if (played == 0) return;
 
-    printf("audio: %llu frames played, %llu dropped, loudest sample %.1f%% of "
+    printf("audio: at most %u of %u frame bytes nonzero; ", g_nonzeroBytes.load(), SamplesPerChannel * Channels * 4);
+    printf("%llu frames played, %llu dropped, loudest sample %.1f%% of "
            "full scale\n",
         (unsigned long long)played, (unsigned long long)g_dropped.load(),
         g_peak.load() * 100.0 / 32767.0);

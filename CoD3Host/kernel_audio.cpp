@@ -4,16 +4,16 @@
 // compressed blocks through a context structure and reads decoded samples back
 // out. XAudio is the mixer the decoded voices are submitted to.
 //
-// XMA is not implemented: the contexts are accepted and tracked so the title's
-// own bookkeeping stays consistent, and buffers are reported as consumed so it
-// never waits for the codec. Nothing compressed is decoded, so anything the
-// title played through that hardware is silent.
+// XMA is decoded through FFmpeg's xma2 decoder when its libraries are on
+// the machine (xma.cpp); without them the contexts go through the same
+// motions and the sound that goes through them is silence.
 //
-// XAudio is. The frames the title mixes itself are handed to the machine's
-// sound device, which is everything except the XMA voices.
+// XAudio: the frames the title mixes are handed to the machine's sound
+// device.
 
 #include "kernel.h"
 #include "audio_out.h"
+#include "xma.h"
 
 #include <atomic>
 #include <chrono>
@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <map>
 #include <mutex>
+#include <vector>
 
 #include <Windows.h>
 
@@ -34,7 +35,6 @@ namespace
     constexpr uint32_t ContextSize = 64;
 
     std::mutex g_audioMutex;
-    std::map<uint32_t, bool> g_contexts;   // address -> enabled
 
     // COD3_XMATRACE prints every call on the codec with its context and
     // arguments, which is the only way to see how a title paces a stream.
@@ -47,54 +47,10 @@ namespace
     {
         if (!XmaTrace()) return;
         static std::atomic<int> count{ 0 };
-        if (count.fetch_add(1) >= 400) return;
+        if (count.fetch_add(1) >= 2000) return;
         printf("xma: %s(0x%08X, 0x%08X, 0x%08X) from 0x%08X\n",
             name, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, uint32_t(ctx.lr));
         fflush(stdout);
-    }
-
-    // Where each context's description lives, as the title handed it over.
-    std::map<uint32_t, uint32_t> g_initialisers;
-
-    // A decoder that produces silence, but produces it on time.
-    //
-    // There is no XMA decoder here, and writing one is a piece of work on its
-    // own. What the title needs before it can do anything at all, though, is
-    // not the samples: it is the decoder moving. It hands over compressed
-    // blocks, waits to be told they were taken, and waits for decoded output to
-    // appear. Told that output is never ready, the film player reads its first
-    // three hundred kilobytes of video and stops there for good.
-    //
-    // So the motions are gone through. Input blocks are taken, the write
-    // position advances a block at a time, and the output buffer is left as the
-    // title allocated it, which is zeroed: silence. The player runs, the film
-    // plays, and the sound is missing rather than the picture.
-    struct Decoder
-    {
-        uint32_t outputBuffer = 0;
-        uint32_t outputBlocks = 0;
-        uint32_t writeOffset = 0;
-        uint32_t readOffset = 0;
-        std::chrono::steady_clock::time_point lastBlock{};
-    };
-    std::map<uint32_t, Decoder> g_decoders;
-
-    // The description the title gave, read back. The two buffer addresses and
-    // the block count are the only fields anything here needs.
-    Decoder& DecoderFor(uint8_t* base, uint32_t context)
-    {
-        Decoder& decoder = g_decoders[context];
-        if (decoder.outputBlocks != 0) return decoder;
-
-        auto found = g_initialisers.find(context);
-        if (found == g_initialisers.end()) return decoder;
-
-        const uint32_t parameters = found->second;
-        decoder.outputBuffer = Guest::Read32(base, parameters + 20);
-        decoder.outputBlocks = Guest::Read32(base, parameters + 24);
-        if (decoder.outputBlocks == 0 || decoder.outputBlocks > 64)
-            decoder.outputBlocks = 8;
-        return decoder;
     }
 
     uint32_t g_registeredClients = 0;
@@ -178,19 +134,209 @@ void Kernel::StopAudioPump()
 uint64_t Kernel::AudioCallbacks() { return g_callbacks.load(); }
 
 // --- XMA contexts ----------------------------------------------------------
+//
+// The context is sixty four bytes of physical memory the console's codec
+// reads, laid out as Xenia has it (xma_context.h): bit fields in the first
+// five words, the buffer addresses in the next four, the output read
+// offset and the output valid bit in the tenth. The title here never
+// touches the block itself, it goes through the kernel calls below, but
+// the block is kept true to the hardware's all the same, and it is what the
+// decoding reads.
+//
+// Decoding follows the hardware's shape: two input buffers of whole 2048
+// byte packets, taken in turn and marked consumed; an output ring of 256
+// byte blocks the decoded samples go into while the title says the ring is
+// open (output valid) and there is room; and when enabled the context
+// decodes its subframe count, 128 samples a channel each, and then stops,
+// which is what the title counts on when it reads the ring back.
+
+namespace
+{
+    // Bit fields of the context block. The words are big endian in memory.
+    uint32_t Field(uint8_t* base, uint32_t context, uint32_t word, uint32_t shift, uint32_t bits)
+    {
+        return (Guest::Read32(base, context + word * 4) >> shift) & ((1u << bits) - 1);
+    }
+    void SetField(uint8_t* base, uint32_t context, uint32_t word, uint32_t shift, uint32_t bits, uint32_t value)
+    {
+        const uint32_t mask = ((1u << bits) - 1) << shift;
+        const uint32_t old = Guest::Read32(base, context + word * 4);
+        Guest::Write32(base, context + word * 4, (old & ~mask) | ((value << shift) & mask));
+    }
+    // Word 0.
+    uint32_t Input0Packets(uint8_t* b, uint32_t c) { return Field(b, c, 0, 0, 12); }
+    uint32_t Input0Valid(uint8_t* b, uint32_t c) { return Field(b, c, 0, 20, 1); }
+    uint32_t Input1Valid(uint8_t* b, uint32_t c) { return Field(b, c, 0, 21, 1); }
+    uint32_t OutputBlocks(uint8_t* b, uint32_t c) { return Field(b, c, 0, 22, 5); }
+    uint32_t WriteOffset(uint8_t* b, uint32_t c) { return Field(b, c, 0, 27, 5); }
+    // Word 1.
+    uint32_t Input1Packets(uint8_t* b, uint32_t c) { return Field(b, c, 1, 0, 12); }
+    uint32_t SubframeCount(uint8_t* b, uint32_t c) { return Field(b, c, 1, 20, 4); }
+    uint32_t IsStereo(uint8_t* b, uint32_t c) { return Field(b, c, 1, 30, 1); }
+    // Word 2: the read offset, in bits, within the current input buffer.
+    // Word 4 bit 31: which input buffer is current.
+    uint32_t CurrentBuffer(uint8_t* b, uint32_t c) { return Field(b, c, 4, 31, 1); }
+    // Words 5 to 7: the buffers.
+    uint32_t InputPtr(uint8_t* b, uint32_t c, uint32_t which) { return Guest::Read32(b, c + (5 + which) * 4); }
+    uint32_t OutputPtr(uint8_t* b, uint32_t c) { return Guest::Read32(b, c + 7 * 4); }
+    // Word 9: the read offset and the valid bit of the output ring.
+    uint32_t ReadOffset(uint8_t* b, uint32_t c) { return Field(b, c, 9, 0, 5); }
+    uint32_t OutputValid(uint8_t* b, uint32_t c) { return Field(b, c, 9, 30, 1); }
+
+    // What the block does not hold: the decoder behind the context and the
+    // samples it has produced that the ring had no room for yet.
+    struct Context
+    {
+        Xma::Stream* stream = nullptr;
+        int channels = 1;
+        int sampleRate = 48000;
+        bool enabled = false;
+        bool announcedNoDecoder = false;
+        std::vector<int16_t> fifo;
+        size_t fifoRead = 0;
+        uint32_t packetInBuffer = 0;     // the next packet of the current input buffer
+        uint32_t blocksThisEnable = 0;   // written since the last enable
+    };
+    std::map<uint32_t, Context> g_xma;   // by context address
+
+    // COD3_XMAMODE=full: decode until the ring is full or the input runs out
+    // rather than stopping at the subframe count, for comparison.
+    bool StopAtSubframeCount()
+    {
+        static const bool full = []() { const char* t = getenv("COD3_XMAMODE"); return t != nullptr && strcmp(t, "full") == 0; }();
+        return !full;
+    }
+
+    std::atomic<uint64_t> g_packetsDecoded{ 0 }, g_blocksWritten{ 0 }, g_packetsRefused{ 0 }, g_enables{ 0 };
+
+    // The decoder, moved along as far as the buffers let it.
+    void Work(uint8_t* base, uint32_t context)
+    {
+        auto found = g_xma.find(context);
+        if (found == g_xma.end()) return;
+        Context& state = found->second;
+        if (!state.enabled) return;
+        const uint32_t blocks = OutputBlocks(base, context);
+        if (blocks == 0) return;
+        const uint32_t subframes = SubframeCount(base, context);
+        const uint32_t channels = uint32_t(state.channels);
+
+        for (int guard = 0; guard < 4096; guard++)
+        {
+            // A block of the ring: 128 samples, mono or interleaved stereo.
+            if (state.fifo.size() - state.fifoRead >= 128)
+            {
+                if (OutputValid(base, context) == 0) return;   // the ring is the title's until it says otherwise
+                uint32_t write = WriteOffset(base, context);
+                const uint32_t read = ReadOffset(base, context);
+                uint8_t* block = Guest::Ptr(Guest::PhysicalAlias(OutputPtr(base, context))) + write * 256;
+                for (uint32_t i = 0; i < 128; i++)
+                {
+                    const uint16_t sample = uint16_t(state.fifo[state.fifoRead + i]);
+                    block[i * 2] = uint8_t(sample >> 8);
+                    block[i * 2 + 1] = uint8_t(sample);
+                }
+                state.fifoRead += 128;
+                if (state.fifoRead >= 65536) { state.fifo.erase(state.fifo.begin(), state.fifo.begin() + state.fifoRead); state.fifoRead = 0; }
+                write = (write + 1) % blocks;
+                SetField(base, context, 0, 27, 5, write);
+                if (write == read) SetField(base, context, 9, 30, 1, 0);   // full: the title reopens it
+                state.blocksThisEnable++;
+                g_blocksWritten.fetch_add(1, std::memory_order_relaxed);
+                // COD3_XMASUBFRAME=channel: a subframe is 128 samples a channel
+                // (two blocks for stereo); by default it is one block of the
+                // ring, which is what this title's ring and its mixer frame of
+                // 256 samples add up to.
+                static const bool perChannel = []() { const char* t = getenv("COD3_XMASUBFRAME"); return t != nullptr && strcmp(t, "channel") == 0; }();
+                const uint32_t perSubframe = perChannel ? channels : 1;
+                if (StopAtSubframeCount() && subframes != 0 && state.blocksThisEnable / perSubframe >= subframes)
+                {
+                    if (XmaTrace())
+                    {
+                        static std::atomic<int> count{ 0 };
+                        if (count.fetch_add(1) < 40)
+                        {
+                            const uint8_t* ring = Guest::Ptr(Guest::PhysicalAlias(OutputPtr(base, context)));
+                            printf("xma:   decoded %u blocks this enable; ring words %02X%02X%02X%02X %02X%02X%02X%02X ... write %u read %u valid %u%s",
+                                state.blocksThisEnable, ring[0], ring[1], ring[2], ring[3], ring[4], ring[5], ring[6], ring[7],
+                                WriteOffset(base, context), ReadOffset(base, context), OutputValid(base, context), "\n");
+                        }
+                    }
+                    // Its subframes done, the context stops until enabled again.
+                    state.enabled = false;
+                    return;
+                }
+                continue;
+            }
+
+            // More samples: the next packet of the current input buffer.
+            const uint32_t which = CurrentBuffer(base, context);
+            const uint32_t valid = which == 0 ? Input0Valid(base, context) : Input1Valid(base, context);
+            if (valid == 0) return;   // starved: the title has not filled it yet
+            const uint32_t packets = which == 0 ? Input0Packets(base, context) : Input1Packets(base, context);
+            if (state.packetInBuffer >= packets)
+            {
+                // This buffer is consumed: back to the title, and on to the other.
+                SetField(base, context, 0, 20 + which, 1, 0);
+                SetField(base, context, 4, 31, 1, which ^ 1);
+                state.packetInBuffer = 0;
+                Guest::Write32(base, context + 2 * 4, 32);   // past the next packet's header
+                continue;
+            }
+            const uint8_t* packet = Guest::Ptr(Guest::PhysicalAlias(InputPtr(base, context, which))) + state.packetInBuffer * 2048;
+            bool decoded = false;
+            if (state.stream != nullptr)
+                decoded = Xma::Decode(state.stream, packet, state.fifo);
+            if (!decoded)
+            {
+                // No decoder, or a packet it would not take: silence of a
+                // packet's likely length, so the title's clock keeps time.
+                if (state.stream != nullptr) g_packetsRefused.fetch_add(1, std::memory_order_relaxed);
+                state.fifo.resize(state.fifo.size() + 2048 * channels, 0);
+            }
+            else g_packetsDecoded.fetch_add(1, std::memory_order_relaxed);
+            state.packetInBuffer++;
+            Guest::Write32(base, context + 2 * 4, (state.packetInBuffer * 2048 * 8) & 0x03FFFFFF);
+        }
+    }
+
+    void Announce()
+    {
+        static bool announced = false;
+        if (announced) return;
+        announced = true;
+        if (Xma::Available()) printf("xma: decoding through FFmpeg%s", "\n");
+        else printf("xma: no decoder (%s); the title's XMA sound is silent%s", Xma::Unavailable(), "\n");
+        fflush(stdout);
+    }
+}
+
+void Kernel::ReportXma()
+{
+    std::lock_guard<std::mutex> lock(g_audioMutex);
+    printf("xma: %zu contexts, %llu enables, %llu packets decoded, %llu refused, %llu blocks written%s", g_xma.size(),
+        (unsigned long long)g_enables.load(), (unsigned long long)g_packetsDecoded.load(), (unsigned long long)g_packetsRefused.load(),
+        (unsigned long long)g_blocksWritten.load(), "\n");
+}
 
 // X_RESULT XMACreateContext(ULONG* contextOut, ...)
 PPC_FUNC(__imp__XMACreateContext)
 { Trace("XMACreateContext", ctx);
     Kernel::CountImport("XMACreateContext");
     std::lock_guard<std::mutex> lock(g_audioMutex);
+    Announce();
 
-    const uint32_t context = Guest::AllocateStack(ContextSize);
-    if (context == 0) { ctx.r3.u32 = 0x8007000E; return; }   // E_OUTOFMEMORY
-
-    const uint32_t address = context - ContextSize;
+    // The context lives in physical memory, as the console's do: the codec
+    // reads it there, and a title that pokes its fields through one of the
+    // physical windows (0xA0000000, 0xC0000000, 0xE0000000) lands on the
+    // same bytes this runtime reads.
+    static uint32_t pool = 0, poolUsed = 0;
+    if (pool == 0 || poolUsed + ContextSize > (64u << 10)) { pool = Guest::AllocatePhysical(64u << 10); poolUsed = 0; }
+    if (pool == 0) { ctx.r3.u32 = 0x8007000E; return; }   // E_OUTOFMEMORY
+    const uint32_t address = Guest::PhysicalAlias(pool) + poolUsed;
+    poolUsed += ContextSize;
     memset(Guest::Ptr(address), 0, ContextSize);
-    g_contexts[address] = false;
+    g_xma[address] = Context{};
 
     if (ctx.r3.u32 != 0)
         Guest::Write32(base, ctx.r3.u32, address);
@@ -202,17 +348,21 @@ PPC_FUNC(__imp__XMAReleaseContext)
 { Trace("XMAReleaseContext", ctx);
     Kernel::CountImport("XMAReleaseContext");
     std::lock_guard<std::mutex> lock(g_audioMutex);
-    g_contexts.erase(ctx.r3.u32);
+    auto found = g_xma.find(ctx.r3.u32);
+    if (found != g_xma.end())
+    {
+        Xma::Destroy(found->second.stream);
+        g_xma.erase(found);
+    }
     ctx.r3.u32 = X_ERROR_SUCCESS;
 }
 
 // X_RESULT XMAInitializeContext(ULONG context, XMA_CONTEXT_INIT* parameters)
 //
-// This used to clear the context and throw the parameters away, which is why
-// every context read back as sixty four zero bytes: the title had described its
-// buffers and been ignored. The description is what says where the compressed
-// data is and where the decoded samples are to go, so nothing downstream could
-// work without it.
+// The parameters: input buffer 0 and its packet count, input buffer 1 and
+// its, the read offset in bits, the output buffer and its block count, the
+// work buffer, the subframe count, the channel count, the sample rate as an
+// index (24, 32, 44.1, 48 kHz), and the loop data.
 PPC_FUNC(__imp__XMAInitializeContext)
 { Trace("XMAInitializeContext", ctx);
     Kernel::CountImport("XMAInitializeContext");
@@ -221,29 +371,64 @@ PPC_FUNC(__imp__XMAInitializeContext)
     const uint32_t parameters = ctx.r4.u32;
     if (context == 0) { ctx.r3.u32 = X_ERROR_SUCCESS; return; }
 
+    std::lock_guard<std::mutex> lock(g_audioMutex);
     memset(Guest::Ptr(context), 0, ContextSize);
+    Context& state = g_xma[context];
+    state.enabled = false;
+    state.fifo.clear();
+    state.fifoRead = 0;
+    state.packetInBuffer = 0;
+    state.blocksThisEnable = 0;
+    if (parameters == 0) { ctx.r3.u32 = X_ERROR_SUCCESS; return; }
+
+    auto word = [&](uint32_t index) { return Guest::Read32(base, parameters + index * 4); };
+    const uint32_t input0 = word(0), input0Packets = word(1), input1 = word(2), input1Packets = word(3);
+    const uint32_t readOffset = word(4), output = word(5), outputBlocks = word(6), work = word(7);
+    const uint32_t subframes = word(8), channels = word(9), rateIndex = word(10);
+    const uint32_t loopStart = word(11), loopEnd = word(12), loopCount = word(13);
+    static const int rates[4] = { 24000, 32000, 44100, 48000 };
 
     {
         static std::atomic<int> announced{ 0 };
-        if ((announced.fetch_add(1) < 3 || XmaTrace()) && parameters != 0)
+        if (announced.fetch_add(1) < 3 || XmaTrace())
         {
-            printf("xma: context 0x%08X described from 0x%08X:\n  ",
-                context, parameters);
-            for (uint32_t word = 0; word < 12; word++)
-                printf(" %08X", Guest::Read32(base, parameters + word * 4));
-            printf("\n");
+            printf("xma: context 0x%08X: inputs 0x%08X x%u and 0x%08X x%u, read offset %u bits, output 0x%08X x%u blocks, "
+                   "%u subframes, stereo %u, %d Hz, loop %u..%u x%u%s",
+                context, input0, input0Packets, input1, input1Packets, readOffset, output, outputBlocks, subframes,
+                channels, rates[rateIndex & 3], loopStart, loopEnd, loopCount, "\n");
             fflush(stdout);
         }
     }
 
-    // Kept as the title gave it, so the buffer addresses and sizes in it can be
-    // read back when the decoder is asked to do something with them.
-    if (parameters != 0)
-    {
-        std::lock_guard<std::mutex> lock(g_audioMutex);
-        g_initialisers[context] = parameters;
-    }
+    // Word 0: packet count, loop count, valid bits clear, block count, write offset 0.
+    Guest::Write32(base, context + 0, (input0Packets & 0xFFF) | ((loopCount & 0xFF) << 12) | ((outputBlocks & 0x1F) << 22));
+    // Word 1: packet count, subframe count, stereo.
+    Guest::Write32(base, context + 4, (input1Packets & 0xFFF) | ((subframes & 0xF) << 20) | ((channels != 0 ? 1u : 0u) << 30));
+    Guest::Write32(base, context + 8, readOffset & 0x03FFFFFF);
+    Guest::Write32(base, context + 12, loopStart & 0x03FFFFFF);
+    Guest::Write32(base, context + 16, loopEnd & 0x03FFFFFF);
+    Guest::Write32(base, context + 20, input0);
+    Guest::Write32(base, context + 24, input1);
+    Guest::Write32(base, context + 28, output);
+    Guest::Write32(base, context + 32, work);
+    Guest::Write32(base, context + 36, 0);
 
+    // A decoder of this shape, made once per shape. The channel word is a
+    // stereo flag rather than a count: the menu music comes with it set to
+    // one and decodes only as two channels.
+    const int wantChannels = channels != 0 ? 2 : 1;
+    const int wantRate = rates[rateIndex & 3];
+    if (state.stream != nullptr && (state.channels != wantChannels || state.sampleRate != wantRate))
+    {
+        Xma::Destroy(state.stream);
+        state.stream = nullptr;
+    }
+    if (state.stream == nullptr && Xma::Available())
+        state.stream = Xma::Create(wantChannels, wantRate);
+    else if (state.stream != nullptr)
+        Xma::Reset(state.stream);
+    state.channels = wantChannels;
+    state.sampleRate = wantRate;
     ctx.r3.u32 = X_ERROR_SUCCESS;
 }
 
@@ -251,31 +436,22 @@ PPC_FUNC(__imp__XMAInitializeContext)
 PPC_FUNC(__imp__XMAEnableContext)
 { Trace("XMAEnableContext", ctx);
     Kernel::CountImport("XMAEnableContext");
-
-    // What the title put in the context before asking for it to be decoded.
-    //
-    // The fields are bit packed and the layout has to be read off a working
-    // one rather than guessed: the buffer addresses and their sizes are in
-    // here, and without them there is no way to hand back even silence in the
-    // shape the caller expects.
+    std::lock_guard<std::mutex> lock(g_audioMutex);
+    auto found = g_xma.find(ctx.r3.u32);
+    if (found != g_xma.end())
     {
-        static std::atomic<int> announced{ 0 };
-        if (announced.fetch_add(1) < 3 && ctx.r3.u32 != 0)
+        found->second.enabled = true;
+        found->second.blocksThisEnable = 0;
+        Work(base, ctx.r3.u32);
+        g_enables.fetch_add(1, std::memory_order_relaxed);
+        if (XmaTrace())
         {
-            printf("xma: context 0x%08X enabled, its %u bytes are\n",
-                ctx.r3.u32, ContextSize);
-            for (uint32_t word = 0; word < ContextSize / 4; word++)
-            {
-                if ((word % 8) == 0) printf(" ");
-                printf(" %08X", Guest::Read32(base, ctx.r3.u32 + word * 4));
-                if ((word % 8) == 7) printf("\n");
-            }
-            fflush(stdout);
+            static auto first = std::chrono::steady_clock::now();
+            static std::atomic<int> count{ 0 };
+            if (count.fetch_add(1) < 200)
+                printf("xma:   enable at %.1f ms on thread %lu%s", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - first).count(), GetCurrentThreadId(), "\n");
         }
     }
-
-    std::lock_guard<std::mutex> lock(g_audioMutex);
-    g_contexts[ctx.r3.u32] = true;
     ctx.r3.u32 = X_ERROR_SUCCESS;
 }
 
@@ -284,70 +460,67 @@ PPC_FUNC(__imp__XMADisableContext)
 { Trace("XMADisableContext", ctx);
     Kernel::CountImport("XMADisableContext");
     std::lock_guard<std::mutex> lock(g_audioMutex);
-    g_contexts[ctx.r3.u32] = false;
+    auto found = g_xma.find(ctx.r3.u32);
+    if (found != g_xma.end()) found->second.enabled = false;
     ctx.r3.u32 = X_ERROR_SUCCESS;
 }
 
 // --- Buffer state ----------------------------------------------------------
-// The title fills an input buffer, marks it valid, and waits for the codec to
-// clear the flag. Reporting every input as already consumed and every output
-// as never ready keeps it feeding the decoder without ever blocking on one.
+// Each answer is read off the context block after the decoder has had its
+// turn, and each flag the title sets is followed by one.
 
-PPC_FUNC(__imp__XMAIsInputBuffer0Valid)  { Trace("XMAIsInputBuffer0Valid", ctx); ctx.r3.u32 = 0; }
-PPC_FUNC(__imp__XMAIsInputBuffer1Valid)  { Trace("XMAIsInputBuffer1Valid", ctx); ctx.r3.u32 = 0; }
-// Whether there is decoded audio waiting. There is, and it is silent.
-PPC_FUNC(__imp__XMAIsOutputBufferValid)
-{ Trace("XMAIsOutputBufferValid", ctx);
-    std::lock_guard<std::mutex> lock(g_audioMutex);
-
-    auto enabled = g_contexts.find(ctx.r3.u32);
-    if (enabled == g_contexts.end() || !enabled->second) { ctx.r3.u32 = 0; return; }
-
-    Decoder& decoder = DecoderFor(base, ctx.r3.u32);
-    if (decoder.outputBlocks == 0) { ctx.r3.u32 = 0; return; }
-
-    // Blocks become ready at the rate real hardware would produce them, not at
-    // the rate the title asks about them. A block is 128 samples at 48 kHz,
-    // which is 2.67 milliseconds; handing them over as fast as they are asked
-    // for runs the film's clock far ahead of itself.
-    const auto now = std::chrono::steady_clock::now();
-    if (decoder.lastBlock.time_since_epoch().count() == 0)
-        decoder.lastBlock = now;
-
-    while (now - decoder.lastBlock >= std::chrono::microseconds(2667))
+namespace
+{
+    uint32_t Advanced(uint8_t* base, uint32_t context, uint32_t word, uint32_t shift, uint32_t bits)
     {
-        decoder.lastBlock += std::chrono::microseconds(2667);
-        const uint32_t next = (decoder.writeOffset + 1) % decoder.outputBlocks;
-        if (next == decoder.readOffset) break;   // the title has not drained it
-        decoder.writeOffset = next;
+        std::lock_guard<std::mutex> lock(g_audioMutex);
+        Work(base, context);
+        const uint32_t value = Field(base, context, word, shift, bits);
+        if (XmaTrace())
+        {
+            static std::atomic<int> count{ 0 };
+            if (count.fetch_add(1) < 400)
+                printf("xma:   -> word %u bits %u+%u = %u (write %u read %u valid %u in0 %u in1 %u)%s", word, shift, bits, value,
+                    WriteOffset(base, context), ReadOffset(base, context), OutputValid(base, context), Input0Valid(base, context), Input1Valid(base, context), "\n");
+        }
+        return value;
     }
-
-    ctx.r3.u32 = (decoder.writeOffset != decoder.readOffset) ? 1u : 0u;
+    void Set(uint8_t* base, uint32_t context, uint32_t word, uint32_t shift, uint32_t bits, uint32_t value)
+    {
+        std::lock_guard<std::mutex> lock(g_audioMutex);
+        SetField(base, context, word, shift, bits, value);
+        Work(base, context);
+    }
 }
 
-PPC_FUNC(__imp__XMASetInputBuffer0Valid) { Trace("XMASetInputBuffer0Valid", ctx); ctx.r3.u32 = X_ERROR_SUCCESS; }
-PPC_FUNC(__imp__XMASetInputBuffer1Valid) { Trace("XMASetInputBuffer1Valid", ctx); ctx.r3.u32 = X_ERROR_SUCCESS; }
-PPC_FUNC(__imp__XMASetOutputBufferValid) { Trace("XMASetOutputBufferValid", ctx); ctx.r3.u32 = X_ERROR_SUCCESS; }
+PPC_FUNC(__imp__XMAIsInputBuffer0Valid)  { Trace("XMAIsInputBuffer0Valid", ctx); ctx.r3.u32 = Advanced(base, ctx.r3.u32, 0, 20, 1); }
+PPC_FUNC(__imp__XMAIsInputBuffer1Valid)  { Trace("XMAIsInputBuffer1Valid", ctx); ctx.r3.u32 = Advanced(base, ctx.r3.u32, 0, 21, 1); }
+PPC_FUNC(__imp__XMAIsOutputBufferValid)  { Trace("XMAIsOutputBufferValid", ctx); ctx.r3.u32 = Advanced(base, ctx.r3.u32, 9, 30, 1); }
 
-PPC_FUNC(__imp__XMAGetInputBufferReadOffset)  { Trace("XMAGetInputBufferReadOffset", ctx); ctx.r3.u32 = 0; }
-PPC_FUNC(__imp__XMAGetOutputBufferReadOffset)
-{ Trace("XMAGetOutputBufferReadOffset", ctx);
+PPC_FUNC(__imp__XMASetInputBuffer0Valid) { Trace("XMASetInputBuffer0Valid", ctx); Set(base, ctx.r3.u32, 0, 20, 1, 1); ctx.r3.u32 = X_ERROR_SUCCESS; }
+PPC_FUNC(__imp__XMASetInputBuffer1Valid) { Trace("XMASetInputBuffer1Valid", ctx); Set(base, ctx.r3.u32, 0, 21, 1, 1); ctx.r3.u32 = X_ERROR_SUCCESS; }
+PPC_FUNC(__imp__XMASetOutputBufferValid) { Trace("XMASetOutputBufferValid", ctx); Set(base, ctx.r3.u32, 9, 30, 1, 1); ctx.r3.u32 = X_ERROR_SUCCESS; }
+
+PPC_FUNC(__imp__XMAGetInputBufferReadOffset)
+{ Trace("XMAGetInputBufferReadOffset", ctx);
     std::lock_guard<std::mutex> lock(g_audioMutex);
-    ctx.r3.u32 = DecoderFor(base, ctx.r3.u32).readOffset;
+    Work(base, ctx.r3.u32);
+    ctx.r3.u32 = Guest::Read32(base, ctx.r3.u32 + 2 * 4) & 0x03FFFFFF;
 }
+PPC_FUNC(__imp__XMAGetOutputBufferReadOffset) { Trace("XMAGetOutputBufferReadOffset", ctx); ctx.r3.u32 = Advanced(base, ctx.r3.u32, 9, 0, 5); }
+PPC_FUNC(__imp__XMAGetOutputBufferWriteOffset) { Trace("XMAGetOutputBufferWriteOffset", ctx); ctx.r3.u32 = Advanced(base, ctx.r3.u32, 0, 27, 5); }
 
-PPC_FUNC(__imp__XMAGetOutputBufferWriteOffset)
-{ Trace("XMAGetOutputBufferWriteOffset", ctx);
+PPC_FUNC(__imp__XMASetInputBufferReadOffset)
+{ Trace("XMASetInputBufferReadOffset", ctx);
     std::lock_guard<std::mutex> lock(g_audioMutex);
-    ctx.r3.u32 = DecoderFor(base, ctx.r3.u32).writeOffset;
+    Guest::Write32(base, ctx.r3.u32 + 2 * 4, ctx.r4.u32 & 0x03FFFFFF);
+    auto found = g_xma.find(ctx.r3.u32);
+    if (found != g_xma.end()) found->second.packetInBuffer = (ctx.r4.u32 & 0x03FFFFFF) / (2048 * 8);
+    ctx.r3.u32 = X_ERROR_SUCCESS;
 }
-
-PPC_FUNC(__imp__XMASetInputBufferReadOffset)  { Trace("XMASetInputBufferReadOffset", ctx); ctx.r3.u32 = X_ERROR_SUCCESS; }
 PPC_FUNC(__imp__XMASetOutputBufferReadOffset)
 { Trace("XMASetOutputBufferReadOffset", ctx);
-    std::lock_guard<std::mutex> lock(g_audioMutex);
-    Decoder& decoder = DecoderFor(base, ctx.r3.u32);
-    if (decoder.outputBlocks != 0) decoder.readOffset = ctx.r4.u32 % decoder.outputBlocks;
+    Set(base, ctx.r3.u32, 9, 0, 5, ctx.r4.u32);
     ctx.r3.u32 = X_ERROR_SUCCESS;
 }
 
@@ -391,6 +564,19 @@ PPC_FUNC(__imp__XAudioSubmitRenderDriverFrame)
 {
     Kernel::CountImport("XAudioSubmitRenderDriverFrame");
 
+    {
+        static std::atomic<int> announced{ 0 };
+        const int n = announced.fetch_add(1);
+        if (XmaTrace() && (n < 3 || n == 600 || n == 1200))
+        {
+            printf("audio: frame %d: client 0x%08X, frame at 0x%08X, words", n, ctx.r3.u32, ctx.r4.u32);
+            for (uint32_t i = 0; i < 8; i++) printf(" %08X", Guest::Read32(base, ctx.r4.u32 + i * 4));
+            printf(", words at +1024:");
+            for (uint32_t i = 0; i < 4; i++) printf(" %08X", Guest::Read32(base, ctx.r4.u32 + 1024 + i * 4));
+            printf("\n");
+            fflush(stdout);
+        }
+    }
     // The frame the title just finished mixing, played. Success is reported
     // whatever happens to it: a title that waits for its own audio to drain
     // stops dead, so a frame the device could not take is dropped quietly.

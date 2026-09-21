@@ -611,6 +611,7 @@ namespace
                 Kernel::ReportApcs();
                 Scheduler::Report();
                 Audio::Report();
+                Kernel::ReportXma();
                 Gpu::ReportFences();
                 Kernel::ReportFileReads();
                 Gpu::ReportPolling();
