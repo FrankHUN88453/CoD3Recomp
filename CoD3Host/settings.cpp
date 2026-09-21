@@ -135,7 +135,13 @@ void Settings::Load(const std::filesystem::path& exeDirectory)
             const std::string key = Trim(text.substr(0, eq)), value = Trim(text.substr(eq + 1));
             if (key == "renderer") v.renderer = atoi(value.c_str());
             else if (key == "render_scale") v.renderScale = atoi(value.c_str());
+            else if (key == "texture_filter") v.textureFilter = atoi(value.c_str());
+            else if (key == "anisotropy") v.anisotropy = atoi(value.c_str());
+            else if (key == "vsync") v.vsync = atoi(value.c_str()) != 0;
+            else if (key == "antialiasing") v.antialiasing = atoi(value.c_str());
+            else if (key == "window_mode") v.windowMode = atoi(value.c_str());
             else if (key == "fps_overlay") v.fpsOverlay = atoi(value.c_str()) != 0;
+            else if (key == "stats_overlay") v.statsOverlay = atoi(value.c_str()) != 0;
             else if (key == "aim_assist") v.aimAssist = atoi(value.c_str()) != 0;
             else if (key == "controller") v.controller = atoi(value.c_str()) != 0;
             else if (key == "mouse_sensitivity") v.mouseSensitivity = float(atof(value.c_str()));
@@ -149,6 +155,10 @@ void Settings::Load(const std::filesystem::path& exeDirectory)
     }
     if (v.renderer < 0 || v.renderer > 2) v.renderer = 0;
     if (v.renderScale < 0 || v.renderScale > 4) v.renderScale = 0;
+    if (v.textureFilter < 0 || v.textureFilter > 3) v.textureFilter = 3;
+    if (v.anisotropy < 2 || v.anisotropy > 16) v.anisotropy = 16;
+    if (v.antialiasing < 0 || v.antialiasing > 1) v.antialiasing = 1;
+    if (v.windowMode < 0 || v.windowMode > 1) v.windowMode = 0;
     if (!(v.mouseSensitivity >= 0.1f && v.mouseSensitivity <= 3.0f)) v.mouseSensitivity = 1.0f;
     std::lock_guard<std::mutex> lock(g_mutex);
     g_values = v;
@@ -161,7 +171,8 @@ void Settings::Save()
     if (FILE* file = _wfopen(g_file.c_str(), L"wb"))
     {
         fprintf(file, "# Call of Duty 3 recompiled: the settings menu (F11) keeps its values here.\n");
-        fprintf(file, "[graphics]\nrenderer = %d\nrender_scale = %d\nfps_overlay = %d\n", v.renderer, v.renderScale, v.fpsOverlay ? 1 : 0);
+        fprintf(file, "[graphics]\nrenderer = %d\nrender_scale = %d\ntexture_filter = %d\nanisotropy = %d\nvsync = %d\nantialiasing = %d\nwindow_mode = %d\nfps_overlay = %d\nstats_overlay = %d\n",
+            v.renderer, v.renderScale, v.textureFilter, v.anisotropy, v.vsync ? 1 : 0, v.antialiasing, v.windowMode, v.fpsOverlay ? 1 : 0, v.statsOverlay ? 1 : 0);
         fprintf(file, "[game]\naim_assist = %d\ncontroller = %d\nmouse_sensitivity = %.2f\n", v.aimAssist ? 1 : 0, v.controller ? 1 : 0, v.mouseSensitivity);
         fprintf(file, "[keys]\n");
         for (int i = 0; i < ActionCount; i++) fprintf(file, "key_%s = %d\n", ActionKeys[i], v.keys[i]);

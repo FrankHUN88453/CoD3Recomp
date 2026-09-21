@@ -27,10 +27,7 @@
 #include <cstdlib>
 #include "scheduler.h"
 #include "sampler.h"
-#include "edram.h"
-#include "shaders.h"
-#include "raster.h"
-#include "d3d11_backend.h"
+#include "render.h"
 #include "timeline.h"
 #include "window.h"
 
@@ -258,8 +255,8 @@ namespace
         printf("\nstate at the first %s draw, render backend in %s mode:\n",
             PrimitiveName(primitive), modeNames[mode]);
         printf("  programs: vertex %016llx, pixel %016llx\n",
-            (unsigned long long)Shaders::LastHash(false),
-            (unsigned long long)Shaders::LastHash(true));
+            (unsigned long long)Render::CurrentProgramHash(false),
+            (unsigned long long)Render::CurrentProgramHash(true));
 
         // The float constant file holds shader inputs. Vertex programs read the
         // first 256 entries and pixel programs the second 256, so a pixel
@@ -356,7 +353,7 @@ namespace
             if (wantedProgram != nullptr && everyDraw && Kernel::Stats().filesOpened.load(std::memory_order_relaxed) >= 40)
             {
                 char name[24];
-                snprintf(name, sizeof(name), "%016llx", (unsigned long long)Shaders::LastHash(false));
+                snprintf(name, sizeof(name), "%016llx", (unsigned long long)Render::CurrentProgramHash(false));
                 if (strncmp(name, wantedProgram, strlen(wantedProgram)) == 0)
                 {
                     auto f = [](uint32_t index) { const uint32_t bits = Gpu::ReadRegister(Gpu::ApertureBase + (0x4000 + index) * 4); float v; memcpy(&v, &bits, 4); return v; };
@@ -374,7 +371,7 @@ namespace
             printf("draw: prim %u count %u source %u mode %u depth %08X mask %08X vs_%016llx ps_%016llx\n",
                 primitive, initiator >> 16, (initiator >> 6) & 3, Gpu::ReadRegister(Gpu::ApertureBase + 0x2208 * 4) & 7,
                 Gpu::ReadRegister(Gpu::ApertureBase + 0x2200 * 4), Gpu::ReadRegister(Gpu::ApertureBase + 0x2104 * 4),
-                (unsigned long long)Shaders::LastHash(false), (unsigned long long)Shaders::LastHash(true));
+                (unsigned long long)Render::CurrentProgramHash(false), (unsigned long long)Render::CurrentProgramHash(true));
             // COD3_TRACEDRAWVS=hex: the packets before the first draws of that
             // vertex program, and its constants c80..c95, for finding which
             // packet sets what the program reads.
@@ -383,7 +380,7 @@ namespace
             if (wantedProgram != nullptr && shown < 4)
             {
                 char name[24];
-                snprintf(name, sizeof(name), "%016llx", (unsigned long long)Shaders::LastHash(false));
+                snprintf(name, sizeof(name), "%016llx", (unsigned long long)Render::CurrentProgramHash(false));
                 if (strncmp(name, wantedProgram, strlen(wantedProgram)) == 0)
                 {
                     shown++;
@@ -404,13 +401,8 @@ namespace
         // in copy mode. It is the only draw in the stream that this runtime can
         // carry out completely, because it moves pixels rather than making them.
         const uint32_t mode = Gpu::ReadRegister(Gpu::ApertureBase + 0x2208 * 4) & 7;
-        if (D3D11Backend::Enabled())
-        {
-            if (primitive == 8 && mode == 6) D3D11Backend::Resolve();
-            else D3D11Backend::Draw(initiator, indexBase, indexWord);
-        }
-        else if (primitive == 8 && mode == 6) Edram::Resolve();
-        else Raster::Draw(initiator, indexBase, indexWord);
+        if (primitive == 8 && mode == 6) Render::Resolve();
+        else Render::Draw(initiator, indexBase, indexWord);
     }
 
     // A fence.
@@ -542,7 +534,7 @@ namespace
             Kernel::Stats().swapsReached.store(reached, std::memory_order_release);
         }
         Window::SetFrontBuffer(Guest::PhysicalAlias(surface), width, height);
-        D3D11Backend::Swap(surface, width, height);
+        Render::Swap(surface, width, height);
     }
 
     void WriteFence(uint32_t initiator, uint32_t address, uint32_t value)
@@ -837,7 +829,7 @@ namespace
                 g_draws.lastVertexShader = address;
             }
         }
-        Shaders::Capture(pixel, address, sizeDwords);
+        Render::ShaderLoaded(pixel, address, sizeDwords);
     }
 
     // IM_LOAD is the same upload by reference: the packet names where the
@@ -1206,13 +1198,13 @@ uint32_t Gpu::ProcessRing(uint32_t ringBase, uint32_t ringSizeDwords,
             {
             case OpDrawIndx:
                 local.draws++;
-                if (TraceConstants()) printf("const: draw indexed vs_%016llx\n", (unsigned long long)Shaders::LastHash(false));
+                if (TraceConstants()) printf("const: draw indexed vs_%016llx\n", (unsigned long long)Render::CurrentProgramHash(false));
                 DecodeDraw(ReadDword(cursor + 2), ReadDword(cursor + 3),
                            ReadDword(cursor + 4));
                 break;
             case OpDrawIndx2:
                 local.draws++;
-                if (TraceConstants()) printf("const: draw vs_%016llx\n", (unsigned long long)Shaders::LastHash(false));
+                if (TraceConstants()) printf("const: draw vs_%016llx\n", (unsigned long long)Render::CurrentProgramHash(false));
                 DecodeDraw(ReadDword(cursor + 1));
                 break;
             case OpImLoadImmediate:
@@ -1611,7 +1603,7 @@ namespace
                 else if (opcode == OpDrawIndx && cursor + 2 < dwords)
                 {
                     local.draws++;
-                    if (TraceConstants()) printf("const: draw indexed vs_%016llx\n", (unsigned long long)Shaders::LastHash(false));
+                    if (TraceConstants()) printf("const: draw indexed vs_%016llx\n", (unsigned long long)Render::CurrentProgramHash(false));
                     DecodeDraw(
                         Guest::Read32(Guest::Base, base + (cursor + 2) * 4),
                         cursor + 3 < dwords
@@ -1622,7 +1614,7 @@ namespace
                 else if (opcode == OpDrawIndx2 && cursor + 1 < dwords)
                 {
                     local.draws++;
-                    if (TraceConstants()) printf("const: draw vs_%016llx\n", (unsigned long long)Shaders::LastHash(false));
+                    if (TraceConstants()) printf("const: draw vs_%016llx\n", (unsigned long long)Render::CurrentProgramHash(false));
                     const uint32_t w1 = Guest::Read32(Guest::Base, base + (cursor + 1) * 4);
                     DumpDraw("DRAW_INDX_2", header, w1,
                         cursor + 2 < dwords ? Guest::Read32(Guest::Base, base + (cursor + 2) * 4) : 0);

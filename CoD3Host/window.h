@@ -1,7 +1,7 @@
 #pragma once
 
-// The window the finished frame goes to, and the status view that stands in
-// while there is no finished frame.
+// The window the finished frames go to: made and pumped on a thread of its
+// own; the renderer presents into it from the command thread.
 
 #include <cstdint>
 
@@ -26,13 +26,8 @@ namespace Window
     // something to look at.
     void SetCursorHidden(bool hidden);
 
-    // Where the guest resolved its last frame. Everything after this is a blit.
+    // Where the guest resolved its last frame, for the count of frames.
     void SetFrontBuffer(uint32_t address, uint32_t width, uint32_t height);
     // Wheel notches turned since the last call, positive away from the user.
     int TakeWheel();
-
-    // How that buffer is laid out. A resolved surface is wider than the part
-    // that is visible, and its texels are tiled rather than in reading order,
-    // so the presenter cannot walk it row by row without being told.
-    void SetFrontBufferLayout(uint32_t pitch, bool tiled);
 }

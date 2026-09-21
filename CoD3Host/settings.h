@@ -26,8 +26,14 @@ namespace Settings
     struct Values
     {
         int renderer = 0;             // 0 Direct3D 11; 1 and 2 are names only
-        int renderScale = 0;          // 0 by the window's height, 1..4 a fixed multiple
+        int renderScale = 0;          // 0 the window's height, 1..4 a fixed multiple of 1040x624
+        int textureFilter = 3;        // 0 the title's own, 1 bilinear, 2 trilinear, 3 anisotropic
+        int anisotropy = 16;          // 2..16, with textureFilter 3
+        bool vsync = true;
+        int antialiasing = 1;         // 0 none, 1 FXAA
+        int windowMode = 0;           // 0 windowed, 1 borderless full screen
         bool fpsOverlay = false;
+        bool statsOverlay = false;    // the renderer's counters over the picture
         bool aimAssist = true;        // the title's own, through its config
         bool controller = true;       // read a pad when one is there
         float mouseSensitivity = 1.0f;   // both axes, 0.1 .. 3

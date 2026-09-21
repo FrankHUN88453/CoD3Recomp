@@ -1,5 +1,6 @@
 #include "xenos_hlsl.h"
 
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -39,6 +40,53 @@ namespace
 
         Translator(const std::vector<uint32_t>& w, bool p) : words(w), pixel(p) {}
 
+        // A float constant by index, or relative to a0. The indices read
+        // are noted, and packed once the program is translated, so the
+        // backend uploads only those; a relative read means the whole file.
+        std::set<uint32_t> constantsRead;
+        bool relativeConstants = false;
+
+        std::string Constant(uint32_t index, bool relative)
+        {
+            if (relative) { relativeConstants = true; return Format("c[(a0 + %u) & 255]", index & 0xFF); }
+            constantsRead.insert(index & 0xFF);
+            return Format("c[%u]", index & 0xFF);
+        }
+
+        // The body's c[N] rewritten to the packed positions.
+        void PackConstants()
+        {
+            if (relativeConstants || constantsRead.empty()) return;
+            uint32_t position[256];
+            for (uint32_t i = 0; i < 256; i++) position[i] = 0;
+            for (uint32_t index : constantsRead)
+            {
+                position[index] = uint32_t(out.constantMap.size());
+                out.constantMap.push_back(uint16_t(index));
+            }
+            std::string packed;
+            packed.reserve(body.size());
+            for (size_t i = 0; i < body.size();)
+            {
+                const bool word = i > 0 && (isalnum(static_cast<unsigned char>(body[i - 1])) || body[i - 1] == '_');
+                if (!word && body.compare(i, 2, "c[") == 0 && isdigit(static_cast<unsigned char>(body[i + 2])))
+                {
+                    size_t end = i + 2;
+                    while (end < body.size() && isdigit(static_cast<unsigned char>(body[end]))) end++;
+                    if (end < body.size() && body[end] == ']')
+                    {
+                        const uint32_t index = uint32_t(strtoul(body.c_str() + i + 2, nullptr, 10)) & 0xFF;
+                        packed += Format("c[%u]", position[index]);
+                        i = end + 1;
+                        continue;
+                    }
+                }
+                packed += body[i];
+                i++;
+            }
+            body.swap(packed);
+        }
+
         void Line(const std::string& text)
         {
             body.append(size_t(indent) * 4, ' ');
@@ -57,7 +105,7 @@ namespace
             if (temporary)
                 base = (reg & 0x40) ? Format("r[(%u + aL) & 31]", reg & 0x1F) : Format("r[%u]", reg & 0x1F);
             else
-                base = relative ? Format("c[(a0 + %u) & 255]", reg & 0xFF) : Format("c[%u]", reg & 0xFF);
+                base = Constant(reg, relative);
             std::string swizzled = base + ".";
             for (uint32_t i = 0; i < 4; i++)
                 swizzled += Components[(i + ((swizzle >> (i * 2)) & 3)) & 3];
@@ -74,7 +122,7 @@ namespace
         {
             std::string base;
             if (temporary) base = (reg & 0x40) ? Format("r[(%u + aL) & 31]", reg & 0x1F) : Format("r[%u]", reg & 0x1F);
-            else base = relative ? Format("c[(a0 + %u) & 255]", reg & 0xFF) : Format("c[%u]", reg & 0xFF);
+            else base = Constant(reg, relative);
             // Which lanes of the third operand the two come from. The two
             // open translators disagree: Xenia says w and x, freedreno's
             // compiler says z and w and writes its operands into both pairs
@@ -304,7 +352,7 @@ namespace
                 // over the opcode's low bit, the third select and the middle
                 // of the third swizzle.
                 const uint32_t temporary = (scalarOpcode & 1) | (uint32_t(temp3) << 1) | (swizzle3 & 0x3C);
-                std::string constant = rel3 ? Format("c[(a0 + %u) & 255]", reg3) : Format("c[%u]", reg3);
+                std::string constant = Constant(reg3, rel3);
                 constant += "."; constant += Components[(3 + ((swizzle3 >> 6) & 3)) & 3];
                 std::string other = Format("r[%u].", temporary & 0x1F); other += Components[swizzle3 & 3];
                 if (absoluteConstants) { constant = "abs(" + constant + ")"; other = "abs(" + other + ")"; }
@@ -391,9 +439,7 @@ namespace
             if (!mini) Line(Format("fetchStride = %u;", stride));
             Line(Format("fetchAddress = (fetchIndex * fetchStride + %u) * 4;", offset));
 
-            const char* buffer = Format("vb%u", slot).c_str();
             std::string bufferName = Format("vb%u", slot);
-            (void)buffer;
             std::string decoded;
             const std::string scale = exponent != 0 ? Format(" * %.9g", double(exponent > 0 ? (1 << exponent) : 1.0 / (1 << -exponent))) : "";
             auto Normalised = [&](const std::string& value, int bits) -> std::string {
@@ -408,52 +454,52 @@ namespace
             };
             switch (format)
             {
-            case 36: decoded = Format("float4(asfloat(%s.Load(fetchAddress)), 0.0, 0.0, 1.0)", bufferName.c_str()); break;
-            case 37: decoded = Format("float4(asfloat(%s.Load2(fetchAddress)), 0.0, 1.0)", bufferName.c_str()); break;
-            case 57: decoded = Format("float4(asfloat(%s.Load3(fetchAddress)), 1.0)", bufferName.c_str()); break;
-            case 38: decoded = Format("asfloat(%s.Load4(fetchAddress))", bufferName.c_str()); break;
+            case 36: decoded = Format("float4(asfloat(bswap(%s.Load(fetchAddress))), 0.0, 0.0, 1.0)", bufferName.c_str()); break;
+            case 37: decoded = Format("float4(asfloat(bswap(%s.Load2(fetchAddress))), 0.0, 1.0)", bufferName.c_str()); break;
+            case 57: decoded = Format("float4(asfloat(bswap(%s.Load3(fetchAddress))), 1.0)", bufferName.c_str()); break;
+            case 38: decoded = Format("asfloat(bswap(%s.Load4(fetchAddress)))", bufferName.c_str()); break;
             case 6:
-                Line(Format("fetchWord = %s.Load(fetchAddress);", bufferName.c_str()));
+                Line(Format("fetchWord = bswap(%s.Load(fetchAddress));", bufferName.c_str()));
                 decoded = Format("float4(%s, %s, %s, %s)",
                     Normalised("fetchWord & 0xFF", 8).c_str(), Normalised("(fetchWord >> 8) & 0xFF", 8).c_str(),
                     Normalised("(fetchWord >> 16) & 0xFF", 8).c_str(), Normalised("fetchWord >> 24", 8).c_str());
                 break;
             case 7:
-                Line(Format("fetchWord = %s.Load(fetchAddress);", bufferName.c_str()));
+                Line(Format("fetchWord = bswap(%s.Load(fetchAddress));", bufferName.c_str()));
                 decoded = Format("float4(%s, %s, %s, %s)",
                     Normalised("fetchWord & 0x3FF", 10).c_str(), Normalised("(fetchWord >> 10) & 0x3FF", 10).c_str(),
                     Normalised("(fetchWord >> 20) & 0x3FF", 10).c_str(), Normalised("fetchWord >> 30", 2).c_str());
                 break;
             case 25:
-                Line(Format("fetchWord = %s.Load(fetchAddress);", bufferName.c_str()));
+                Line(Format("fetchWord = bswap(%s.Load(fetchAddress));", bufferName.c_str()));
                 decoded = Format("float4(%s, %s, 0.0, 1.0)",
                     Normalised("fetchWord & 0xFFFF", 16).c_str(), Normalised("fetchWord >> 16", 16).c_str());
                 break;
             case 26:
-                Line(Format("fetchWords = %s.Load2(fetchAddress);", bufferName.c_str()));
+                Line(Format("fetchWords = bswap(%s.Load2(fetchAddress));", bufferName.c_str()));
                 decoded = Format("float4(%s, %s, %s, %s)",
                     Normalised("fetchWords.x & 0xFFFF", 16).c_str(), Normalised("fetchWords.x >> 16", 16).c_str(),
                     Normalised("fetchWords.y & 0xFFFF", 16).c_str(), Normalised("fetchWords.y >> 16", 16).c_str());
                 break;
             case 31:
-                Line(Format("fetchWord = %s.Load(fetchAddress);", bufferName.c_str()));
+                Line(Format("fetchWord = bswap(%s.Load(fetchAddress));", bufferName.c_str()));
                 decoded = "float4(f16tof32(fetchWord & 0xFFFF), f16tof32(fetchWord >> 16), 0.0, 1.0)";
                 break;
             case 32:
-                Line(Format("fetchWords = %s.Load2(fetchAddress);", bufferName.c_str()));
+                Line(Format("fetchWords = bswap(%s.Load2(fetchAddress));", bufferName.c_str()));
                 decoded = "float4(f16tof32(fetchWords.x & 0xFFFF), f16tof32(fetchWords.x >> 16), "
                           "f16tof32(fetchWords.y & 0xFFFF), f16tof32(fetchWords.y >> 16))";
                 break;
             case 33:
-                Line(Format("fetchWord = %s.Load(fetchAddress);", bufferName.c_str()));
+                Line(Format("fetchWord = bswap(%s.Load(fetchAddress));", bufferName.c_str()));
                 decoded = Format("float4(%s, 0.0, 0.0, 1.0)", Normalised("fetchWord", 32).c_str());
                 break;
             case 34:
-                Line(Format("fetchWords = %s.Load2(fetchAddress);", bufferName.c_str()));
+                Line(Format("fetchWords = bswap(%s.Load2(fetchAddress));", bufferName.c_str()));
                 decoded = Format("float4(%s, %s, 0.0, 1.0)", Normalised("fetchWords.x", 32).c_str(), Normalised("fetchWords.y", 32).c_str());
                 break;
             case 35:
-                Line(Format("fetchWords4 = %s.Load4(fetchAddress);", bufferName.c_str()));
+                Line(Format("fetchWords4 = bswap(%s.Load4(fetchAddress));", bufferName.c_str()));
                 decoded = Format("float4(%s, %s, %s, %s)", Normalised("fetchWords4.x", 32).c_str(), Normalised("fetchWords4.y", 32).c_str(),
                     Normalised("fetchWords4.z", 32).c_str(), Normalised("fetchWords4.w", 32).c_str());
                 break;
@@ -845,12 +891,26 @@ namespace
     };
 }
 
+uint64_t XenosHlsl::Version()
+{
+    // A number that changes when the translation would, or when one of the
+    // environment knobs that shape the HLSL is set: the disk cache keyed by
+    // it then starts afresh rather than serving the other translation.
+    std::string text = "xenos_hlsl 2026-09-21 bswap packed";
+    if (const char* lanes = getenv("COD3_SCALARLANES")) { text += " lanes="; text += lanes; }
+    if (const char* show = getenv("COD3_D3DSHOW")) { text += " show="; text += show; }
+    uint64_t hash = 14695981039346656037ull;
+    for (unsigned char c : text) { hash ^= c; hash *= 1099511628211ull; }
+    return hash;
+}
+
 XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, bool pixel)
 {
     Translator translator(words, pixel);
     const bool ran = translator.Run();
     Translation& out = translator.out;
     if (!ran || !out.problem.empty()) { out.ok = false; return out; }
+    translator.PackConstants();
 
     std::string hlsl;
     hlsl += "// Translated from the console's microcode.\n";
@@ -864,6 +924,13 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
             "    float4 textureSize[32];  // width, height, 1/width, 1/height\n"
             "    uint4 textureAdjustment[32];   // swizzle, sign modes, unused, unused\n"
             "};\n";
+    // The vertex buffers are bound as they lie in the console's memory, big
+    // endian, and every word fetched is turned round here: a buffer upload
+    // is then one copy, and the title's dynamic buffers cost what they are.
+    hlsl += "uint bswap(uint v) { return (v >> 24) | ((v >> 8) & 0xFF00u) | ((v << 8) & 0xFF0000u) | (v << 24); }\n"
+            "uint2 bswap(uint2 v) { return uint2(bswap(v.x), bswap(v.y)); }\n"
+            "uint3 bswap(uint3 v) { return uint3(bswap(v.x), bswap(v.y), bswap(v.z)); }\n"
+            "uint4 bswap(uint4 v) { return uint4(bswap(v.x), bswap(v.y), bswap(v.z), bswap(v.w)); }\n";
     hlsl += "float4 select4(bool4 v) { return float4(v.x ? 1.0 : 0.0, v.y ? 1.0 : 0.0, v.z ? 1.0 : 0.0, v.w ? 1.0 : 0.0); }\n";
     hlsl += "float max4(float4 v) { return max(max(v.x, v.y), max(v.z, v.w)); }\n";
     hlsl += "float4 blend4(float4 mask, float4 whenSet, float4 whenClear) { return whenSet * mask + whenClear * (1.0 - mask); }\n";

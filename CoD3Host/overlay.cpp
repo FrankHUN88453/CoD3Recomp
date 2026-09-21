@@ -1,5 +1,6 @@
 #include "overlay.h"
 #include "settings.h"
+#include "render_stats.h"
 
 #include <atomic>
 #include <chrono>
@@ -25,6 +26,10 @@ using Microsoft::WRL::ComPtr;
 
 namespace
 {
+    // The window thread hands messages in and the command thread draws:
+    // Dear ImGui is for one thread at a time, so both take this.
+    std::mutex g_mutex;
+
     std::atomic<bool> g_open{ false };
     std::atomic<bool> g_screenshotWanted{ false };
     std::atomic<bool> g_ready{ false };
@@ -136,10 +141,25 @@ namespace
                         g_edit.renderer = 0;
                     }
                     if (renderer != 0) ImGui::TextDisabled("Egyelőre csak a DirectX 11 érhető el.");
-                    const char* scales[] = { "Ablak szerint (automatikus)", "1x (1040x624)", "2x (2080x1248)", "3x (3120x1872)", "4x (4160x2496)" };
-                    ImGui::Combo("Felbontás skálázó", &g_edit.renderScale, scales, 5);
-                    ImGui::TextDisabled("A játék 1040x624-ben rajzol; ennek a többszöröse a kép.");
+                    const char* modes[] = { "Ablak", "Keret nélküli teljes képernyő" };
+                    ImGui::Combo("Megjelenítés", &g_edit.windowMode, modes, 2);
+                    ImGui::TextDisabled("Alt+Enter is váltja.");
+                    const char* scales[] = { "Ablak magassága szerint", "1x (1040x624)", "2x (2080x1248)", "3x (3120x1872)", "4x (4160x2496)" };
+                    ImGui::Combo("Belső felbontás", &g_edit.renderScale, scales, 5);
+                    ImGui::TextDisabled("A játék 1040x624-et rajzolt; itt az ablak magasságához, vagy egy többszöröséhez igazodik.");
+                    const char* filters[] = { "A játék saját", "Bilineáris", "Trilineáris", "Anizotróp" };
+                    ImGui::Combo("Textúraszűrés", &g_edit.textureFilter, filters, 4);
+                    if (g_edit.textureFilter == 3)
+                    {
+                        const char* levels[] = { "2x", "4x", "8x", "16x" };
+                        int level = g_edit.anisotropy >= 16 ? 3 : g_edit.anisotropy >= 8 ? 2 : g_edit.anisotropy >= 4 ? 1 : 0;
+                        if (ImGui::Combo("Anizotrópia", &level, levels, 4)) g_edit.anisotropy = 2 << level;
+                    }
+                    const char* aa[] = { "Nincs", "FXAA" };
+                    ImGui::Combo("Élsimítás", &g_edit.antialiasing, aa, 2);
+                    ImGui::Checkbox("Függőleges szinkron (VSync)", &g_edit.vsync);
                     ImGui::Checkbox("FPS megjelenítése", &g_edit.fpsOverlay);
+                    ImGui::Checkbox("Renderelő statisztika", &g_edit.statsOverlay);
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Irányítás"))
@@ -207,6 +227,7 @@ namespace
 void Overlay::Initialize(void* hwnd, ID3D11Device* device, ID3D11DeviceContext* context)
 {
     if (g_ready.load()) return;
+    std::lock_guard<std::mutex> lock(g_mutex);
     g_hwnd = static_cast<HWND>(hwnd);
     g_device = device;
     g_context = context;
@@ -246,6 +267,7 @@ void Overlay::RequestScreenshot() { g_screenshotWanted.store(true); }
 
 bool Overlay::HandleMessage(void* hwnd, uint32_t message, uint64_t wParam, int64_t lParam)
 {
+    std::lock_guard<std::mutex> lock(g_mutex);
     if (message == WM_KEYDOWN || message == WM_SYSKEYDOWN)
     {
         if (wParam == VK_F11) { Toggle(); return true; }
@@ -276,6 +298,7 @@ bool Overlay::HandleMessage(void* hwnd, uint32_t message, uint64_t wParam, int64
 void Overlay::Render(ID3D11RenderTargetView* back, ID3D11Texture2D* backTexture, int width, int height)
 {
     if (!g_ready.load()) return;
+    std::lock_guard<std::mutex> lock(g_mutex);
     // The counter, once a second.
     {
         const auto now = std::chrono::steady_clock::now();
@@ -293,18 +316,31 @@ void Overlay::Render(ID3D11RenderTargetView* back, ID3D11Texture2D* backTexture,
 
     const Settings::Values values = Settings::Get();
     const bool open = g_open.load();
-    if (!open && !values.fpsOverlay) return;
+    if (!open && !values.fpsOverlay && !values.statsOverlay) return;
 
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
-    if (values.fpsOverlay)
+    if (values.fpsOverlay || values.statsOverlay)
     {
         ImGui::SetNextWindowPos(ImVec2(8, 8));
         ImGui::SetNextWindowBgAlpha(0.45f);
         if (ImGui::Begin("fps", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                          ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing))
+        {
             ImGui::Text("%.0f fps", g_fps);
+            if (values.statsOverlay)
+            {
+                // The renderer's own counters, averaged over the last second.
+                const RenderStats::Snapshot s = RenderStats::Current();
+                ImGui::Text("frame %.2f ms  cpu %.2f ms  gpu %s", s.frameMilliseconds, s.cpuMilliseconds,
+                    s.gpuProfiled ? "" : "(COD3_GPU_PROFILE=1)");
+                if (s.gpuProfiled) { ImGui::SameLine(); ImGui::Text("%.2f ms", s.gpuMilliseconds); }
+                ImGui::Text("%.0f draws  %.0f k triangles  %.0f resolves  %.0f skipped", s.draws, s.triangles / 1000.0f, s.resolves, s.skipped);
+                ImGui::Text("switches: %.0f programs  %.0f textures  %.0f states  %.0f targets", s.shaderSwitches, s.textureSwitches, s.pipelineSwitches, s.targetSwitches);
+                ImGui::Text("uploads: %.0f textures  %.0f buffers  %.0f KB;  streamed %.0f KB", s.textureUploads, s.bufferUploads, s.uploadKilobytes, s.streamKilobytes);
+            }
+        }
         ImGui::End();
     }
     if (open) DrawMenu(width, height);

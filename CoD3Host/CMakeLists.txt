@@ -38,12 +38,14 @@ add_executable(CoD3 WIN32
     "title_trace.cpp"
     "pool_trace.cpp"
     "timeline.cpp"
-    "d3d11_backend.cpp"
+    "render_d3d11.cpp"
+    "render_state.cpp"
+    "render_pipeline.cpp"
+    "render_shaders.cpp"
+    "render_resources.cpp"
+    "render_stats.cpp"
     "xenos_hlsl.cpp"
     "gpu.cpp"
-    "edram.cpp"
-    "shaders.cpp"
-    "raster.cpp"
     "sampler.cpp"
     "watchpoint.cpp"
     "scheduler.cpp"
@@ -129,7 +131,4 @@ target_compile_options(CoD3 PRIVATE -g -gcodeview)
 # calls reach; see ExCreateThread for why that wants a large host stack.
 target_link_options(CoD3 PRIVATE /STACK:16777216)
 
-# The rasteriser is the one place the instruction set matters: its shader
-# interpreter permutes lanes with AVX and blends with SSE4.1.
-set_source_files_properties(raster.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
 target_link_options(CoD3 PRIVATE /DEBUG)

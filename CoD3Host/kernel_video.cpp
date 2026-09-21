@@ -21,11 +21,8 @@
 #include "audio_out.h"
 #include "scheduler.h"
 #include "gpu.h"
-#include "edram.h"
-#include "shaders.h"
-#include "raster.h"
+#include "render.h"
 #include "window.h"
-#include "d3d11_backend.h"
 #include "pool_trace.h"
 #include "timeline.h"
 
@@ -601,10 +598,7 @@ namespace
                 }
 
                 Gpu::ReportPacketMix();
-                Edram::Report();
-                Shaders::Report();
-                Raster::Report();
-                D3D11Backend::Report();
+                Render::Report();
                 PoolTrace::Report();
                 Timeline::Report();
                 Kernel::ReportImports();
@@ -1053,7 +1047,7 @@ PPC_FUNC(__imp__VdSwap)
             else
             {
                 Window::SetFrontBuffer(Guest::PhysicalAlias(surface), width, height);
-                D3D11Backend::Swap(surface, width, height);
+                Render::Swap(surface, width, height);
             }
         }
     }

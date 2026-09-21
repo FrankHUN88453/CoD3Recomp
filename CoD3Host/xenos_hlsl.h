@@ -38,6 +38,11 @@ namespace XenosHlsl
         std::vector<VertexFetch> vertexFetches;
         std::vector<TextureFetch> textureFetches;
         uint32_t interpolators = 0;   // how many the vertex program exports
+        // The float constants the program reads, packed: the HLSL's c[i] is
+        // the file's c[constantMap[i]], so the backend uploads only those.
+        // Empty when the program addresses constants relative to a0 and
+        // reads the file as it is.
+        std::vector<uint16_t> constantMap;
         uint32_t colourTargets = 1;   // a bit per colour target the pixel program writes
         bool writesDepth = false;
         bool usesKill = false;
@@ -45,4 +50,8 @@ namespace XenosHlsl
 
     // A vertex or pixel program from its microcode words.
     Translation Translate(const std::vector<uint32_t>& words, bool pixel);
+
+    // A number that changes whenever the translation would: the disk cache
+    // of compiled programs is keyed by it.
+    uint64_t Version();
 }
