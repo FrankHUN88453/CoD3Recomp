@@ -102,7 +102,12 @@ namespace RenderResources
     // it is new or changed. A surface a resolve made comes back as that.
     // Returns the white texture for what cannot be uploaded.
     Handle TextureFor(const uint32_t fetch[6], uint32_t& width, uint32_t& height, bool& resolved);
-    ID3D11ShaderResourceView* TextureView(Handle handle);
+    // The view of the kind the program samples it as (the fetch
+    // instruction's dimension: 1 flat, 2 volume, 3 cube): a program that
+    // reads a cube gets a cube (a white one when the texture is flat), one
+    // that reads a flat texture gets the first face of a cube, and a
+    // volume is white.
+    ID3D11ShaderResourceView* TextureView(Handle handle, uint32_t dimension);
     Handle WhiteTexture();
 
     // --- vertex buffers ---------------------------------------------------------------------

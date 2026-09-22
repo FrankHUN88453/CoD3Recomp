@@ -132,6 +132,8 @@ namespace
     {
         ComPtr<ID3D11Texture2D> texture;
         ComPtr<ID3D11ShaderResourceView> resource;
+        ComPtr<ID3D11ShaderResourceView> face;   // a cube's first face as a flat texture
+        bool cube = false;
         uint32_t key[4] = {};
         uint64_t fingerprint = 0;
         uint64_t checkedFrame = 0;      // the frame the fingerprint was last compared in
@@ -141,6 +143,10 @@ namespace
         bool live = false;
     };
     std::deque<TextureEntry> g_textures;   // by handle less one; handle 1 is the white texture
+    ComPtr<ID3D11Texture2D> g_whiteCube;
+    ComPtr<ID3D11ShaderResourceView> g_whiteCubeView;
+    ComPtr<ID3D11Texture3D> g_whiteVolume;
+    ComPtr<ID3D11ShaderResourceView> g_whiteVolumeView;
     RenderTable::KeyTable<4> g_textureKeys;
     std::vector<uint32_t> g_freeTextures;
 
@@ -287,14 +293,27 @@ namespace
         static const bool noMips = getenv("COD3_NOMIPS") != nullptr;
         if (noMips) levels = 1;
 
-        std::vector<std::vector<uint8_t>> pixels(levels);
-        std::vector<D3D11_SUBRESOURCE_DATA> initial(levels);
+        // A cube map: six faces, each a whole tiled picture of the size,
+        // one after another, each taking its rows rounded up to whole
+        // tiles. Its first level only: the faces' mips are not laid out
+        // where the arithmetic below would look.
+        const bool cube = ((fetch[5] >> 9) & 3) == 3;
+        const uint32_t faces = cube ? 6 : 1;
+        if (cube) levels = 1;
+        std::vector<std::vector<uint8_t>> pixels(levels * faces);
+        std::vector<D3D11_SUBRESOURCE_DATA> initial(levels * faces);
         uint32_t packedX = 0, packedY = 0;
         PackedBaseOffset(packedMips, width, height, packedX, packedY);
         uint32_t rowBytes = 0;
-        LinearLevel(data, format, endian, width, height, pitch, tiled, packedX, packedY, pixels[0], rowBytes);
-        initial[0] = { pixels[0].data(), rowBytes, 0 };
-        entry.bytes = pixels[0].size();
+        entry.bytes = 0;
+        for (uint32_t face = 0; face < faces; face++)
+        {
+            const uint32_t blocksHigh = (height + blockTexels - 1) / blockTexels;
+            const uint32_t faceBytes = std::max(pitch / blockTexels, 1u) * ((blocksHigh + 31) & ~31u) * blockBytes;
+            LinearLevel(data + size_t(face) * faceBytes, format, endian, width, height, pitch, tiled, packedX, packedY, pixels[face * levels], rowBytes);
+            initial[face * levels] = { pixels[face * levels].data(), rowBytes, 0 };
+            entry.bytes += pixels[face * levels].size();
+        }
 
         uint32_t offset = 0;
         for (uint32_t level = 1; level < levels; level++)
@@ -313,15 +332,27 @@ namespace
         desc.Width = compressed ? ((width + 3) & ~3u) : width;
         desc.Height = compressed ? ((height + 3) & ~3u) : height;
         desc.MipLevels = levels;
-        desc.ArraySize = 1;
+        desc.ArraySize = faces;
         desc.Format = hostFormat;
         desc.SampleDesc.Count = 1;
         desc.Usage = D3D11_USAGE_IMMUTABLE;
         desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        desc.MiscFlags = cube ? D3D11_RESOURCE_MISC_TEXTURECUBE : 0;
         entry.texture.Reset();
         entry.resource.Reset();
         if (FAILED(g_device->CreateTexture2D(&desc, initial.data(), &entry.texture))) return false;
         if (FAILED(g_device->CreateShaderResourceView(entry.texture.Get(), nullptr, &entry.resource))) return false;
+        entry.cube = cube;
+        entry.face.Reset();
+        if (cube)
+        {
+            D3D11_SHADER_RESOURCE_VIEW_DESC view{};
+            view.Format = hostFormat;
+            view.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+            view.Texture2DArray.MipLevels = 1;
+            view.Texture2DArray.ArraySize = 1;
+            g_device->CreateShaderResourceView(entry.texture.Get(), &view, &entry.face);
+        }
         entry.width = width;
         entry.height = height;
         entry.levels = levels;
@@ -469,6 +500,25 @@ void RenderResources::Initialize(ID3D11Device* device, ID3D11DeviceContext* cont
         device->CreateShaderResourceView(white.texture.Get(), nullptr, &white.resource);
     white.live = true;
     white.width = white.height = white.levels = 1;
+    // And a white cube for a program that reads a cube where the fetch
+    // constant names none.
+    desc.ArraySize = 6;
+    desc.MiscFlags = D3D11_RESOURCE_MISC_TEXTURECUBE;
+    D3D11_SUBRESOURCE_DATA faces[6];
+    for (D3D11_SUBRESOURCE_DATA& f : faces) f = initial;
+    if (SUCCEEDED(device->CreateTexture2D(&desc, faces, &g_whiteCube)))
+        device->CreateShaderResourceView(g_whiteCube.Get(), nullptr, &g_whiteCubeView);
+    // And a white volume: the title's volume textures are not uploaded
+    // (their tiling is another matter), and a program reading one reads
+    // white, as it did before.
+    D3D11_TEXTURE3D_DESC volume{};
+    volume.Width = volume.Height = volume.Depth = 1;
+    volume.MipLevels = 1;
+    volume.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    volume.Usage = D3D11_USAGE_IMMUTABLE;
+    volume.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    if (SUCCEEDED(device->CreateTexture3D(&volume, &initial, &g_whiteVolume)))
+        device->CreateShaderResourceView(g_whiteVolume.Get(), nullptr, &g_whiteVolumeView);
 }
 
 bool RenderResources::BeginFrame(uint64_t frame)
@@ -700,7 +750,9 @@ RenderState::Handle RenderResources::TextureFor(const uint32_t fetch[6], uint32_
     }
     if (format != 2 && format != 6 && format != 18 && format != 19 && format != 20) return 1;
 
-    const uint32_t key[4] = { base & 0x1FFFFFFFu, format, width, height };
+    const uint32_t dimension = (fetch[5] >> 9) & 3;
+    if (dimension == 2) return 1;   // a volume: not uploaded, white
+    const uint32_t key[4] = { base & 0x1FFFFFFFu, format | (dimension << 8), width, height };
     Handle handle = g_textureKeys.Find(key);
     const uint8_t* data = Guest::Base + Guest::PhysicalAlias(base);
     if (handle != 0)
@@ -732,10 +784,13 @@ RenderState::Handle RenderResources::TextureFor(const uint32_t fetch[6], uint32_
     return handle;
 }
 
-ID3D11ShaderResourceView* RenderResources::TextureView(Handle handle)
+ID3D11ShaderResourceView* RenderResources::TextureView(Handle handle, uint32_t dimension)
 {
     if (handle == 0 || handle > g_textures.size()) return nullptr;
-    return g_textures[handle - 1].resource.Get();
+    const TextureEntry& entry = g_textures[handle - 1];
+    if (dimension == 3) return entry.cube ? entry.resource.Get() : g_whiteCubeView.Get();
+    if (dimension == 2) return g_whiteVolumeView.Get();
+    return entry.cube ? entry.face.Get() : entry.resource.Get();
 }
 
 RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t bytes, uint32_t endian)

@@ -806,7 +806,7 @@ namespace
                 const Handle texture = RenderResources::TextureFor(words, width, height, resolved);
                 ID3D11ShaderResourceView* view;
                 if (resolved) view = RenderResources::ResolvedAt(words[1] & 0xFFFFF000u)->resource;
-                else view = RenderResources::TextureView(texture);
+                else view = RenderResources::TextureView(texture, fetch.dimension);
                 BindTexture(stage, fetch.slot, view);
                 BindSampler(stage, fetch.sampler, RenderPipeline::SamplerObject(RenderPipeline::Sampler(words)));
                 constants.textureSize[fetch.slot][0] = float(width);

@@ -10,13 +10,15 @@ processor decodes the packets the graphics driver queues.
 
 `CoD3.exe` installs the game from your own disc image and boots it into a window.
 The first level, Saint-Lô, is playable: the menus, the loading screen, the
-opening cutscene and the fighting run at 30 to 60 frames a second on the
-host's own GPU through Direct3D 11, drawn from the title's own shaders
+opening cutscene and the fighting run at the title's own 60 frames a second
+on the host's GPU through a Direct3D 11 renderer built for a PC (see
+[docs/renderer.md](docs/renderer.md)), drawn from the title's own shaders
 translated to HLSL, with the terrain, the buildings, the soldiers, the grass,
-the sky, the shadows, the HUD and the saved checkpoints all working. All
-fifteen levels' code is recompiled and every level loads and plays, the
-mission title cards, the mission failed screen and the checkpoints with them.
-The intro films do not play yet.
+the sky, the shadows, the HUD and the saved checkpoints all working, at the
+window's resolution with mip mapped, anisotropically filtered textures,
+FXAA and vertical sync. All fifteen levels' code is recompiled and every
+level loads and plays, the mission title cards, the mission failed screen
+and the checkpoints with them. The intro films do not play yet.
 
 ![The level](level.png)
 
@@ -43,11 +45,17 @@ takes it again. Every key can be changed in the settings menu.
 | F11 | settings menu |
 | F12 | screenshot into `screenshots/` |
 
-The settings menu (F11) has the render scale (a multiple of the title's 1040
-by 624, or by the window's height), a frame counter, the mouse sensitivity,
-the title's aim assist, the pad, and the keys. It keeps its values in
-`CoD3Recomp.ini` beside the executable. `CoD3.cfg` beside the executable
-holds console commands run at start (`seta com_maxfps 60` by default).
+The settings menu (F11) has the window mode (windowed or borderless full
+screen; Alt+Enter switches too), the internal resolution (the window's
+height, or a multiple of the title's 1040 by 624), the texture filtering
+and anisotropy, anti aliasing (FXAA), vertical sync, a frame counter and
+the renderer's statistics, the mouse sensitivity, the title's aim assist,
+the pad, and the keys. It keeps its values in `CoD3Recomp.ini` beside the
+executable. `CoD3.cfg` beside the executable holds console commands run at
+start (`seta com_maxfps 60` by default). The same settings can be forced
+from the environment for a run: `COD3_SCALE`, `COD3_TEXTURE_FILTER`,
+`COD3_ANISO`, `COD3_AA`, `COD3_VSYNC`, `COD3_FULLSCREEN`; and
+`COD3_RENDER_STATS=1` prints the renderer's counters once a second.
 
 Saved games go to `saves/` beside the executable.
 
@@ -131,7 +139,8 @@ scripted run. The level names are the folders under `sp`: `saint_lo`,
 | `CoD3Host/kernel_stubs.cpp` | Generated for everything not on that list |
 | `tools/XenonRecomp/` | The recompiler, with local fixes described in STATUS.md |
 | `CoD3Host/xenos_hlsl.cpp` | The title's shader microcode translated to HLSL |
-| `CoD3Host/d3d11_backend.cpp` | The picture through Direct3D 11 |
+| `CoD3Host/render*.cpp` | The Direct3D 11 renderer: state, pipeline and shader caches, resources, stats, the device ([docs/renderer.md](docs/renderer.md)) |
+| `scripts/compare_frames.py` | Compares two runs' frame dumps, for the renderer's visual regression check |
 | `CoD3Host/overlay.cpp`, `settings.cpp` | The settings menu (Dear ImGui) and its file |
 | `tools/CoD3Scan/` | XEX analysis: finds required addresses, repairs function boundaries, lists imports |
 | `scripts/recompile.ps1` | The whole pipeline, the coroutine patch (`scripts/patch_recomp.py main`) included; running XenonRecomp by hand needs that patch afterwards or the first level's scripts spin forever |

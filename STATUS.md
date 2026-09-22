@@ -90,9 +90,25 @@ What it took, beyond what the sections below describe, in the order found:
   merged by `recompile_level.ps1`) he sits, turns and gestures. The marks
   that remain in the level are in fragments nothing calls.
 
-Still open: the intro films (WMV) are skipped; the software rasteriser (`COD3_GPU=soft`) has regressed to black, and so has
-the Direct3D 11 backend's path for devices without constant buffer offsetting
-(`COD3_D3DNORING=1` shows it: the HUD alone on black).
+### A PC renderer in place of the emulated GPU
+
+The Direct3D 11 backend, the EDRAM model and the software rasteriser are
+replaced by a renderer built in layers over the command processor: the
+registers of a draw read once into a plain state, the state mapped to
+cached pipeline objects by integer handle, the programs found by the hash
+of their microcode with a disk cache that carries their metadata and a
+background precompile of everything captured, textures uploaded once with
+their mip levels, vertex buffers bound as they lie and turned round in the
+shader, indices and constants streamed through rings with only the
+constants a program reads going up, packed. The frame is presented from
+the command thread at the swap with vertical sync, FXAA and a fractional
+render scale from the window's height. The forest level went from 30 to
+60 frames a second, the draw path from 8.4 to 1.4 µs a draw; the numbers,
+the design and the audit of what was emulation are in
+[docs/renderer.md](docs/renderer.md).
+
+Still open: the intro films (WMV) are skipped; volume textures are white;
+the sound decodes but the title's mixer submits silence.
 
 The sections that follow are the history of getting here, oldest first.
 
