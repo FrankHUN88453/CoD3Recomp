@@ -317,6 +317,18 @@ RenderState::Handle RenderPipeline::Sampler(const uint32_t fetch[6])
     return g_sampler.Insert(key, MakeSampler(key[0]));
 }
 
+bool RenderPipeline::BlendTakesConstantAlpha(const uint32_t control[4])
+{
+    for (int i = 0; i < 4; i++)
+    {
+        const uint32_t word = control[i];
+        const uint32_t factors[4] = { word & 0x1F, (word >> 8) & 0x1F, (word >> 16) & 0x1F, (word >> 24) & 0x1F };
+        for (uint32_t factor : factors)
+            if (factor == 14 || factor == 15) return true;
+    }
+    return false;
+}
+
 ID3D11BlendState* RenderPipeline::BlendObject(Handle handle) { return g_blend.Get(handle); }
 ID3D11DepthStencilState* RenderPipeline::DepthObject(Handle handle) { return g_depth.Get(handle); }
 ID3D11RasterizerState* RenderPipeline::RasterizerObject(Handle handle) { return g_rasterizer.Get(handle); }

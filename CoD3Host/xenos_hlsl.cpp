@@ -529,6 +529,15 @@ namespace
             const bool isPredicated = ((d1 >> 31) & 1) != 0;
             int lodBias = int((d2 >> 2) & 0x7F);
             if (lodBias >= 64) lodBias -= 128;
+            // The offsets the fetch adds to its coordinates, signed five bit
+            // fields in halves of a texel. The title's shadows are four
+            // fetches of one map at the corners of a texel, and without
+            // these they are four fetches of the same texel: the filtering
+            // collapses and a surface comes out wholly lit or wholly dark.
+            auto offsetOf = [](uint32_t bits) { int value = int(bits & 0x1F); return value >= 16 ? value - 32 : value; };
+            // COD3_NOFETCHOFFSET=1 leaves them out again, to see what they do.
+            static const bool noOffsets = getenv("COD3_NOFETCHOFFSET") != nullptr;
+            const int offsetX = noOffsets ? 0 : offsetOf(d2 >> 16), offsetY = noOffsets ? 0 : offsetOf(d2 >> 21), offsetZ = offsetOf(d2 >> 26);
             const uint32_t dimension = (d2 >> 14) & 3;
             const bool predicateCondition = ((d2 >> 31) & 1) != 0;
 
@@ -590,6 +599,11 @@ namespace
             std::string location;
             if (dimension == 3) location = Format("cubeDirection(%s)", coordinate.c_str());
             else location = unnormalised ? Format("((%s).xy * %s.zw)", coordinate.c_str(), size.c_str()) : Format("(%s).xy", coordinate.c_str());
+            // The offsets are texels; the coordinates are the texture's own
+            // measure, so they go through its size.
+            if (dimension != 3 && (offsetX != 0 || offsetY != 0))
+                location = Format("(%s + float2(%.4f, %.4f) * %s.zw)", location.c_str(), offsetX * 0.5, offsetY * 0.5, size.c_str());
+            (void)offsetZ;
             if (useRegisterLod || !pixel)
                 sample = Format("%s.SampleLevel(%s, %s, %s)", texture.c_str(), sampler.c_str(), location.c_str(),
                     useRegisterLod ? "textureLod" : "0.0");
@@ -936,9 +950,10 @@ uint64_t XenosHlsl::Version()
     // A number that changes when the translation would, or when one of the
     // environment knobs that shape the HLSL is set: the disk cache keyed by
     // it then starts afresh rather than serving the other translation.
-    std::string text = "xenos_hlsl 2026-09-22 bswap packed flat3d";
+    std::string text = "xenos_hlsl 2026-09-22 bswap packed flat3d fetch offsets";
     if (const char* lanes = getenv("COD3_SCALARLANES")) { text += " lanes="; text += lanes; }
     if (const char* show = getenv("COD3_D3DSHOW")) { text += " show="; text += show; }
+    if (getenv("COD3_NOFETCHOFFSET")) text += " no offsets";
     uint64_t hash = 14695981039346656037ull;
     for (unsigned char c : text) { hash ^= c; hash *= 1099511628211ull; }
     return hash;

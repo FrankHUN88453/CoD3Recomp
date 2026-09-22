@@ -45,6 +45,12 @@ namespace RenderPipeline
     Handle Sampler(const uint32_t fetch[6]);
 
     ID3D11BlendState* BlendObject(Handle handle);
+
+    // Whether a blend state was built from a factor that is the constant
+    // colour's alpha rather than its colour. Direct3D takes one factor
+    // vector and uses its rgb for the colour channels, so the alpha has to
+    // be put there instead; the caller does that with the factor it binds.
+    bool BlendTakesConstantAlpha(const uint32_t control[4]);
     ID3D11DepthStencilState* DepthObject(Handle handle);
     ID3D11RasterizerState* RasterizerObject(Handle handle);
     ID3D11SamplerState* SamplerObject(Handle handle);

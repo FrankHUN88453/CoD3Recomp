@@ -614,6 +614,13 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
     out.blend = RenderPipeline::Blend(state.blendControl, state.colorMask);
     out.depth = RenderPipeline::Depth(out.depthView ? state.depthControl : 0, state.stencilRefMask);
     memcpy(out.blendFactor, state.blendFactor, sizeof(out.blendFactor));
+    // A factor that is the constant colour's alpha: Direct3D multiplies the
+    // colour channels by the factor's rgb, so the alpha goes there. (The
+    // title's bloom and its exposure pass blend by the constant alpha, and
+    // with the rgb of a factor that is (0,0,0,1) they came out as nothing
+    // at all.)
+    if (RenderPipeline::BlendTakesConstantAlpha(state.blendControl))
+        out.blendFactor[0] = out.blendFactor[1] = out.blendFactor[2] = state.blendFactor[3];
     out.stencilReference = state.stencilRefMask & 0xFF;
     // Only the opaque draws may go flat: a blended one in a flat colour
     // with an alpha of one would cover the frame.

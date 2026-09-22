@@ -85,6 +85,13 @@ texture, a constant or a state between nearly every pair), so there is
 nothing for a reordering pass to merge that the order-dependent draws
 (blended, particles, the HUD) would allow.
 
+A texture fetch carries three signed offsets in halves of a texel, and
+they are put into the coordinates. The title's shadows are one map
+fetched four times at the corners of a texel; without the offsets the
+four fetches are the same texel, the filtering collapses and a surface
+comes out wholly lit or wholly dark. `COD3_NOFETCHOFFSET=1` leaves them
+out again, for a comparison.
+
 **render_pipeline**: blend, depth stencil, rasteriser and sampler states
 by integer handle. The key is the register words that define the state
 (five words for blend, two for depth, one for the rasteriser, one for a
@@ -92,7 +99,11 @@ sampler), hashed into a small open addressing table (`render_table.h`).
 A hit is a few loads and a `memcmp`; a miss creates the object once. The
 sampler cache is where the PC's filtering is decided: `COD3_TEXTURE_FILTER`
 and `COD3_ANISO`, or the settings menu, lay bilinear, trilinear or
-anisotropic filtering over the title's own fetch constants.
+anisotropic filtering over the title's own fetch constants. Two of the
+console's blend factors are the constant colour's *alpha*, which Direct3D
+does not have: it multiplies the colour channels by the factor's rgb. The
+command layer puts the alpha there when the state was built from one of
+those factors.
 
 **render_shaders**: a program is known by the FNV hash of its microcode
 (the same hash the captured files are named by). The stream's `IM_LOAD`
@@ -230,7 +241,7 @@ knows), and `COD3_PAD="40:lt/8"` holds the left (or `rt`, right)
 trigger for that many seconds: aiming, firing. Diagnostics: `COD3_D3DDEBUG`
 (the debug layer), `COD3_D3DFRAME=N|auto|loading` with `COD3_D3DDRAWDUMP`,
 `COD3_FRAMEDUMP`, `COD3_D3DSKIPVS`, `COD3_D3DFLAT`, `COD3_DUMPHLSL`,
-`COD3_D3DTEXDUMP`. In the frame log a texture that reads white says why
+`COD3_D3DTEXDUMP`, `COD3_NOFETCHOFFSET`. In the frame log a texture that reads white says why
 (`WHITE: no texture in the fetch constant`, `format not uploaded`, `upload
 failed`), and the first draw that wants a program that could not be built
 says which and why; the captured programs that fail to translate are only
