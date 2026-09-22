@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 struct ID3D11Device;
 struct ID3D11DeviceContext;
@@ -22,8 +23,14 @@ namespace Overlay
     // was the menu's.
     bool HandleMessage(void* hwnd, uint32_t message, uint64_t wParam, int64_t lParam);
 
+    // The settings menu or the console is up: the keys and the mouse are
+    // theirs, not the title's.
     bool IsOpen();
     void Toggle();
+    void ToggleConsole();
+
+    // A line for the console's log, from anywhere.
+    void ConsolePrint(const std::string& line);
     void RequestScreenshot();
 
     // Frames the title finished, for the counter; called at every swap.

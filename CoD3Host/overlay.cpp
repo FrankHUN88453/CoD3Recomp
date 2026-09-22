@@ -1,4 +1,5 @@
 #include "overlay.h"
+#include "kernel.h"
 #include "settings.h"
 #include "render_stats.h"
 
@@ -6,9 +7,11 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <ctime>
 #include <filesystem>
 #include <mutex>
+#include <string>
 #include <vector>
 
 #include <Windows.h>
@@ -27,11 +30,102 @@ using Microsoft::WRL::ComPtr;
 namespace
 {
     // The window thread hands messages in and the command thread draws:
-    // Dear ImGui is for one thread at a time, so both take this.
-    std::mutex g_mutex;
+    // Dear ImGui is for one thread at a time, so both take this. Recursive,
+    // because the render sends the window a message of its own (the input
+    // method's window, placed for the console's text field), and the
+    // window procedure runs on the rendering thread, inside the lock.
+    std::recursive_mutex g_mutex;
 
     std::atomic<bool> g_open{ false };
+    std::atomic<bool> g_console{ false };
     std::atomic<bool> g_screenshotWanted{ false };
+
+    // The console: what was typed and what was said back, under the
+    // overlay's lock. The title's own console was stripped from this build
+    // (its "toggleconsole" and its Com_Printf are gone), so this is the
+    // host's: the commands go to the title's command buffer, which still
+    // runs them, and the answers are only what this side can say.
+    std::deque<std::string> g_consoleLines;
+    std::vector<std::string> g_consoleHistory;
+    int g_consoleHistoryAt = -1;
+    char g_consoleInput[1024] = {};
+    bool g_consoleFocus = false;
+    bool g_consoleScroll = false;
+
+    void ConsoleLine(const std::string& line)
+    {
+        g_consoleLines.push_back(line);
+        if (g_consoleLines.size() > 400) g_consoleLines.pop_front();
+        g_consoleScroll = true;
+    }
+
+    int ConsoleInputCallback(ImGuiInputTextCallbackData* data)
+    {
+        // Up and down through the history.
+        if (data->EventFlag != ImGuiInputTextFlags_CallbackHistory || g_consoleHistory.empty()) return 0;
+        const int count = int(g_consoleHistory.size());
+        if (data->EventKey == ImGuiKey_UpArrow) g_consoleHistoryAt = g_consoleHistoryAt < 0 ? count - 1 : std::max(0, g_consoleHistoryAt - 1);
+        else if (data->EventKey == ImGuiKey_DownArrow) g_consoleHistoryAt = g_consoleHistoryAt < 0 ? -1 : (g_consoleHistoryAt + 1 >= count ? -1 : g_consoleHistoryAt + 1);
+        data->DeleteChars(0, data->BufTextLen);
+        if (g_consoleHistoryAt >= 0) data->InsertChars(0, g_consoleHistory[size_t(g_consoleHistoryAt)].c_str());
+        return 0;
+    }
+
+    void RunConsoleLine(const std::string& typed)
+    {
+        std::string line = typed;
+        while (!line.empty() && (line.back() == ' ' || line.back() == '\t')) line.pop_back();
+        size_t first = 0;
+        while (first < line.size() && (line[first] == ' ' || line[first] == '\t')) first++;
+        line = line.substr(first);
+        if (line.empty()) return;
+        ConsoleLine("] " + line);
+        if (g_consoleHistory.empty() || g_consoleHistory.back() != line) g_consoleHistory.push_back(line);
+        if (g_consoleHistory.size() > 100) g_consoleHistory.erase(g_consoleHistory.begin());
+        g_consoleHistoryAt = -1;
+        if (line == "help" || line == "?")
+        {
+            ConsoleLine("A parancsok a játék saját parancspufferére kerülnek, mint a chapter select \"spmap\"-je.");
+            ConsoleLine("Példák: spmap forest   map_restart   cg_fov 80   timescale 0.5   god   noclip   give all   seta com_maxfps 60");
+            ConsoleLine("A játék válaszai (Com_Printf) ebből a buildből ki vannak fordítva, ezért ide csak a saját sorai kerülnek.");
+            ConsoleLine("clear: a napló törlése.   ` vagy ~ vagy Esc: bezárás.");
+            return;
+        }
+        if (line == "clear") { g_consoleLines.clear(); return; }
+        Kernel::QueueConsoleCommand(line);
+    }
+
+    void DrawConsole(int width, int height)
+    {
+        ImGui::SetNextWindowPos(ImVec2(0, 0));
+        ImGui::SetNextWindowSize(ImVec2(float(width), float(height) * 0.45f));
+        ImGui::SetNextWindowBgAlpha(0.85f);
+        if (!ImGui::Begin("Konzol", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings))
+        {
+            ImGui::End();
+            return;
+        }
+        const float inputHeight = ImGui::GetFrameHeightWithSpacing() + 4.0f;
+        if (ImGui::BeginChild("log", ImVec2(0, -inputHeight), false, ImGuiWindowFlags_HorizontalScrollbar))
+        {
+            if (g_consoleLines.empty()) ImGui::TextDisabled("Konzol. \"help\" a példákhoz.");
+            for (const std::string& line : g_consoleLines) ImGui::TextUnformatted(line.c_str());
+            if (g_consoleScroll) { ImGui::SetScrollHereY(1.0f); g_consoleScroll = false; }
+        }
+        ImGui::EndChild();
+        ImGui::Separator();
+        ImGui::SetNextItemWidth(-1.0f);
+        if (g_consoleFocus) { ImGui::SetKeyboardFocusHere(); g_consoleFocus = false; }
+        const ImGuiInputTextFlags flags = ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackHistory;
+        if (ImGui::InputText("##input", g_consoleInput, sizeof(g_consoleInput), flags, ConsoleInputCallback))
+        {
+            RunConsoleLine(g_consoleInput);
+            g_consoleInput[0] = 0;
+            g_consoleFocus = true;
+        }
+        ImGui::End();
+    }
+
     std::atomic<bool> g_ready{ false };
     HWND g_hwnd = nullptr;
     ID3D11Device* g_device = nullptr;
@@ -227,7 +321,7 @@ namespace
 void Overlay::Initialize(void* hwnd, ID3D11Device* device, ID3D11DeviceContext* context)
 {
     if (g_ready.load()) return;
-    std::lock_guard<std::mutex> lock(g_mutex);
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
     g_hwnd = static_cast<HWND>(hwnd);
     g_device = device;
     g_context = context;
@@ -254,7 +348,7 @@ void Overlay::Initialize(void* hwnd, ID3D11Device* device, ID3D11DeviceContext* 
 
 void Overlay::NoteFrame() { g_frames.fetch_add(1, std::memory_order_relaxed); }
 
-bool Overlay::IsOpen() { return g_open.load(); }
+bool Overlay::IsOpen() { return g_open.load() || g_console.load(); }
 
 void Overlay::Toggle()
 {
@@ -263,17 +357,37 @@ void Overlay::Toggle()
     g_editLoaded = false;
 }
 
+void Overlay::ToggleConsole()
+{
+    const bool open = !g_console.load();
+    g_console.store(open);
+    if (open) { g_consoleFocus = true; g_consoleInput[0] = 0; }
+}
+
+void Overlay::ConsolePrint(const std::string& line)
+{
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    ConsoleLine(line);
+}
+
 void Overlay::RequestScreenshot() { g_screenshotWanted.store(true); }
 
 bool Overlay::HandleMessage(void* hwnd, uint32_t message, uint64_t wParam, int64_t lParam)
 {
-    std::lock_guard<std::mutex> lock(g_mutex);
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
     if (message == WM_KEYDOWN || message == WM_SYSKEYDOWN)
     {
         if (wParam == VK_F11) { Toggle(); return true; }
         if (wParam == VK_F12) { RequestScreenshot(); return true; }
+        // The key left of 1 (scan code 0x29: ` and ~ on a US keyboard, 0
+        // on a Hungarian one): the console, as the title's own configs
+        // bind it. By scan code, so it is that key on every layout.
+        if (((lParam >> 16) & 0xFF) == 0x29 && !g_open.load()) { ToggleConsole(); return true; }
+        if (wParam == VK_ESCAPE && g_console.load() && !g_open.load()) { g_console.store(false); return true; }
     }
-    if (!g_ready.load() || !g_open.load()) return false;
+    // The character that key makes must not land in the console's input.
+    if (message == WM_CHAR && ((lParam >> 16) & 0xFF) == 0x29 && g_console.load()) return true;
+    if (!g_ready.load() || (!g_open.load() && !g_console.load())) return false;
     // A binding waiting for a key takes the next key or mouse button.
     if (g_capturing >= 0)
     {
@@ -298,7 +412,7 @@ bool Overlay::HandleMessage(void* hwnd, uint32_t message, uint64_t wParam, int64
 void Overlay::Render(ID3D11RenderTargetView* back, ID3D11Texture2D* backTexture, int width, int height)
 {
     if (!g_ready.load()) return;
-    std::lock_guard<std::mutex> lock(g_mutex);
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
     // The counter, once a second.
     {
         const auto now = std::chrono::steady_clock::now();
@@ -316,7 +430,8 @@ void Overlay::Render(ID3D11RenderTargetView* back, ID3D11Texture2D* backTexture,
 
     const Settings::Values values = Settings::Get();
     const bool open = g_open.load();
-    if (!open && !values.fpsOverlay && !values.statsOverlay) return;
+    const bool console = g_console.load();
+    if (!open && !console && !values.fpsOverlay && !values.statsOverlay) return;
 
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
@@ -344,6 +459,7 @@ void Overlay::Render(ID3D11RenderTargetView* back, ID3D11Texture2D* backTexture,
         ImGui::End();
     }
     if (open) DrawMenu(width, height);
+    else if (console) DrawConsole(width, height);
     ImGui::Render();
     ID3D11RenderTargetView* targets[1] = { back };
     g_context->OMSetRenderTargets(1, targets, nullptr);

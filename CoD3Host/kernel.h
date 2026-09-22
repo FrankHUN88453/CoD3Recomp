@@ -242,6 +242,11 @@ namespace Kernel
     // The audio render callback is driven from a thread of its own.
     void StopAudioPump();
     uint64_t AudioCallbacks();
+
+    // A console command for the title, from the host's console (overlay.cpp):
+    // put on the title's own command buffer at the next vertical blank,
+    // the way COD3_MAP starts a level. Any thread may queue one.
+    void QueueConsoleCommand(const std::string& text);
     void ReportXma();   // the codec contexts, in the periodic report
 }
 

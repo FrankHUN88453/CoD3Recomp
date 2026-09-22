@@ -9,6 +9,7 @@
 #include <map>
 #include <algorithm>
 
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -780,6 +781,15 @@ bool Guest::Initialize(const char* xexPath)
 
     AddVectoredExceptionHandler(1, GuestFaultHandler);
     SetUnhandledExceptionFilter(LastChanceHandler);
+    // An abort (a C++ exception nobody caught, a runtime check) says where
+    // it was, which the fast fail that follows it does not.
+    signal(SIGABRT, [](int) {
+        CONTEXT context{};
+        RtlCaptureContext(&context);
+        printf("\nabort() called on thread %lu\n", GetCurrentThreadId());
+        Kernel::PrintHostStack(&context);
+        fflush(stdout);
+    });
     CommitLowMemory();
 
     if (!Commit(PPC_IMAGE_BASE, PPC_IMAGE_SIZE, "image")) return false;

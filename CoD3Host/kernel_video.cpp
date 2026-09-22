@@ -30,8 +30,10 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <mutex>
+#include <string>
 #include <condition_variable>
 #include <thread>
 
@@ -142,6 +144,19 @@ namespace
         routine(context, Guest::Base);
         Timeline::Mark("handled", pending, armed);
         g_inHandler.store(false);
+    }
+
+    // The console commands waiting for the vertical blank.
+    std::mutex g_consoleMutex;
+    std::deque<std::string> g_consoleQueue;
+
+    std::string TakeConsoleCommand()
+    {
+        std::lock_guard<std::mutex> lock(g_consoleMutex);
+        if (g_consoleQueue.empty()) return {};
+        std::string command = std::move(g_consoleQueue.front());
+        g_consoleQueue.pop_front();
+        return command;
     }
 
     void CommandThread()
@@ -681,23 +696,36 @@ namespace
                     if (long(frame / 60) == second && !name.empty() && name.size() < 64)
                     {
                         mapStarted = true;
-                        PPCFunc* format = Guest::Lookup(0x824534B0);   // va(fmt, ...): the text, in the title's string pool
-                        PPCFunc* addText = Guest::Lookup(0x824644D0);  // Cbuf_AddText(text)
-                        if (format != nullptr && addText != nullptr)
-                        {
-                            const std::string command = "spmap " + name + "\n";
-                            const uint32_t text = stackTop - 0x80;
-                            for (size_t i = 0; i <= command.size(); i++) Guest::Base[text + i] = uint8_t(i < command.size() ? command[i] : 0);
-                            ctx.r1.u32 = stackTop - 0x100;
-                            ctx.r3.u32 = text;
-                            format(ctx, Guest::Base);
-                            ctx.r1.u32 = stackTop - 0x100;
-                            addText(ctx, Guest::Base);
-                            printf("video: \"spmap %s\" put on the title's command buffer" "\n", name.c_str());
-                        }
-                        else printf("video: COD3_MAP: the title's Cbuf_AddText is not recompiled code" "\n");
-                        fflush(stdout);
+                        Kernel::QueueConsoleCommand("spmap " + name);
                     }
+                }
+                // The host console's commands, and COD3_MAP's, onto the
+                // title's command buffer: the text through the title's va
+                // (sub_824534B0), which keeps it in its own pool, and
+                // Cbuf_AddText (sub_824644D0). A percent sign is doubled
+                // on the way, since va takes a format.
+                for (std::string command = TakeConsoleCommand(); !command.empty(); command = TakeConsoleCommand())
+                {
+                    PPCFunc* format = Guest::Lookup(0x824534B0);
+                    PPCFunc* addText = Guest::Lookup(0x824644D0);
+                    if (format == nullptr || addText == nullptr)
+                    {
+                        printf("video: the title's Cbuf_AddText is not recompiled code; \"%s\" not run\n", command.c_str());
+                        continue;
+                    }
+                    std::string text;
+                    for (char c : command) { if (c == '%') text += '%'; text += c; }
+                    text += '\n';
+                    if (text.size() > 0xF00) text.resize(0xF00);
+                    const uint32_t at = stackTop - 0x1000;
+                    for (size_t i = 0; i <= text.size(); i++) Guest::Base[at + i] = uint8_t(i < text.size() ? text[i] : 0);
+                    ctx.r1.u32 = stackTop - 0x1100;
+                    ctx.r3.u32 = at;
+                    format(ctx, Guest::Base);
+                    ctx.r1.u32 = stackTop - 0x1100;
+                    addText(ctx, Guest::Base);
+                    printf("video: \"%s\" put on the title's command buffer\n", command.c_str());
+                    fflush(stdout);
                 }
                 // COD3_DUMPMEM=hexaddress,bytes,second: that much of guest
                 // memory, once, that many seconds in (five by default), as
@@ -1158,4 +1186,11 @@ PPC_FUNC(__imp__VdRetrainEDRAMWorker) { ctx.r3.u32 = 0; }
 uint32_t Gpu::InterruptContext()
 {
     return Video().interruptContext.load();
+}
+
+void Kernel::QueueConsoleCommand(const std::string& text)
+{
+    if (text.empty() || text.size() > 4000) return;
+    std::lock_guard<std::mutex> lock(g_consoleMutex);
+    if (g_consoleQueue.size() < 64) g_consoleQueue.push_back(text);
 }

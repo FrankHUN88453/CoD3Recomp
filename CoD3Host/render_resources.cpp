@@ -38,13 +38,19 @@ namespace
     float g_scale = 1.0f;
     float g_requestedScale = 1.0f;
 
-    // Rows of EDRAM a surface of a pitch can have: ten megabytes of it, four
-    // bytes a sample, and no more than the tallest the title draws.
+    // Rows a surface of a pitch gets. The console's EDRAM would hold more,
+    // but the title draws into 624 rows of its 1040 wide surfaces, 512 of
+    // the 560 wide ones and 256 of the 320 wide (the shadow and the post
+    // processing surfaces, square), and a surface as tall as EDRAM allows
+    // at four times the size is a lot of memory for nothing: 720 rows for
+    // the wide ones, the pitch for the rest. COD3_TARGETROWS=N pins it.
     uint32_t TargetRows(uint32_t pitch, uint32_t bytesPerSample)
     {
         if (pitch == 0) return 0;
-        const uint32_t rows = (10u << 20) / (pitch * bytesPerSample);
-        return std::min(rows, 1440u);
+        static const uint32_t pinned = []() { const char* t = getenv("COD3_TARGETROWS"); return t ? uint32_t(strtoul(t, nullptr, 10)) : 0u; }();
+        const uint32_t edram = (10u << 20) / (pitch * bytesPerSample);
+        const uint32_t rows = pinned != 0 ? pinned : pitch >= 1024 ? 720 : std::max(pitch, 256u);
+        return std::min(std::min(rows, edram), 1440u);
     }
 
     // --- the console's texture tiling ---------------------------------------------------------
