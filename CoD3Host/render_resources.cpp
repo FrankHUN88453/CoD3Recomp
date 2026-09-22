@@ -188,6 +188,26 @@ namespace
 
     constexpr uint32_t StableLooks = 8;   // looks without a change before a resource counts as still
 
+    // Whether a resource's whole memory is hashed rather than sampled.
+    // Everything small is, always: the HUD's fonts, icons and compass are
+    // a few tens of kilobytes and change a handful of texels at a time,
+    // which sixty four samples miss: the HUD then shows the picture it
+    // had before, and flickers between the two as the misses come and go.
+    // Everything under a quarter of a megabyte is hashed whole every
+    // frame (1.65 microseconds a draw in the forest level against 1.13,
+    // and 60 frames a second either way); the level's big textures fall
+    // back to sampling once they have been still for a while, where
+    // hashing them whole would be tens of megabytes a frame.
+    // COD3_DENSEALL=1 hashes everything whole, whatever it costs.
+    constexpr size_t AlwaysDenseBytes = 256u << 10;
+    bool WantDense(uint32_t stable, size_t bytes)
+    {
+        // COD3_DENSEALL=1: everything whole, whatever it costs, for
+        // telling a missed change from another kind of flicker.
+        static const bool all = getenv("COD3_DENSEALL") != nullptr;
+        return all || stable < StableLooks || bytes <= AlwaysDenseBytes;
+    }
+
     struct TextureEntry
     {
         ComPtr<ID3D11Texture2D> texture;
@@ -991,7 +1011,7 @@ RenderState::Handle RenderResources::TextureFor(const uint32_t fetch[6], uint32_
         if (fingerprint == entry.fingerprint)
         {
             if (entry.stable < StableLooks) entry.stable++;
-            const bool wantDense = entry.stable < StableLooks;
+            const bool wantDense = WantDense(entry.stable, span);
             if (wantDense != entry.dense) { entry.dense = wantDense; entry.fingerprint = Fingerprint(data, span, wantDense); }
             return handle;
         }
@@ -1009,6 +1029,7 @@ RenderState::Handle RenderResources::TextureFor(const uint32_t fetch[6], uint32_
     TextureEntry& entry = g_textures[handle - 1];
     entry = TextureEntry();
     memcpy(entry.key, key, sizeof(entry.key));
+    entry.dense = true;
     entry.fingerprint = Fingerprint(data, std::min(SourceBytes(fetch), size_t(64u << 20)), entry.dense);
     entry.checkedFrame = entry.usedFrame = g_frame;
     if (!UploadTexture(entry, fetch, data)) { g_freeTextures.push_back(handle); g_whiteReason = "upload failed"; return 1; }
@@ -1051,7 +1072,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
         if (fingerprint == entry.fingerprint && entry.bytes >= wanted)
         {
             if (entry.stable < StableLooks) entry.stable++;
-            const bool wantDense = entry.stable < StableLooks;
+            const bool wantDense = WantDense(entry.stable, wanted);
             if (wantDense != entry.dense) { entry.dense = wantDense; entry.fingerprint = Fingerprint(data, wanted, wantDense); }
             return handle;
         }

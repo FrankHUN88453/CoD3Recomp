@@ -212,6 +212,11 @@ namespace
     // The decoder, moved along as far as the buffers let it.
     void Work(uint8_t* base, uint32_t context)
     {
+        // COD3_NOXMA=1: nothing is decoded and nothing is written into the
+        // title's ring buffers, for telling a fault the decoder's writes
+        // cause from one it does not.
+        static const bool none = getenv("COD3_NOXMA") != nullptr;
+        if (none) return;
         auto found = g_xma.find(context);
         if (found == g_xma.end()) return;
         Context& state = found->second;

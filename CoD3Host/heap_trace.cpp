@@ -108,10 +108,77 @@ namespace
     std::atomic<uint32_t> g_mstate{ 0 };
     std::atomic<int> g_binsReported{ 0 };
 
+    // COD3_HEAPCHECK=2: the unsorted list (bin 1), where the malloc that
+    // never returns spins, checked at the edges of every allocation and
+    // every free. The first check that finds a cycle says whether the heap
+    // was already broken when the title called in (something outside the
+    // heap wrote into it) or broke inside the call (a double free).
+    bool Thorough()
+    {
+        static const bool thorough = []() { const char* t = getenv("COD3_HEAPCHECK"); return t != nullptr && t[0] == '2'; }();
+        return thorough;
+    }
+
+    // The malloc state: the word the heap's own sub_820CB990 reads, at
+    // 0x82909940, which points at the state itself.
+    uint32_t MallocState(uint8_t* base)
+    {
+        uint32_t mstate = g_mstate.load(std::memory_order_relaxed);
+        if (mstate != 0) return mstate;
+        const uint32_t at = Guest::Read32(base, 0x82909940u);
+        if (at < 0x82000000u || at >= 0x8A000000u) return 0;
+        g_mstate.store(at, std::memory_order_relaxed);
+        printf("heap: the malloc state is at %08X\n", at);
+        fflush(stdout);
+        return at;
+    }
+
+    // The list is walked at two speeds; the two meeting at a chunk is a
+    // cycle. A pointer that is not guest memory ends the walk without a
+    // verdict: an empty or not yet built list holds such a value, and
+    // saying "broken" of one of those would be saying it of every bin the
+    // title has never used.
+    bool UnsortedIsSound(uint8_t* base, uint32_t mstate, uint32_t& repeat, int& steps)
+    {
+        const uint32_t head = mstate + 52;
+        auto chunk = [&](uint32_t at) { return at >= 0x10000 && at < 0xC0000000u && at != head; };
+        auto next = [&](uint32_t at) { return Guest::Read32(base, at + 8); };
+        uint32_t slow = next(head), fast = slow;
+        steps = 0;
+        while (chunk(fast) && steps++ < 40000)
+        {
+            fast = next(fast);
+            if (!chunk(fast)) break;
+            fast = next(fast);
+            slow = next(slow);
+            if (fast == slow && chunk(fast)) { repeat = fast; return false; }
+        }
+        if (steps >= 40000) { repeat = slow; return false; }
+        return true;
+    }
+
+    std::atomic<int> g_cycleReported{ 0 };
+
+    void CheckUnsorted(PPCContext& ctx, uint8_t* base, const char* when)
+    {
+        if (!Thorough() || g_cycleReported.load(std::memory_order_relaxed) >= 3) return;
+        const uint32_t mstate = MallocState(base);
+        if (mstate == 0) return;
+        uint32_t repeat = 0;
+        int steps = 0;
+        if (UnsortedIsSound(base, mstate, repeat, steps)) return;
+        if (g_cycleReported.fetch_add(1) >= 3) return;
+        printf("heap: the unsorted list is a cycle through %08X after %d chunks, %s", repeat, steps, when);
+        PrintChain(ctx, base);
+        printf("\n");
+        fflush(stdout);
+    }
+
     void CheckBins(PPCContext& ctx, uint8_t* base, const char* when, uint32_t pointer)
     {
-        const uint32_t mstate = g_mstate.load(std::memory_order_relaxed);
-        if (mstate == 0 || g_binsReported.load(std::memory_order_relaxed) >= 4) return;
+const uint32_t mstate = MallocState(base);
+        if (mstate == 0) return;
+        if (g_binsReported.load(std::memory_order_relaxed) >= 4) return;
         uint32_t bad = 0, repeat = 0;
         if (BinsAreSound(base, mstate, bad, repeat)) return;
         if (g_binsReported.fetch_add(1) >= 4) return;
@@ -122,64 +189,98 @@ namespace
     }
 }
 
-// sub_820CD6B0(alignment, size) calls the core with the malloc state in
-// r3: the state's address, noted once, is what the bin check walks.
-extern "C" PPC_FUNC(__imp__sub_820CCF00);
-PPC_FUNC(sub_820CCF00)
+// sub_823F04B0(object): the destructor whose last free makes the unsorted
+// list a cycle at a level's teardown. Every object it destroys is noted,
+// so the same one destroyed twice says the double free is a destructor
+// that runs twice rather than the heap's own doing.
+extern "C" PPC_FUNC(__imp__sub_823F04B0);
+PPC_FUNC(sub_823F04B0)
 {
-    if (Wanted() && g_mstate.load(std::memory_order_relaxed) == 0 && ctx.r3.u32 >= 0x82000000u && ctx.r3.u32 < 0x8A000000u)
+    const uint32_t object = ctx.r3.u32;
+    if (Wanted())
     {
-        g_mstate.store(ctx.r3.u32, std::memory_order_relaxed);
-        printf("heap: the malloc state is at %08X\n", ctx.r3.u32);
-        fflush(stdout);
+        static std::mutex mutex;
+        static std::unordered_set<uint32_t> destroyed;
+        static int announced = 0;
+        bool again = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            again = !destroyed.insert(object).second;
+        }
+        if (announced < 20)
+        {
+            announced++;
+            // The object's vtable and its first slot: the deleting
+            // destructor the caller reaches through it. When that slot is
+            // this very function, the destructor runs twice over the same
+            // object and frees its fields twice.
+            const uint32_t vtable = (object >= 0x10000 && object < 0xC0000000u) ? Guest::Read32(base, object) : 0;
+            const uint32_t slot0 = (vtable >= 0x10000 && vtable < 0xC0000000u) ? Guest::Read32(base, vtable) : 0;
+            printf("heap: destroying 0x%08X%s, vtable %08X slot0 %08X", object, again ? " AGAIN" : "", vtable, slot0);
+            PrintChain(ctx, base);
+            printf("\n");
+            fflush(stdout);
+        }
     }
-    __imp__sub_820CCF00(ctx, base);
+    __imp__sub_823F04B0(ctx, base);
 }
 
 extern "C" PPC_FUNC(__imp__sub_820CC1D0);
 PPC_FUNC(sub_820CC1D0)
 {
+    CheckUnsorted(ctx, base, "entering an allocation");
     __imp__sub_820CC1D0(ctx, base);
     if (Wanted()) Allocated(ctx.r3.u32);
+    CheckUnsorted(ctx, base, "leaving an allocation");
 }
 
 extern "C" PPC_FUNC(__imp__sub_820CC238);
 PPC_FUNC(sub_820CC238)
 {
+    CheckUnsorted(ctx, base, "entering an allocation");
     __imp__sub_820CC238(ctx, base);
     if (Wanted()) Allocated(ctx.r3.u32);
+    CheckUnsorted(ctx, base, "leaving an allocation");
 }
 
 extern "C" PPC_FUNC(__imp__sub_820CC2A0);
 PPC_FUNC(sub_820CC2A0)
 {
     // From a heap of the title's choosing (the level's), the same block shape.
+    CheckUnsorted(ctx, base, "entering an allocation");
     __imp__sub_820CC2A0(ctx, base);
     if (Wanted()) Allocated(ctx.r3.u32);
+    CheckUnsorted(ctx, base, "leaving an allocation");
 }
 
 extern "C" PPC_FUNC(__imp__sub_820CC330);
 PPC_FUNC(sub_820CC330)
 {
+    CheckUnsorted(ctx, base, "entering an allocation");
     __imp__sub_820CC330(ctx, base);
     if (Wanted()) Allocated(ctx.r3.u32);
+    CheckUnsorted(ctx, base, "leaving an allocation");
 }
 
 extern "C" PPC_FUNC(__imp__sub_820CC398);
 PPC_FUNC(sub_820CC398)
 {
+    CheckUnsorted(ctx, base, "entering an allocation");
     __imp__sub_820CC398(ctx, base);
     if (Wanted()) Allocated(ctx.r3.u32);
+    CheckUnsorted(ctx, base, "leaving an allocation");
 }
 
 extern "C" PPC_FUNC(__imp__sub_820CC468);
 PPC_FUNC(sub_820CC468)
 {
     const uint32_t pointer = ctx.r3.u32;
+    CheckUnsorted(ctx, base, "entering a free");
     if (Wanted()) Freed(ctx, base, pointer, "free");
     __imp__sub_820CC468(ctx, base);
     // After the free: a list it has just joined may have closed on itself.
     if (Wanted()) CheckBins(ctx, base, "after freeing", pointer);
+    CheckUnsorted(ctx, base, "leaving a free");
 }
 
 extern "C" PPC_FUNC(__imp__sub_820CC4C0);
@@ -187,7 +288,9 @@ PPC_FUNC(sub_820CC4C0)
 {
     // free(heap, block): the block is the second argument.
     const uint32_t pointer = ctx.r4.u32;
+    CheckUnsorted(ctx, base, "entering a free from a heap");
     if (Wanted()) Freed(ctx, base, pointer, "free from a heap");
     __imp__sub_820CC4C0(ctx, base);
     if (Wanted()) CheckBins(ctx, base, "after freeing", pointer);
+    CheckUnsorted(ctx, base, "leaving a free from a heap");
 }
