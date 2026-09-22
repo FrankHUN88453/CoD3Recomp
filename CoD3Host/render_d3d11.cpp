@@ -1023,6 +1023,38 @@ namespace
     }
 }
 
+// --- freed guest memory ---------------------------------------------------------------------------
+
+namespace
+{
+    // Ranges the title freed, waiting for the command thread.
+    std::mutex g_freedMutex;
+    std::vector<std::pair<uint32_t, uint32_t>> g_freed;
+    std::atomic<bool> g_freedPending{ false };
+
+    void ForgetFreed()
+    {
+        if (!g_freedPending.load(std::memory_order_acquire)) return;
+        std::vector<std::pair<uint32_t, uint32_t>> freed;
+        {
+            std::lock_guard<std::mutex> lock(g_freedMutex);
+            freed.swap(g_freed);
+            g_freedPending.store(false, std::memory_order_release);
+        }
+        bool dropped = false;
+        for (const auto& range : freed) dropped |= RenderResources::Forget(range.first, range.second);
+        if (dropped) ForgetBindings();
+    }
+}
+
+void Render::MemoryFreed(uint32_t address, uint32_t size)
+{
+    if (size == 0) return;
+    std::lock_guard<std::mutex> lock(g_freedMutex);
+    g_freed.emplace_back(address & 0x1FFFFFFFu, size);
+    g_freedPending.store(true, std::memory_order_release);
+}
+
 bool Render::Enabled()
 {
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
@@ -1035,6 +1067,7 @@ void Render::Draw(uint32_t initiator, uint32_t indexBase, uint32_t indexWord)
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     if (!Start()) return;
     Timed timed(RenderStats::Frame().drawNanoseconds);
+    ForgetFreed();
     RenderState::DrawCommand command;
     if (RenderCommands::PrepareDraw(initiator, indexBase, command)) ExecuteDraw(command);
     RenderStats::Leave();
@@ -1045,6 +1078,7 @@ void Render::Resolve()
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     if (!Start()) return;
     Timed timed(RenderStats::Frame().resolveNanoseconds);
+    ForgetFreed();
     RenderState::ResolveCommand command;
     if (RenderCommands::PrepareResolve(command)) ExecuteResolve(command);
 }

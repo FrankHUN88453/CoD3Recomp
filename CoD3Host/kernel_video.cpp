@@ -27,6 +27,7 @@
 #include "pool_trace.h"
 #include "timeline.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -616,6 +617,7 @@ namespace
 
                 Gpu::ReportPacketMix();
                 Render::Report();
+                Kernel::ReportHeaps();
                 PoolTrace::Report();
                 Timeline::Report();
                 Kernel::ReportImports();
@@ -829,22 +831,79 @@ namespace
                     const char* t = getenv("COD3_DUMPMEM"); if (t == nullptr) return 5L;
                     const char* comma = strchr(t, ','); if (comma == nullptr) return 5L;
                     comma = strchr(comma + 1, ','); return comma != nullptr ? strtol(comma + 1, nullptr, 10) : 5L; }();
+                // COD3_HEAPWALK=hexmstate,second: the title's malloc bins
+                // walked from its malloc state at that second, each list
+                // followed by fd until it returns to its head or repeats:
+                // where a list has a cycle or a chunk whose size is not
+                // the bin's, the corruption a hung malloc loops over.
+                {
+                    static const char* const walkWanted = getenv("COD3_HEAPWALK");
+                    static bool walked = false;
+                    if (walkWanted != nullptr && !walked)
+                    {
+                        char* end = nullptr;
+                        const uint32_t mstate = uint32_t(strtoul(walkWanted, &end, 16));
+                        const long second = (end != nullptr && *end == ',') ? strtol(end + 1, nullptr, 10) : 60L;
+                        if (long(frame / 60) == second)
+                        {
+                            walked = true;
+                            auto readable = [&](uint32_t a) {
+                                MEMORY_BASIC_INFORMATION info{};
+                                return a >= 0x10000 && a < 0xC0000000u && VirtualQuery(Guest::Base + a, &info, sizeof(info)) != 0 && (info.State & MEM_COMMIT) != 0 && info.Protect != PAGE_NOACCESS;
+                            };
+                            auto word = [&](uint32_t a) { return readable(a) ? Guest::Read32(Guest::Base, a) : 0xDEADBEEFu; };
+                            printf("heapwalk: malloc state at %08X, top %08X, unsorted %08X/%08X\n", mstate, word(mstate + 24), word(mstate + 52 + 8), word(mstate + 52 + 12));
+                            for (uint32_t bin = 1; bin < 128; bin++)
+                            {
+                                const uint32_t head = mstate + 44 + (bin << 3);
+                                uint32_t at = word(head + 8);
+                                if (at == head || at == 0xDEADBEEFu) continue;
+                                printf("heapwalk: bin %u at %08X:", bin, head);
+                                std::vector<uint32_t> seen;
+                                int steps = 0;
+                                bool broken = false;
+                                while (at != head && steps++ < 4000)
+                                {
+                                    if (!readable(at + 12)) { printf(" [%08X unreadable]", at); broken = true; break; }
+                                    const uint32_t size = word(at + 4), fd = word(at + 8), bk = word(at + 12);
+                                    if (steps <= 6) printf(" %08X(size %X fd %08X bk %08X)", at, size, fd, bk);
+                                    if (std::find(seen.begin(), seen.end(), at) != seen.end()) { printf(" [CYCLE back to %08X after %d]", at, steps); broken = true; break; }
+                                    seen.push_back(at);
+                                    at = fd;
+                                }
+                                if (steps >= 4000) { printf(" [no end after 4000]"); broken = true; }
+                                printf(" : %d chunks%s\n", steps, broken ? " BROKEN" : "");
+                            }
+                            fflush(stdout);
+                        }
+                    }
+                }
+                // More ranges after the second, each "hexaddress,bytes",
+                // separated by semicolons: COD3_DUMPMEM=A,64,66;B,64;C,256.
                 if (dumpMem != nullptr && !dumped && long(frame / 60) == dumpSecond)
                 {
                     dumped = true;
-                    char* end = nullptr;
-                    const uint32_t at = uint32_t(strtoul(dumpMem, &end, 16));
-                    const uint32_t bytes = (end != nullptr && *end == ',') ? uint32_t(strtoul(end + 1, nullptr, 0)) : 256u;
-                    for (uint32_t offset = 0; offset < bytes; offset += 16)
+                    const char* cursor = dumpMem;
+                    bool first = true;
+                    while (cursor != nullptr && *cursor != 0)
                     {
-                        MEMORY_BASIC_INFORMATION info{};
-                        if (VirtualQuery(Guest::Base + at + offset, &info, sizeof(info)) == 0 || (info.State & MEM_COMMIT) == 0) { printf("dump: %08X is not committed\n", at + offset); break; }
-                        const uint8_t* row = Guest::Base + at + offset;
-                        printf("dump: %08X:", at + offset);
-                        for (uint32_t i = 0; i < 16; i += 4) printf(" %02X%02X%02X%02X", row[i], row[i + 1], row[i + 2], row[i + 3]);
-                        printf("  ");
-                        for (uint32_t i = 0; i < 16; i++) putchar((row[i] >= 32 && row[i] < 127) ? row[i] : '.');
-                        printf("\n");
+                        char* end = nullptr;
+                        const uint32_t at = uint32_t(strtoul(cursor, &end, 16));
+                        const uint32_t bytes = (end != nullptr && *end == ',') ? uint32_t(strtoul(end + 1, &end, 0)) : 256u;
+                        if (first && end != nullptr && *end == ',') strtoul(end + 1, &end, 10);   // the second
+                        first = false;
+                        for (uint32_t offset = 0; offset < bytes; offset += 16)
+                        {
+                            MEMORY_BASIC_INFORMATION info{};
+                            if (VirtualQuery(Guest::Base + at + offset, &info, sizeof(info)) == 0 || (info.State & MEM_COMMIT) == 0 || info.Protect == PAGE_NOACCESS) { printf("dump: %08X is not committed\n", at + offset); break; }
+                            const uint8_t* row = Guest::Base + at + offset;
+                            printf("dump: %08X:", at + offset);
+                            for (uint32_t i = 0; i < 16; i += 4) printf(" %02X%02X%02X%02X", row[i], row[i + 1], row[i + 2], row[i + 3]);
+                            printf("  ");
+                            for (uint32_t i = 0; i < 16; i++) putchar((row[i] >= 32 && row[i] < 127) ? row[i] : '.');
+                            printf("\n");
+                        }
+                        cursor = (end != nullptr && *end == ';') ? end + 1 : nullptr;
                     }
                     fflush(stdout);
                 }

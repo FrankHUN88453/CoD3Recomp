@@ -329,6 +329,28 @@ namespace
         const uint64_t offset = static_cast<uint64_t>(faulting - Guest::Base);
         const uint64_t block = offset & ~(DemandCommitGranularity - 1);
 
+        // Freed memory touched: the title using what it gave back. Said
+        // with the reader's call chain, the first dozen times, and let
+        // through, since with the memory's contents kept it went unnoticed.
+        if (Kernel::FreedMemoryTouched(uint32_t(offset)))
+        {
+            static std::atomic<int> announced{ 0 };
+            if (announced.fetch_add(1) < 12)
+            {
+                uint32_t functions[10] = {};
+                const int count = Sampler::WalkGuestStack(info->ContextRecord, functions, 10);
+                printf("memory: freed memory %s at 0x%08X;", AccessKind(record->ExceptionInformation[0]), uint32_t(offset));
+                if (count > 0)
+                {
+                    printf(" from");
+                    for (int i = 0; i < count; i++) printf(" sub_%08X", functions[i]);
+                }
+                printf("\n");
+                fflush(stdout);
+            }
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+
         // The first page of the address space is not memory on this console,
         // and an access there is a null pointer being followed. Committing it
         // on demand hands back zeros and lets the guest carry on with a null
@@ -346,12 +368,17 @@ namespace
             const uint32_t guest = uint32_t(offset);
             const bool inImage = guest >= 0x82000000u && guest < uint32_t(Guest::FuncTableEnd);
             const bool inHeaps = (guest >= 0x3F000000u && guest < 0x70000000u);
-            if (!inImage && !inHeaps && announced.fetch_add(1) < 12)
+            // A run through memory: hundreds of megabytes committed on demand
+            // is a pointer gone wild, and the thread it is on is named.
+            static std::atomic<int> runaway{ 0 };
+            const bool running = g_demandCommitted > (256ull << 20) && runaway.fetch_add(1) < 12;
+            if ((!inImage && !inHeaps && announced.fetch_add(1) < 12) || running)
             {
                 uint32_t functions[8] = {};
                 const int count = Sampler::WalkGuestStack(info->ContextRecord, functions, 8);
-                printf("commit: guest %s at 0x%08X, outside every allocation;",
-                    AccessKind(record->ExceptionInformation[0]), guest);
+                printf("commit: guest %s at 0x%08X, %s;",
+                    AccessKind(record->ExceptionInformation[0]), guest,
+                    running ? "with hundreds of megabytes already committed on demand" : "outside every allocation");
                 if (count > 0)
                 {
                     printf(" from");

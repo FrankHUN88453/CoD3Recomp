@@ -123,14 +123,17 @@ def main():
             key, _, value = assignment.partition("=")
             env[key] = value
 
-    exe = r"D:\Games\x360\CoD3.exe"
     # The build's executable and its symbols, installed next to the game.
+    # DEBUGRUN_EXE=CoD3-test.exe installs and runs them under another name,
+    # for a run while the game itself is being played from the same folder.
+    exe = os.path.join(r"D:\Games\x360", os.environ.get("DEBUGRUN_EXE", "CoD3.exe"))
     import shutil
     build = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "build", "CoD3Host")
-    for name in ("CoD3.exe", "CoD3.pdb"):
+    stem = os.path.splitext(os.path.basename(exe))[0]
+    for name, target in (("CoD3.exe", stem + ".exe"), ("CoD3.pdb", stem + ".pdb")):
         source = os.path.join(build, name)
         if os.path.exists(source):
-            shutil.copy2(source, os.path.join(os.path.dirname(exe), name))
+            shutil.copy2(source, os.path.join(os.path.dirname(exe), target))
     out_path = os.path.join(os.environ.get("TEMP", "."), "claude", "debugrun.out")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     out = open(out_path, "wb")

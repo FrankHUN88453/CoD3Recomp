@@ -247,6 +247,14 @@ namespace Kernel
     // put on the title's own command buffer at the next vertical blank,
     // the way COD3_MAP starts a level. Any thread may queue one.
     void QueueConsoleCommand(const std::string& text);
+
+    // The heaps: how much is handed out and how much of that is free again.
+    void ReportHeaps();
+
+    // A fault at an address inside the heaps that no live region holds:
+    // freed memory being read or written. True when it was, and the page
+    // has been made accessible so the guest goes on.
+    bool FreedMemoryTouched(uint32_t address);
     void ReportXma();   // the codec contexts, in the periodic report
 }
 

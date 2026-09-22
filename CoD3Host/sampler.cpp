@@ -213,6 +213,13 @@ namespace
             // through the host code the histogram cannot see.
             if (const PPCContext* context = Kernel::ContextOf(thread.osId))
             {
+                // The argument and scratch registers too: what a loop that
+                // never ends is looping over.
+                printf("      r3-r11:");
+                for (int r = 3; r <= 11; r++) printf(" %08X", Kernel::Register(*context, r));
+                printf("  r28-r31:");
+                for (int r = 28; r <= 31; r++) printf(" %08X", Kernel::Register(*context, r));
+                printf("\n");
                 uint32_t frame = context->r1.u32;
                 uint32_t address = uint32_t(context->lr);
                 if (frame >= 0x10000 && frame < 0xC0000000u && address != 0)

@@ -206,17 +206,16 @@ namespace
     };
     std::deque<TextureEntry> g_textures;   // by handle less one; handle 1 is the white texture
 
-    // Whether a resource's memory is looked at this frame. One that has
-    // not changed in eight looks is looked at every fourth frame, the
-    // frames spread by handle so the looks are even; one that was not used
-    // for a second is looked at as soon as it is used, since the title
-    // may have put something else there. A change a dynamic resource
-    // makes every frame is seen every frame, a change a quiet one makes
-    // within three frames.
-    bool LookThisFrame(uint32_t& stable, uint64_t usedFrame, uint32_t handle)
+    // Every resource is looked at once a frame, as it always was: a look
+    // put off is a texture that changes late on screen, which is a flicker
+    // in the menu and the HUD. What the look costs is what changes: every
+    // byte of a resource that has changed lately, sixty four samples of one
+    // that has been still (Fingerprint). One not used for a second counts
+    // as changing again, since the title may have put something else there.
+    bool LookThisFrame(uint32_t& stable, uint64_t usedFrame, uint32_t)
     {
         if (g_frame - usedFrame > 60) stable = 0;
-        return stable < StableLooks || ((g_frame + handle) & 3) == 0;
+        return true;
     }
     ComPtr<ID3D11Texture2D> g_whiteCube;
     ComPtr<ID3D11ShaderResourceView> g_whiteCubeView;
@@ -679,6 +678,48 @@ bool RenderResources::BeginFrame(uint64_t frame)
         g_released++;
     }
     return remade;
+}
+
+bool RenderResources::Forget(uint32_t address, uint32_t size)
+{
+    const uint32_t first = address & 0x1FFFFFFFu, end = first + size;
+    auto inside = [&](uint32_t at) { return at >= first && at < end; };
+    bool dropped = false;
+    for (uint32_t i = 0; i < g_textures.size(); i++)
+    {
+        TextureEntry& entry = g_textures[i];
+        if (!entry.live || !inside(entry.key[0])) continue;
+        g_textureKeys.Erase(entry.key);
+        g_resourceBytes -= entry.bytes;
+        entry.texture.Reset(); entry.resource.Reset(); entry.face.Reset();
+        entry.live = false;
+        g_freeTextures.push_back(i + 1);
+        g_released++;
+        dropped = true;
+    }
+    for (uint32_t i = 0; i < g_buffers.size(); i++)
+    {
+        BufferEntry& entry = g_buffers[i];
+        if (!entry.live || !inside(entry.key[0])) continue;
+        g_bufferKeys.Erase(entry.key);
+        g_resourceBytes -= entry.bytes;
+        entry.buffer.Reset(); entry.resource.Reset();
+        entry.live = false;
+        g_freeBuffers.push_back(i + 1);
+        g_released++;
+        dropped = true;
+    }
+    for (uint32_t i = 0; i < g_resolved.size(); i++)
+    {
+        ResolvedEntry& entry = g_resolved[i];
+        if (!entry.texture || !inside(entry.physical)) continue;
+        if (entry.texture) g_resourceBytes -= uint64_t(entry.surface.width) * entry.surface.height * 4;
+        entry.texture.Reset(); entry.resource.Reset(); entry.view.Reset();
+        entry.surface.texture = nullptr; entry.surface.resource = nullptr; entry.surface.view = nullptr;
+        entry.surface.width = entry.surface.height = 0;
+        dropped = true;
+    }
+    return dropped;
 }
 
 void RenderResources::RequestScale(float scale)

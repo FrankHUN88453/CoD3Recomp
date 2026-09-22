@@ -39,6 +39,12 @@ namespace RenderResources
     // is gone.
     bool BeginFrame(uint64_t frame);
 
+    // Guest memory the title freed: every texture, vertex buffer and
+    // resolved surface uploaded from the range is dropped, so the address
+    // holding something else later is not served the old thing. True when
+    // anything went, since it may have been bound.
+    bool Forget(uint32_t address, uint32_t size);
+
     // --- the render scale --------------------------------------------------------------
 
     // The title draws 1040 by 624; the targets here are that times the

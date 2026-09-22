@@ -123,14 +123,21 @@ uploaded once with their mip levels (from the fetch constant's mip
 address, each level's pitch and height rounded up to whole 32 block tiles,
 down to 32 texels; the packed tail is left to the sampler's clamp), cube
 maps as six faces. A change under a texture or a buffer the title
-rewrites is caught by a fingerprint of its memory: every byte of it, in
-four lanes, while the resource has changed lately (the dynamic buffers,
-a texture drawn into), so no change of theirs is missed; sixty four
-samples once it has been still for eight looks, and then only every
-fourth frame, the frames spread by handle. A resource not used for a
-second is looked at densely again when it next is, since the title may
-have put something else there. The forest level went from 720 sampled
-fingerprints a frame to 180, most of them dense, over 3 MB.
+rewrites is caught by a fingerprint of its memory, taken once a frame:
+every byte of it, in four lanes, while the resource has changed lately
+(the dynamic buffers, a texture drawn into), so no change of theirs is
+missed; sixty four samples once it has been still for eight looks. A
+resource not used for a second counts as changing again when it next is,
+since the title may have put something else there. The forest level's
+711 looks a frame span 4.7 MB where the plain sampled look spanned 68.
+(Putting a still resource's look off to every fourth frame was tried and
+taken out: what it saves is nothing and what it costs is a texture that
+changes late, which is a flicker in the menu and the HUD.)
+
+Guest memory the title frees is dropped from the caches: every texture,
+vertex buffer and resolved surface uploaded from the range goes, so the
+address holding something else after a level change is not served the
+old picture (`Render::MemoryFreed`, from the kernel's physical free).
 Vertex buffers by address, raw byte address buffers, `UpdateSubresource`
 straight from guest memory. Indices through a 16 MB ring mapped
 `NO_OVERWRITE` (16 bit indices stay 16 bit; the strip cut index is the
@@ -314,11 +321,14 @@ volume" read their flat texture instead of white.
 - A draw is prepared and run at once; the DrawCommand is a value that a
   deferred queue could carry, but nothing today would gain from one.
 - Settings the title has no knob for: shadow quality, post processing.
-- A still resource's fingerprint samples 64 points every fourth frame; a
-  one texel change to one can be missed until it changes more. A
-  changing one is hashed whole.
-- Twice in some twenty runs today the title's driver waited for a fence
-  the GPU never wrote at a level's start (the watchdog: "wants the GPU
-  past 0x... on lap 208; the GPU's word is on lap 207"), with the ring
-  empty; five plain loads in a row did not. The driver's own indirect
-  buffer pool logic under a slow host GPU, not yet understood.
+- A still resource's fingerprint samples 64 points; a one texel change to
+  one can be missed until it changes more. A changing one is hashed whole.
+- Starting a second level from inside a level (the console's `spmap`, or
+  the next mission after one is finished) hangs about half the time: the
+  title's own malloc walks a free list that has closed on itself
+  (`sub_820CCF00` forever, the bin's chunks pointing back at one another),
+  or its driver waits for a fence the GPU never wrote. It happens on the
+  0.2 build too, so it is older than the render layer; `COD3_HEAPCHECK=1`
+  watches the title's heap and `COD3_HEAPWALK=hexstate,second` prints its
+  bins for the next attempt at it. A level started from the front end is
+  not affected.

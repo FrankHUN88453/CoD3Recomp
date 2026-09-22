@@ -39,8 +39,10 @@ namespace
     void Line(const char* what, uint32_t device, uint8_t* base, uint32_t a, uint32_t b)
     {
         // From the level load on: the title screen alone would use up the
-        // line budget in seconds.
-        if (!Enabled() || Kernel::Stats().filesOpened.load(std::memory_order_relaxed) < 40) return;
+        // line budget in seconds. COD3_TRACEPOOL=N starts it at the Nth
+        // file opened instead (a second level's load is past eighty).
+        static const long from = []() { const char* t = getenv("COD3_TRACEPOOL"); const long v = t ? strtol(t, nullptr, 10) : 0; return v > 1 ? v : 40L; }();
+        if (!Enabled() || Kernel::Stats().filesOpened.load(std::memory_order_relaxed) < uint64_t(from)) return;
         if (g_lines.fetch_add(1) >= LineLimit) return;
         const uint32_t block = Guest::Read32(base, device + 10768);
         printf("pool: %-9s os %-5lu at %08X lap %u segment %08X.. next %08X recording %08X/%u "

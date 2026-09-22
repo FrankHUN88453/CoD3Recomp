@@ -55,6 +55,12 @@ namespace Render
     // overlay. Does nothing when a frame went out recently.
     void PresentIdle();
 
+    // Guest memory the title freed, from any thread: what was uploaded from
+    // it (textures, vertex buffers, resolved surfaces) is dropped by the
+    // command thread before its next draw, since the address will hold
+    // something else soon.
+    void MemoryFreed(uint32_t address, uint32_t size);
+
     // The hash of the stage's current program, for the traces.
     uint64_t CurrentProgramHash(bool pixel);
 

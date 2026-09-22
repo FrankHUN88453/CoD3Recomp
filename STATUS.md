@@ -107,6 +107,24 @@ render scale from the window's height. The forest level went from 30 to
 the design and the audit of what was emulation are in
 [docs/renderer.md](docs/renderer.md).
 
+### The physical heap hands freed memory out again
+
+The guest's allocators were bump pointers: address space handed out and
+never reused. The physical heap is half a gigabyte and a level's textures
+and buffers come and go with the level, so a second level ran it dry and
+`MmAllocatePhysicalMemoryEx` began refusing, which is a level with pieces
+missing (the title carries on without them). It is a free list in front of
+the bump pointer now, first fit, the neighbours joined; the virtual heap
+stays a bump pointer, since the title reserves ranges there and commits
+pieces inside them at addresses of its choosing. What is freed is dropped
+from the renderer's caches too, so the address holding something else
+later is not served the old texture, and `MmQueryAddressProtect` says a
+freed range is not mapped, as the console does: the film player walks its
+memory with that question and walked off the end when everything answered
+"writable".
+
+### A PC render layer over the executor
+
 The layer between the registers and Direct3D was then made explicit:
 `render_commands.cpp` turns the registers of a draw into a `DrawCommand`
 of handles, views, host pixels and ring offsets, and the executor in

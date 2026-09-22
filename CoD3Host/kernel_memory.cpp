@@ -2,14 +2,20 @@
 //
 // Guest memory is one 4 GB reservation with pages committed on first touch, so
 // an allocator here only has to hand out addresses; the fault handler makes
-// them usable. That is not how the console works, but it is enough to get the
-// title through start up, and it keeps the bookkeeping small enough to reason
-// about while everything else is still missing.
+// them usable. Two heaps. The physical one is a bump pointer with a free
+// list in front of it: what the title frees is given out again, first fit,
+// since a level's textures and buffers come and go with the level and the
+// heap is half a gigabyte. The virtual one stays a bump pointer: the title
+// reserves ranges there and commits and releases pieces inside them at
+// addresses of its choosing, and a piece given out again under such a
+// range was read through by a stream and ran off the end of memory.
 
 #include "kernel.h"
+#include "render.h"
 #include <atomic>
 
 #include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <mutex>
 
@@ -51,15 +57,67 @@ namespace
     uint32_t g_virtualNext = Guest::VirtualHeapBase;
     uint32_t g_physicalNext = Guest::PhysicalHeapBase;
 
-    // A bump allocator. Freed address space is not reused: the title allocates
-    // a handful of large blocks at start up and this keeps every guest pointer
-    // unique, which makes a stale one obvious instead of aliasing a live
-    // allocation. Replace it when a real heap is needed.
+    // What has been freed and not given out again, by address, the
+    // neighbours joined: one list for each heap.
+    std::map<uint32_t, uint32_t>& FreeList(bool physical)
+    {
+        static std::map<uint32_t, uint32_t> lists[2];
+        return lists[physical ? 1 : 0];
+    }
+
+    // A freed region back on the list, joined with the ones either side.
+    // Its pages are made inaccessible, as the console's are once freed: a
+    // stale pointer into it faults, and the fault handler names the reader
+    // (Kernel::FreedMemoryTouched) instead of the garbage being read.
+    void Release(uint32_t address, uint32_t size, bool physical)
+    {
+        if (size == 0) return;
+        DWORD was = 0;
+        VirtualProtect(Guest::Ptr(address), size, PAGE_NOACCESS, &was);
+        std::map<uint32_t, uint32_t>& list = FreeList(physical);
+        auto next = list.lower_bound(address);
+        if (next != list.end() && next->first == address + size) { size += next->second; next = list.erase(next); }
+        if (next != list.begin())
+        {
+            auto previous = std::prev(next);
+            if (previous->first + previous->second == address) { previous->second += size; return; }
+        }
+        list[address] = size;
+    }
+
+    // First fit from the free list, the bump pointer after it. A region taken
+    // out of a free range leaves the rest of the range on the list.
     uint32_t Take(uint32_t size, uint32_t alignment, bool physical)
     {
+        // COD3_NOREUSE=1: the bump pointer alone, for telling a reuse
+        // problem from another.
+        static const bool noReuse = getenv("COD3_NOREUSE") != nullptr;
+        std::map<uint32_t, uint32_t>& list = FreeList(physical);
+        for (auto it = list.begin(); it != list.end() && !noReuse; ++it)
+        {
+            const uint32_t rangeStart = it->first, rangeSize = it->second;
+            const uint32_t start = Align(rangeStart, alignment);
+            if (start < rangeStart || start + size < start || start + size > rangeStart + rangeSize) continue;
+            list.erase(it);
+            if (start > rangeStart) list[rangeStart] = start - rangeStart;
+            if (start + size < rangeStart + rangeSize) list[start + size] = rangeStart + rangeSize - (start + size);
+            Regions()[start] = { size, physical };
+            DWORD was = 0;
+            VirtualProtect(Guest::Ptr(start), size, PAGE_READWRITE, &was);
+            Kernel::Stats().bytesAllocated.fetch_add(size, std::memory_order_relaxed);
+            // The first few reuses, for telling a reuse problem from another.
+            static int announced = 0;
+            if (announced++ < 8)
+            {
+                printf("memory: %s 0x%08X, %u KB, given out again from a free range of %u KB\n",
+                    physical ? "physical" : "virtual", start, size >> 10, rangeSize >> 10);
+                fflush(stdout);
+            }
+            return start;
+        }
+
         uint32_t& next = physical ? g_physicalNext : g_virtualNext;
         const uint32_t limit = physical ? Guest::PhysicalHeapLimit : Guest::VirtualHeapLimit;
-
         const uint32_t address = Align(next, alignment);
         if (address < next || address + size < address || address + size > limit)
             return 0;
@@ -68,6 +126,25 @@ namespace
         Regions()[address] = { size, physical };
         Kernel::Stats().bytesAllocated.fetch_add(size, std::memory_order_relaxed);
         return address;
+    }
+
+    // Whether an address lies in a region handed out and not freed. The
+    // pages of a freed region stay committed on the host, so this is what
+    // tells a live region from a dead one.
+    bool InLiveRegion(uint32_t address)
+    {
+        auto it = Regions().upper_bound(address);
+        if (it == Regions().begin()) return false;
+        --it;
+        return address >= it->first && address - it->first < it->second.size;
+    }
+
+    // What is free, for the report: bytes and ranges.
+    void FreeSpace(bool physical, uint64_t& bytes, size_t& ranges)
+    {
+        bytes = 0;
+        for (const auto& entry : FreeList(physical)) bytes += entry.second;
+        ranges = FreeList(physical).size();
     }
 }
 
@@ -182,9 +259,10 @@ PPC_FUNC(__imp__NtFreeVirtualMemory)
 
     if (freeType & X_MEM_RELEASE)
     {
-        // Address space is never handed back, so a release only forgets the
-        // region. Decommitting would return the memory but also make a stale
-        // guest pointer fault in the demand handler and be silently recommitted.
+        // Virtual address space is never handed back, so a release only
+        // forgets the region. Decommitting would return the memory but also
+        // make a stale guest pointer fault in the demand handler and be
+        // silently recommitted; and reusing the range is unsafe, see above.
         if (found != Regions().end())
             Regions().erase(found);
     }
@@ -239,21 +317,54 @@ PPC_FUNC(__imp__MmAllocatePhysicalMemoryEx)
 PPC_FUNC(__imp__MmFreePhysicalMemory)
 {
     Kernel::CountImport("MmFreePhysicalMemory");
+    std::lock_guard<std::mutex> lock(g_allocatorMutex);
+
+    // Back on the free list, and the renderer told: what it uploaded from
+    // there is not the title's any more.
+    const uint32_t address = ctx.r4.u32;
+    auto found = Regions().find(address);
     {
         static std::atomic<int> announced{ 0 };
-        if (announced.fetch_add(1) < 4)
+        if (announced.fetch_add(1) < 8)
         {
-            printf("memory: physical free of 0x%08X, from 0x%08X\n",
-                ctx.r4.u32, uint32_t(ctx.lr));
+            printf("memory: physical free of 0x%08X (%u KB), from 0x%08X\n",
+                address, found != Regions().end() ? found->second.size >> 10 : 0u, uint32_t(ctx.lr));
             fflush(stdout);
         }
     }
-    std::lock_guard<std::mutex> lock(g_allocatorMutex);
-
-    const uint32_t address = ctx.r4.u32;
-    auto found = Regions().find(address);
     if (found != Regions().end())
+    {
+        const uint32_t size = found->second.size;
+        const bool physical = found->second.physical;
         Regions().erase(found);
+        Release(address, size, physical);
+        Render::MemoryFreed(address, size);
+    }
+}
+
+bool Kernel::FreedMemoryTouched(uint32_t address)
+{
+    std::lock_guard<std::mutex> lock(g_allocatorMutex);
+    const bool inHeap = (address >= Guest::PhysicalHeapBase && address < Guest::PhysicalHeapLimit) ||
+                        (address >= Guest::VirtualHeapBase && address < Guest::VirtualHeapLimit);
+    if (!inHeap || InLiveRegion(address)) return false;
+    // Let the access through, at the page: the run goes on, as it did when
+    // freed memory kept its contents.
+    DWORD was = 0;
+    VirtualProtect(Guest::Ptr(address & ~0xFFFu), 0x1000, PAGE_READWRITE, &was);
+    return true;
+}
+
+void Kernel::ReportHeaps()
+{
+    std::lock_guard<std::mutex> lock(g_allocatorMutex);
+    uint64_t physicalFree, virtualFree;
+    size_t physicalRanges, virtualRanges;
+    FreeSpace(true, physicalFree, physicalRanges);
+    FreeSpace(false, virtualFree, virtualRanges);
+    printf("heaps: physical %.1f of %.1f MB handed out, %.1f MB free in %zu ranges; virtual %.1f of %.1f MB, %.1f MB free in %zu ranges\n",
+        (g_physicalNext - Guest::PhysicalHeapBase) / 1048576.0, (Guest::PhysicalHeapLimit - Guest::PhysicalHeapBase) / 1048576.0, physicalFree / 1048576.0, physicalRanges,
+        (g_virtualNext - Guest::VirtualHeapBase) / 1048576.0, (Guest::VirtualHeapLimit - Guest::VirtualHeapBase) / 1048576.0, virtualFree / 1048576.0, virtualRanges);
 }
 
 // ULONG MmGetPhysicalAddress(PVOID address)
@@ -294,5 +405,37 @@ PPC_FUNC(__imp__MmQueryAddressProtect)
         return;
     }
 
+    // Inside the heaps, a freed region's pages are still committed on the
+    // host but are not the title's: the console would say they are not
+    // mapped, and the film player's walk over its memory stops on that
+    // answer. (With them reported writable it walked on and never came
+    // back, at the second level's briefing.)
+    const bool inHeap = (address >= Guest::PhysicalHeapBase && address < Guest::PhysicalHeapLimit) ||
+                        (address >= Guest::VirtualHeapBase && address < Guest::VirtualHeapLimit);
+    if (inHeap)
+    {
+        std::lock_guard<std::mutex> lock(g_allocatorMutex);
+        if (!InLiveRegion(address))
+        {
+            static const bool logged = getenv("COD3_PROTECTLOG") != nullptr;
+            static std::atomic<int> announced{ 0 };
+            if (logged && announced.fetch_add(1) < 400)
+            {
+                printf("protect: 0x%08X -> 0 (freed), from 0x%08X\n", address, uint32_t(ctx.lr));
+                fflush(stdout);
+            }
+            ctx.r3.u32 = 0;
+            return;
+        }
+    }
+
     ctx.r3.u32 = 0x04;    // PAGE_READWRITE
+    // COD3_PROTECTLOG=1: every ask, for seeing what the title walks.
+    static const bool logged = getenv("COD3_PROTECTLOG") != nullptr;
+    static std::atomic<int> announced{ 0 };
+    if (logged && announced.fetch_add(1) < 400)
+    {
+        printf("protect: 0x%08X -> %u, from 0x%08X\n", address, ctx.r3.u32, uint32_t(ctx.lr));
+        fflush(stdout);
+    }
 }

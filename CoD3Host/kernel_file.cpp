@@ -99,7 +99,9 @@ namespace
     // Early file activity says more about where a boot is stuck than anything
     // else, so the first requests are reported whether they succeed or not.
     std::atomic<int> g_logged{ 0 };
-    constexpr int LogLimit = 400;
+    // COD3_FILELOG=N raises the limit, for a run where the opens after the
+    // first four hundred matter.
+    const int LogLimit = []() { const char* t = getenv("COD3_FILELOG"); return t ? int(strtol(t, nullptr, 10)) : 400; }();
 
     void LogOpen(const std::string& guestPath, const char* result)
     {
