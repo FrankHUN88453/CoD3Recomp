@@ -176,9 +176,11 @@ HLSL.
 ## Resolution and picture
 
 The title draws 1040x624. The render targets are that times a scale that
-is a fraction: the window's height over 624 by default (a 1080p window
-draws 1800x1080), or a whole multiple from the menu (`COD3_SCALE=N` pins
-it). The viewport is folded into the vertex program in clip space, so any
+is a fraction: the chosen resolution's height over 624 (a 1080p
+resolution draws 1800x1080), times the resolution scale in per cent from
+the menu (25 to 200; at 50 a 1440p resolution draws 1200x720 and the
+present scales it up). `COD3_SCALE=N` pins the whole scale, fractions
+allowed; `COD3_RESSCALE=percent` the per cent alone. The viewport is folded into the vertex program in clip space, so any
 target size works without the programs knowing; scissors and resolves are
 scaled by the target's real size over the title's. The picture is then
 put on the window at 16:9 with black either side, as the console's scaler
@@ -196,7 +198,8 @@ console's.
 
 In the F11 menu, kept in `CoD3Recomp.ini`: window or borderless full
 screen (Alt+Enter too), the resolution the frame is drawn at (the
-desktop's by default), texture filtering and anisotropy, anti aliasing,
+desktop's by default) and the resolution scale in per cent of it,
+texture filtering and anisotropy, anti aliasing,
 texture quality (Low and Medium leave the top two or one mip levels of
 every texture out on upload), the field of view (the title's own
 `cg_fov`, 65 to 100, in the config at start and on the command buffer
@@ -311,7 +314,6 @@ volume" read their flat texture instead of white.
 - A draw is prepared and run at once; the DrawCommand is a value that a
   deferred queue could carry, but nothing today would gain from one.
 - Settings the title has no knob for: shadow quality, post processing.
-  A render scale beside the resolution was left out on purpose.
 - A still resource's fingerprint samples 64 points every fourth frame; a
   one texel change to one can be missed until it changes more. A
   changing one is hashed whole.

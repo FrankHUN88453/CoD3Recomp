@@ -141,6 +141,7 @@ void Settings::Load(const std::filesystem::path& exeDirectory)
                 int w = 0, h = 0;
                 if (sscanf(value.c_str(), "%dx%d", &w, &h) == 2 && w > 0 && h > 0) { v.resolutionWidth = w; v.resolutionHeight = h; }
             }
+            else if (key == "resolution_scale") v.resolutionScale = atoi(value.c_str());
             else if (key == "texture_filter") v.textureFilter = atoi(value.c_str());
             else if (key == "anisotropy") v.anisotropy = atoi(value.c_str());
             else if (key == "vsync") v.vsync = atoi(value.c_str()) != 0;
@@ -164,6 +165,7 @@ void Settings::Load(const std::filesystem::path& exeDirectory)
     }
     if (v.renderer < 0 || v.renderer > 2) v.renderer = 0;
     if (v.resolutionWidth < 320 || v.resolutionHeight < 240 || v.resolutionWidth > 16384 || v.resolutionHeight > 16384) { v.resolutionWidth = 0; v.resolutionHeight = 0; }
+    if (v.resolutionScale < 25 || v.resolutionScale > 200) v.resolutionScale = 100;
     if (v.textureFilter < 0 || v.textureFilter > 3) v.textureFilter = 3;
     if (v.anisotropy < 2 || v.anisotropy > 16) v.anisotropy = 16;
     if (v.antialiasing < 0 || v.antialiasing > 5) v.antialiasing = 3;
@@ -185,8 +187,8 @@ void Settings::Save()
         char resolution[32];
         if (v.resolutionWidth > 0 && v.resolutionHeight > 0) snprintf(resolution, sizeof(resolution), "%dx%d", v.resolutionWidth, v.resolutionHeight);
         else snprintf(resolution, sizeof(resolution), "desktop");
-        fprintf(file, "[graphics]\nrenderer = %d\nresolution = %s\ntexture_filter = %d\nanisotropy = %d\nvsync = %d\nantialiasing = %d\ntexture_quality = %d\nfov = %d\naim_blur = %d\nwindow_mode = %d\nfps_overlay = %d\nstats_overlay = %d\n",
-            v.renderer, resolution, v.textureFilter, v.anisotropy, v.vsync ? 1 : 0, v.antialiasing, v.textureQuality, v.fov, v.aimBlur ? 1 : 0, v.windowMode, v.fpsOverlay ? 1 : 0, v.statsOverlay ? 1 : 0);
+        fprintf(file, "[graphics]\nrenderer = %d\nresolution = %s\nresolution_scale = %d\ntexture_filter = %d\nanisotropy = %d\nvsync = %d\nantialiasing = %d\ntexture_quality = %d\nfov = %d\naim_blur = %d\nwindow_mode = %d\nfps_overlay = %d\nstats_overlay = %d\n",
+            v.renderer, resolution, v.resolutionScale, v.textureFilter, v.anisotropy, v.vsync ? 1 : 0, v.antialiasing, v.textureQuality, v.fov, v.aimBlur ? 1 : 0, v.windowMode, v.fpsOverlay ? 1 : 0, v.statsOverlay ? 1 : 0);
         fprintf(file, "[game]\naim_assist = %d\ncontroller = %d\nmouse_sensitivity = %.2f\n", v.aimAssist ? 1 : 0, v.controller ? 1 : 0, v.mouseSensitivity);
         fprintf(file, "[keys]\n");
         for (int i = 0; i < ActionCount; i++) fprintf(file, "key_%s = %d\n", ActionKeys[i], v.keys[i]);
@@ -205,6 +207,14 @@ void Settings::Resolution(const Values& values, int& width, int& height)
     width = GetSystemMetrics(SM_CXSCREEN);
     height = GetSystemMetrics(SM_CYSCREEN);
     if (width <= 0 || height <= 0) { width = 1280; height = 720; }
+}
+
+void Settings::DrawnSize(const Values& values, int& width, int& height)
+{
+    Resolution(values, width, height);
+    const int percent = values.resolutionScale < 25 ? 25 : values.resolutionScale > 200 ? 200 : values.resolutionScale;
+    width = std::max(320, width * percent / 100);
+    height = std::max(240, height * percent / 100);
 }
 
 const std::vector<Settings::Mode>& Settings::DisplayModes()

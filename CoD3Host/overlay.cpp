@@ -265,9 +265,14 @@ namespace
                             if (current == 0) { g_edit.resolutionWidth = 0; g_edit.resolutionHeight = 0; }
                             else if (current <= int(modes.size())) { g_edit.resolutionWidth = modes[size_t(current) - 1].width; g_edit.resolutionHeight = modes[size_t(current) - 1].height; }
                         }
-                        int width, height;
+                        ImGui::SliderInt("Resolution scale", &g_edit.resolutionScale, 25, 200, "%d%%");
+                        int width, height, drawnWidth, drawnHeight;
                         Settings::Resolution(g_edit, width, height);
-                        ImGui::TextDisabled("The game is drawn at %dx%d; the window is that size, full screen scales it.", width, height);
+                        Settings::DrawnSize(g_edit, drawnWidth, drawnHeight);
+                        if (g_edit.resolutionScale == 100)
+                            ImGui::TextDisabled("The game is drawn at %dx%d; the window is that size, full screen scales it.", width, height);
+                        else
+                            ImGui::TextDisabled("The game is drawn at %dx%d and scaled to %dx%d; the window is that size, full screen scales it.", drawnWidth, drawnHeight, width, height);
                     }
                     const char* filters[] = { "The game's own", "Bilinear", "Trilinear", "Anisotropic" };
                     ImGui::Combo("Texture filtering", &g_edit.textureFilter, filters, 4);

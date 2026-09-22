@@ -980,18 +980,22 @@ namespace
     {
         const int antialiasing = AntiAliasing(settings);
         RenderResources::RequestMultisample(antialiasing == 2 ? 2 : antialiasing == 3 || antialiasing == 5 ? 4 : antialiasing == 4 ? 8 : 1);
-        // The render scale: the chosen resolution's height over the title's
-        // 624 rows (the desktop's height by default). COD3_SCALE=N pins it,
-        // fractions allowed.
+        // The render scale: the chosen resolution's height, times the
+        // resolution scale in per cent, over the title's 624 rows (the
+        // desktop's height by default). COD3_SCALE=N pins it, fractions
+        // allowed; COD3_RESSCALE=percent pins the per cent alone.
         static const float pinned = []() { const char* t = getenv("COD3_SCALE"); return t ? float(atof(t)) : 0.0f; }();
+        static const int percentPinned = []() { const char* t = getenv("COD3_RESSCALE"); return t ? int(strtol(t, nullptr, 10)) : 0; }();
         float scale;
         if (pinned > 0.0f) scale = pinned;
         else
         {
+            Settings::Values sized = settings;
+            if (percentPinned > 0) sized.resolutionScale = percentPinned;
             int width, height;
-            Settings::Resolution(settings, width, height);
+            Settings::DrawnSize(sized, width, height);
             scale = float(height) / 624.0f;
-            if (scale < 0.5f) scale = 0.5f;
+            if (scale < 0.25f) scale = 0.25f;
         }
         RenderResources::RequestScale(scale);
         // The blur while aiming: COD3_AIMBLUR=0|1 over the settings.

@@ -29,6 +29,7 @@ namespace Settings
         int renderer = 0;             // 0 Direct3D 11; 1 and 2 are names only
         int resolutionWidth = 0;      // the resolution the frame is drawn at; 0 by 0 is the desktop's
         int resolutionHeight = 0;
+        int resolutionScale = 100;    // per cent of it the frame is really drawn at, 25 .. 200
         int textureFilter = 3;        // 0 the title's own, 1 bilinear, 2 trilinear, 3 anisotropic
         int anisotropy = 16;          // 2..16, with textureFilter 3
         bool vsync = true;
@@ -47,10 +48,13 @@ namespace Settings
 
     Values Defaults();
 
-    // The resolution the frame is drawn at, resolved: the desktop's when the
-    // setting is 0 by 0. In a window the window is made this size; over the
-    // whole screen the picture is drawn this size and scaled to it.
+    // The resolution chosen, resolved: the desktop's when the setting is
+    // 0 by 0. In a window the window is made this size; over the whole
+    // screen the picture is scaled to it.
     void Resolution(const Values& values, int& width, int& height);
+
+    // The size the frame is really drawn at: the resolution times the scale.
+    void DrawnSize(const Values& values, int& width, int& height);
 
     // The resolutions the display offers, largest last, for the menu.
     struct Mode { int width, height; };
