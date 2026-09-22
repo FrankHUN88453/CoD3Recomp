@@ -238,9 +238,37 @@ namespace
                     const char* modes[] = { "Windowed", "Borderless full screen" };
                     ImGui::Combo("Window mode", &g_edit.windowMode, modes, 2);
                     ImGui::TextDisabled("Alt+Enter switches it too.");
-                    const char* scales[] = { "By the window's height", "1x (1040x624)", "2x (2080x1248)", "3x (3120x1872)", "4x (4160x2496)" };
-                    ImGui::Combo("Internal resolution", &g_edit.renderScale, scales, 5);
-                    ImGui::TextDisabled("The game drew 1040x624; here it follows the window's height, or a multiple of that.");
+                    {
+                        // The display's sizes, and "Desktop" for whatever it is now.
+                        const std::vector<Settings::Mode>& modes = Settings::DisplayModes();
+                        std::vector<std::string> names;
+                        names.push_back("Desktop");
+                        int current = 0;
+                        for (size_t i = 0; i < modes.size(); i++)
+                        {
+                            char name[32];
+                            snprintf(name, sizeof(name), "%dx%d", modes[i].width, modes[i].height);
+                            names.push_back(name);
+                            if (g_edit.resolutionWidth == modes[i].width && g_edit.resolutionHeight == modes[i].height) current = int(i) + 1;
+                        }
+                        if (g_edit.resolutionWidth > 0 && current == 0)
+                        {
+                            char name[32];
+                            snprintf(name, sizeof(name), "%dx%d", g_edit.resolutionWidth, g_edit.resolutionHeight);
+                            names.push_back(name);
+                            current = int(names.size()) - 1;
+                        }
+                        std::vector<const char*> items;
+                        for (const std::string& name : names) items.push_back(name.c_str());
+                        if (ImGui::Combo("Resolution", &current, items.data(), int(items.size())))
+                        {
+                            if (current == 0) { g_edit.resolutionWidth = 0; g_edit.resolutionHeight = 0; }
+                            else if (current <= int(modes.size())) { g_edit.resolutionWidth = modes[size_t(current) - 1].width; g_edit.resolutionHeight = modes[size_t(current) - 1].height; }
+                        }
+                        int width, height;
+                        Settings::Resolution(g_edit, width, height);
+                        ImGui::TextDisabled("The game is drawn at %dx%d; the window is that size, full screen scales it.", width, height);
+                    }
                     const char* filters[] = { "The game's own", "Bilinear", "Trilinear", "Anisotropic" };
                     ImGui::Combo("Texture filtering", &g_edit.textureFilter, filters, 4);
                     if (g_edit.textureFilter == 3)
@@ -329,10 +357,11 @@ void Overlay::Initialize(void* hwnd, ID3D11Device* device, ID3D11DeviceContext* 
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;
-    // A readable size on any screen: the font grows with the window.
-    RECT client{};
-    GetClientRect(g_hwnd, &client);
-    g_fontScale = std::max(1.0f, float(client.bottom - client.top) / 720.0f);
+    // A readable size on any screen: the font grows with the resolution
+    // the picture is drawn at, which is the window's size or the screen's.
+    int width = 0, height = 0;
+    Settings::Resolution(Settings::Get(), width, height);
+    g_fontScale = std::min(2.0f, std::max(1.0f, float(height) / 900.0f));
     static const ImWchar ranges[] = { 0x0020, 0x00FF, 0x0100, 0x017F, 0 };   // Latin with the Hungarian letters
     ImFontConfig config;
     config.OversampleH = 2;

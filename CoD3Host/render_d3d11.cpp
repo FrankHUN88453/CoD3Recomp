@@ -1425,17 +1425,18 @@ namespace
     // What the settings ask of the renderer, applied at the frame's edge.
     void ApplySettings(const Settings::Values& settings)
     {
-        // The render scale: the window's height, or a fixed multiple.
-        // COD3_SCALE=N pins it, fractions allowed.
+        // The render scale: the chosen resolution's height over the title's
+        // 624 rows (the desktop's height by default). COD3_SCALE=N pins it,
+        // fractions allowed.
         static const float pinned = []() { const char* t = getenv("COD3_SCALE"); return t ? float(atof(t)) : 0.0f; }();
         float scale;
         if (pinned > 0.0f) scale = pinned;
-        else if (settings.renderScale >= 1) scale = float(settings.renderScale);
         else
         {
-            const int height = g_clientHeight.load();
-            scale = height > 0 ? float(height) / 624.0f : 1.0f;
-            if (scale < 1.0f) scale = 1.0f;
+            int width, height;
+            Settings::Resolution(settings, width, height);
+            scale = float(height) / 624.0f;
+            if (scale < 0.5f) scale = 0.5f;
         }
         RenderResources::RequestScale(scale);
 

@@ -53,8 +53,9 @@ takes it again. Every key can be changed in the settings menu.
 The settings menu (F11, and it opens by itself when OPTIONS is chosen in
 the title's main menu, over the title's own options page) has the window
 mode (windowed or borderless full screen; Alt+Enter switches too), the
-internal resolution (the window's height, or a multiple of the title's
-1040 by 624), the texture filtering and anisotropy, anti aliasing (FXAA),
+resolution (the desktop's by default; the window is made that size, full
+screen scales it, and the frame is drawn at it), the texture filtering
+and anisotropy, anti aliasing (FXAA),
 vertical sync, a frame counter and the renderer's statistics, the mouse
 sensitivity, the title's aim assist, the pad, and the keys. It is drawn
 in the colours of the title's own menus. It keeps its values in `CoD3Recomp.ini` beside the

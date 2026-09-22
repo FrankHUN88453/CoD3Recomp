@@ -189,6 +189,29 @@ namespace
             }
             const bool borderless = fullscreenOverride >= 0 ? fullscreenOverride != 0 : settings.windowMode == 1;
             SetBorderless(window, borderless);
+            // The window the size of the chosen resolution, when that
+            // changes, and no larger than the screen it is on.
+            {
+                static int appliedWidth = 0, appliedHeight = 0;
+                int width, height;
+                Settings::Resolution(settings, width, height);
+                if (!borderless && (width != appliedWidth || height != appliedHeight))
+                {
+                    appliedWidth = width;
+                    appliedHeight = height;
+                    MONITORINFO monitor{ sizeof(monitor) };
+                    GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &monitor);
+                    RECT frame{ 0, 0, width, height };
+                    AdjustWindowRect(&frame, WS_OVERLAPPEDWINDOW, FALSE);
+                    int frameWidth = frame.right - frame.left, frameHeight = frame.bottom - frame.top;
+                    const int workWidth = monitor.rcWork.right - monitor.rcWork.left, workHeight = monitor.rcWork.bottom - monitor.rcWork.top;
+                    if (frameWidth > workWidth) frameWidth = workWidth;
+                    if (frameHeight > workHeight) frameHeight = workHeight;
+                    const int x = monitor.rcWork.left + (workWidth - frameWidth) / 2, y = monitor.rcWork.top + (workHeight - frameHeight) / 2;
+                    SetWindowPos(window, nullptr, x, y, frameWidth, frameHeight, SWP_NOZORDER | SWP_NOOWNERZORDER);
+                    ReportSize(window);
+                }
+            }
 
             Render::PresentIdle();
             std::this_thread::sleep_for(std::chrono::milliseconds(8));
