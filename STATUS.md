@@ -107,8 +107,29 @@ render scale from the window's height. The forest level went from 30 to
 the design and the audit of what was emulation are in
 [docs/renderer.md](docs/renderer.md).
 
-Still open: the intro films (WMV) are skipped; volume textures are white;
-the sound decodes but the title's mixer submits silence.
+### Sound, and the films
+
+The XMA contexts decode through FFmpeg's `xma1` decoder (the title's voices
+are XMA1, stereo, 48 kHz; `xma.cpp`, loaded at run time from C:fmpeg or
+beside the executable). What kept the speakers silent after that was four
+bytes: `KeInitializeSemaphore` cleared twenty four and wrote the limit at
+twenty, and a KSEMAPHORE is twenty bytes with the limit at sixteen. The
+title keeps its mixer's "mixed" event right after its semaphore, so the
+limit of six overwrote the event's type, a synchronisation event became a
+notification event no wait ever cleared, and the audio callback stopped
+waiting for the mixer thread after the first frame. With the layout right
+the menu music, the dialogue and the effects play (`COD3_AUDIODUMP=path`
+writes what goes out as a WAV).
+
+The films play through the title's own WMV player, which always worked
+once the GPU did; what stopped it last was the padded read, which told it
+a 121647 byte sound track was 122880 bytes and had it read on past the
+end. Reads are padded only for the archives now (`.cod`, `.wbk`, `.cfg`).
+The legal notice, the logos, the attract loop and the mission briefings
+play, with A (Space) to skip; `COD3_NOFILMS=1` leaves them out, which the
+scripted runs do.
+
+Still open: volume textures are white; 5.1 is folded to stereo.
 
 The sections that follow are the history of getting here, oldest first.
 

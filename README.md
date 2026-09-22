@@ -18,7 +18,11 @@ the sky, the shadows, the HUD and the saved checkpoints all working, at the
 window's resolution with mip mapped, anisotropically filtered textures,
 FXAA and vertical sync. All fifteen levels' code is recompiled and every
 level loads and plays, the mission title cards, the mission failed screen
-and the checkpoints with them. The intro films do not play yet.
+and the checkpoints with them. The sound plays, the title's XMA voices
+decoded through FFmpeg, and so do the films: the legal notice, the
+Activision and Treyarch logos, the attract loop and each mission's
+briefing, through the title's own player, with Space (the A button) to
+skip them.
 
 ![The level](level.png)
 
@@ -120,8 +124,8 @@ A level can be started straight from the main menu, the way the chapter
 select does it, with `COD3_MAP=<level>[,<second>]` in the environment: at that
 second (twelve by default) the title's own `spmap <level>` console command is
 put on its command buffer. The main menu has to be up by then, which
-`COD3_PAD="5:start 8:a"` (Start at five seconds, A at eight) sees to in a
-scripted run. The level names are the folders under `sp`: `saint_lo`,
+`COD3_NOFILMS=1` (no intro films) and `COD3_PAD="5:start 8:a"` (Start at
+five seconds, A at eight) see to in a scripted run. The level names are the folders under `sp`: `saint_lo`,
 `island`, `nightd`, `crssrds`, `hostage`, `mayenne`, `forest`, `falaise`,
 `fuelplnt`, `chambois`, `mace2`, `laison`, `stbert`, `blkbrn`, `credits`.
 

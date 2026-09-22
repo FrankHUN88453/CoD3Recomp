@@ -244,8 +244,8 @@ namespace
         if (!translation.ok)
         {
             static std::atomic<int> announced{ 0 };
-            if (announced.fetch_add(1) < 12)
-                printf("render: a %s could not be translated: %s\n", what, translation.problem.c_str());
+            if (announced.fetch_add(1) < 400)
+                printf("render: %s %016llx (%zu dwords) could not be translated: %s\n", what, (unsigned long long)program.hash, job.words->size(), translation.problem.c_str());
             g_failed.fetch_add(1, std::memory_order_relaxed);
             program.state.store(State::Failed, std::memory_order_release);
             return;

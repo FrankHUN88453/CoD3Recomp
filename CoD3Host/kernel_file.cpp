@@ -428,21 +428,14 @@ PPC_FUNC(__imp__NtCreateFile)
         return;
     }
 
-    // The intro films, unless asked for.
-    //
-    // The player opens them and its picture never starts: its decoder thread
-    // waits on a D3D worker that is never woken, and the title sits on the
-    // first frame polling. Until that is understood the films are reported
-    // absent, which the title handles the way it handles a missing film and
-    // goes to its menu. COD3_FILMS=1 in the environment lets them through.
-    if (!writing && LooksLikeFilm(guestPath) && getenv("COD3_FILMS") == nullptr)
+    // The films, unless COD3_NOFILMS=1 asks for them to be left out: then
+    // they are reported absent, which the title handles the way it handles
+    // a missing film, and goes on. (They were left out by default while the
+    // player could not run; it can now, with its own decoder, its sound
+    // through the XMA contexts and a read that says how much it read.)
+    static const bool noFilms = getenv("COD3_NOFILMS") != nullptr;
+    if (!writing && noFilms && LooksLikeFilm(guestPath))
     {
-        static std::atomic<int> announced{ 0 };
-        if (announced.fetch_add(1) == 0)
-        {
-            printf("file: the intro films are skipped; set COD3_FILMS=1 to play them\n");
-            fflush(stdout);
-        }
         LogOpen(guestPath, "skipped");
         ctx.r3.u32 = X_STATUS_OBJECT_NAME_NOT_FOUND;
         return;
@@ -658,15 +651,26 @@ PPC_FUNC(__imp__NtReadFile)
         }
     }
 
-    // A read that runs past the end of one of the game's files is filled
+    // A read that runs past the end of one of the game's archives is filled
     // with zeros to its full length and reported as all read, the way a
     // whole-sector read off the disc comes back. The island level asks for
     // 409600 bytes of a 196608 byte archive (its streamer reads in that
     // unit), and given the end of file it then met it reported a dirty
-    // disc; given the zeros it plays. Saved games keep the exact count.
-    // COD3_NOPADREADS=1 turns it off.
+    // disc; given the zeros it plays. Only the archives (.cod, .wbk) and
+    // the configs get this: the film player reads its .wma and .wmv by the
+    // count that comes back, and told a 121647 byte sound track was 122880
+    // it read on past the end and reported a dirty disc of its own. Saved
+    // games keep the exact count too. COD3_NOPADREADS=1 turns it off.
     static const bool padReads = getenv("COD3_NOPADREADS") == nullptr;
-    if (padReads && read < length && file.overlay.empty() && file.guestPath.rfind("savedrive:", 0) != 0)
+    const bool archive = [&]() {
+        const std::string& path = file.guestPath;
+        const size_t dot = path.rfind('.');
+        if (dot == std::string::npos) return false;
+        std::string extension = path.substr(dot);
+        for (char& c : extension) c = char(tolower(uint8_t(c)));
+        return extension == ".cod" || extension == ".wbk" || extension == ".cfg";
+    }();
+    if (padReads && archive && read < length && file.overlay.empty() && file.guestPath.rfind("savedrive:", 0) != 0)
     {
         static std::atomic<int> announced{ 0 };
         if (announced.fetch_add(1) < 20)
