@@ -398,6 +398,30 @@ namespace
                         i += run;
                     }
                 }
+                // COD3_DUMPCONST=hash: what a program's constants hold,
+                // once a second, to see whether the file that reaches it is
+                // the file the title wrote.
+                static const char* const dumpConst = getenv("COD3_DUMPCONST");
+                if (dumpConst != nullptr && programs[stage]->hash == strtoull(dumpConst, nullptr, 16))
+                {
+                    static uint64_t last = 0;
+                    const uint64_t now = GetTickCount64() / 1000;
+                    if (now != last)
+                    {
+                        last = now;
+                        const float* values = reinterpret_cast<const float*>(words);
+                        printf("const %016llx %u read: bools", (unsigned long long)programs[stage]->hash, unsigned(map.size()));
+                        for (uint32_t i = 0; i < 8; i++) printf(" %08X", file[0x4900 + i].load(std::memory_order_relaxed));
+                        printf(" loops");
+                        for (uint32_t i = 0; i < 32; i++) printf(" %08X", file[0x4908 + i].load(std::memory_order_relaxed));
+                        printf(" ::");
+                        for (size_t i = 0; i < map.size(); i++)
+                            printf(" c%u=(%.4g %.4g %.4g %.4g)", unsigned(map[i]),
+                                values[i * 4], values[i * 4 + 1], values[i * 4 + 2], values[i * 4 + 3]);
+                        printf("\n");
+                        fflush(stdout);
+                    }
+                }
                 g_uploaded.floatAt[stage] = base + at;
                 g_uploaded.floatCount[stage] = need[stage];
                 g_uploaded.floatProgram[stage] = handles[stage];

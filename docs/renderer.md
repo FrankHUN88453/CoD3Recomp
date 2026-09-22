@@ -85,6 +85,14 @@ texture, a constant or a state between nearly every pair), so there is
 nothing for a reordering pass to merge that the order-dependent draws
 (blended, particles, the HUD) would allow.
 
+An instruction of the console's shaders has a vector half and a scalar
+half, and they run together: both read the registers as they were before
+the instruction and only then write. A scalar that reads the very
+register the vector writes has to see the old value, so the translation
+keeps the vector's result aside and writes it once the scalar has read.
+The level shaders' third light is written that way, and with the write
+first its specular came out as two to the tenth: every lit wall white.
+
 A texture fetch carries three signed offsets in halves of a texel, and
 they are put into the coordinates. The title's shadows are one map
 fetched four times at the corners of a texel; without the offsets the
@@ -241,7 +249,13 @@ knows), and `COD3_PAD="40:lt/8"` holds the left (or `rt`, right)
 trigger for that many seconds: aiming, firing. Diagnostics: `COD3_D3DDEBUG`
 (the debug layer), `COD3_D3DFRAME=N|auto|loading` with `COD3_D3DDRAWDUMP`,
 `COD3_FRAMEDUMP`, `COD3_D3DSKIPVS`, `COD3_D3DFLAT`, `COD3_DUMPHLSL`,
-`COD3_D3DTEXDUMP`, `COD3_NOFETCHOFFSET`. In the frame log a texture that reads white says why
+`COD3_D3DTEXDUMP`, `COD3_NOFETCHOFFSET`. `COD3_D3DSHOW=oN` puts a pixel
+program's Nth interpolator out as its colour, `rN` a register, and
+`rN@M` the register as it stood after the Mth instruction; a program's
+hash before a colon (`COD3_D3DSHOW=e65dc0f6c6f3ceee:r6@72`) changes that
+one program alone, so the rest of the picture stays to place it by.
+`COD3_DUMPCONST=hash` prints the constants a program reads, once a
+second, with the boolean and loop constants beside them. In the frame log a texture that reads white says why
 (`WHITE: no texture in the fetch constant`, `format not uploaded`, `upload
 failed`), and the first draw that wants a program that could not be built
 says which and why; the captured programs that fail to translate are only

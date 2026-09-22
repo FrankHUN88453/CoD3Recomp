@@ -289,12 +289,22 @@ namespace
                 out.usesKill = true;
                 Line(Format("if (any(%s)) discard;", vector.c_str()));
             }
+            // An instruction's two halves run together: both read the
+            // registers as they were before it, and only then write. A
+            // scalar that reads the very register the vector writes must
+            // still see the old value, so the vector's result is kept aside
+            // and written below, once the scalar has read what it needs.
+            // (The third light of the level shaders is written this way:
+            // the scalar wants the exponent times the logarithm the last
+            // instruction left in the register, and with the write first it
+            // took the dot product the vector had just put there instead.
+            // Two to the tenth of that: every lit wall came out white.)
+            std::string vectorDestination;
             if (vectorMask != 0)
             {
                 if (vectorClamp) vector = "saturate(" + vector + ")";
-                const std::string destination = Destination(vectorDest, exported);
-                Line(Format("%s.%s = (%s).%s;", destination.c_str(), Mask(vectorMask).c_str(),
-                    vector.c_str(), Mask(vectorMask).c_str()));
+                vectorDestination = Destination(vectorDest, exported);
+                Line(Format("float4 vectorValue = (%s);", vector.c_str()));
             }
 
             // The scalar operation, on the third operand's two components.
@@ -377,6 +387,9 @@ namespace
             }
             if (scalarClamp) scalar = "saturate(" + scalar + ")";
             Line(Format("ps = %s;", scalar.c_str()));
+            if (vectorMask != 0)
+                Line(Format("%s.%s = vectorValue.%s;", vectorDestination.c_str(),
+                    Mask(vectorMask).c_str(), Mask(vectorMask).c_str()));
             if (scalarMask != 0)
             {
                 const std::string destination = Destination(exported ? vectorDest : scalarDest, exported);
@@ -387,6 +400,8 @@ namespace
             if (isPredicated) { indent--; Line("}"); }
             indent--;
             Line("}");
+            if (++aluCount == ShowAt() && showWhat[0] == 'r')
+                Line(Format("shown = r[%u];", unsigned(strtoul(showWhat.c_str() + 1, nullptr, 10)) & 31u));
         }
 
         // --- fetches -----------------------------------------------------------
@@ -787,9 +802,38 @@ namespace
             return true;
         }
 
+        // What COD3_D3DSHOW asks of this program: "oN", "rN" or "rN@M",
+        // and empty when the knob names another program's hash.
+        std::string showWhat;
+        int aluCount = 0;
+
+        void ReadShow()
+        {
+            const char* show = getenv("COD3_D3DSHOW");
+            if (show == nullptr || !pixel) return;
+            if (const char* colon = strchr(show, ':'))
+            {
+                uint64_t hash = 1469598103934665603ull;
+                for (uint32_t word : words)
+                    for (int shift = 24; shift >= 0; shift -= 8) { hash ^= (word >> shift) & 0xFF; hash *= 1099511628211ull; }
+                if (hash != strtoull(show, nullptr, 16)) return;
+                showWhat = colon + 1;
+            }
+            else showWhat = show;
+        }
+
+        // The register the knob wants kept, and after which instruction, or
+        // -1 when it wants the value the program ends with.
+        int ShowAt() const
+        {
+            const size_t at = showWhat.find('@');
+            return at == std::string::npos ? -1 : int(strtol(showWhat.c_str() + at + 1, nullptr, 10));
+        }
+
         bool Run()
         {
             if (words.size() < 3) { out.problem = "no words"; return false; }
+            ReadShow();
 
             uint32_t firstTarget = uint32_t(words.size() / 3);
             std::vector<uint64_t> flow;
@@ -950,7 +994,7 @@ uint64_t XenosHlsl::Version()
     // A number that changes when the translation would, or when one of the
     // environment knobs that shape the HLSL is set: the disk cache keyed by
     // it then starts afresh rather than serving the other translation.
-    std::string text = "xenos_hlsl 2026-09-22 bswap packed flat3d fetch offsets";
+    std::string text = "xenos_hlsl 2026-09-22 bswap packed flat3d fetch offsets alu pairs read first";
     if (const char* lanes = getenv("COD3_SCALARLANES")) { text += " lanes="; text += lanes; }
     if (const char* show = getenv("COD3_D3DSHOW")) { text += " show="; text += show; }
     if (getenv("COD3_NOFETCHOFFSET")) text += " no offsets";
@@ -1074,6 +1118,7 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
         for (uint32_t i = 0; i < 16; i++) hlsl += Format("    float4 o%u = float4(0.0, 0.0, 0.0, 0.0);\n", i);
         hlsl += "    uint fetchIndex = 0, fetchStride = 0, fetchAddress = 0, fetchWord = 0; uint2 fetchWords = uint2(0, 0); uint4 fetchWords4 = uint4(0, 0, 0, 0);\n";
     }
+    if (translator.ShowAt() >= 0) hlsl += "    float4 shown = float4(0.0, 0.0, 0.0, 0.0);\n";
     hlsl += "    float4 fetched = float4(0.0, 0.0, 0.0, 0.0); float ps = 0.0; float textureLod = 0.0; int a0 = 0; bool p0 = false;\n";
     hlsl += "    int programCounter = 0; int aL = 0; uint depth = 0; uint loopCount[4]; int loopAddress[4]; loopCount[0] = 0; loopCount[1] = 0; loopCount[2] = 0; loopCount[3] = 0; loopAddress[0] = 0; loopAddress[1] = 0; loopAddress[2] = 0; loopAddress[3] = 0;\n";
     hlsl += translator.body;
@@ -1094,8 +1139,16 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
         // COD3_D3DSHOW=oN: every pixel program puts out its Nth interpolator
         // instead of its colour, for seeing what the vertex program handed
         // over. The source changes, so the cache keeps the real programs.
-        static const char* const show = getenv("COD3_D3DSHOW");
-        if (show != nullptr && show[0] == 'o') hlsl += Format("    oC0 = float4(abs(input.%s.xyz), 1.0);\n", show);
+        // COD3_D3DSHOW=rN puts out a register instead, and rN@M the
+        // register as it stood after the Mth instruction, for walking a
+        // program and seeing where a value goes wrong. Either form takes a
+        // program's hash before a colon (COD3_D3DSHOW=1234...:r11@70) so
+        // only that one program is changed and the rest of the picture
+        // stays as it was.
+        const char* const what = translator.showWhat.empty() ? nullptr : translator.showWhat.c_str();
+        if (what != nullptr && translator.ShowAt() >= 0) hlsl += "    oC0 = float4(abs(shown.xyz), 1.0);\n";
+        else if (what != nullptr && what[0] == 'o') hlsl += Format("    oC0 = float4(abs(input.%s.xyz), 1.0);\n", what);
+        else if (what != nullptr && what[0] == 'r') hlsl += Format("    oC0 = float4(abs(r[%u].xyz), 1.0);\n", unsigned(strtoul(what + 1, nullptr, 10)) & 31u);
         hlsl += "    output.c0 = oC0; output.c1 = oC1; output.c2 = oC2; output.c3 = oC3;\n";
         if (out.writesDepth) hlsl += "    output.depth = oDepth4.x;\n";
         hlsl += "    return output;\n}\n";
