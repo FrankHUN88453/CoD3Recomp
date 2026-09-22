@@ -145,6 +145,8 @@ void Settings::Load(const std::filesystem::path& exeDirectory)
             else if (key == "anisotropy") v.anisotropy = atoi(value.c_str());
             else if (key == "vsync") v.vsync = atoi(value.c_str()) != 0;
             else if (key == "antialiasing") v.antialiasing = atoi(value.c_str());
+            else if (key == "texture_quality") v.textureQuality = atoi(value.c_str());
+            else if (key == "fov") v.fov = atoi(value.c_str());
             else if (key == "window_mode") v.windowMode = atoi(value.c_str());
             else if (key == "fps_overlay") v.fpsOverlay = atoi(value.c_str()) != 0;
             else if (key == "stats_overlay") v.statsOverlay = atoi(value.c_str()) != 0;
@@ -164,6 +166,8 @@ void Settings::Load(const std::filesystem::path& exeDirectory)
     if (v.textureFilter < 0 || v.textureFilter > 3) v.textureFilter = 3;
     if (v.anisotropy < 2 || v.anisotropy > 16) v.anisotropy = 16;
     if (v.antialiasing < 0 || v.antialiasing > 5) v.antialiasing = 3;
+    if (v.textureQuality < 0 || v.textureQuality > 2) v.textureQuality = 2;
+    if (v.fov < 65 || v.fov > 100) v.fov = 65;
     if (v.windowMode < 0 || v.windowMode > 1) v.windowMode = 0;
     if (!(v.mouseSensitivity >= 0.1f && v.mouseSensitivity <= 3.0f)) v.mouseSensitivity = 1.0f;
     std::lock_guard<std::mutex> lock(g_mutex);
@@ -180,8 +184,8 @@ void Settings::Save()
         char resolution[32];
         if (v.resolutionWidth > 0 && v.resolutionHeight > 0) snprintf(resolution, sizeof(resolution), "%dx%d", v.resolutionWidth, v.resolutionHeight);
         else snprintf(resolution, sizeof(resolution), "desktop");
-        fprintf(file, "[graphics]\nrenderer = %d\nresolution = %s\ntexture_filter = %d\nanisotropy = %d\nvsync = %d\nantialiasing = %d\nwindow_mode = %d\nfps_overlay = %d\nstats_overlay = %d\n",
-            v.renderer, resolution, v.textureFilter, v.anisotropy, v.vsync ? 1 : 0, v.antialiasing, v.windowMode, v.fpsOverlay ? 1 : 0, v.statsOverlay ? 1 : 0);
+        fprintf(file, "[graphics]\nrenderer = %d\nresolution = %s\ntexture_filter = %d\nanisotropy = %d\nvsync = %d\nantialiasing = %d\ntexture_quality = %d\nfov = %d\nwindow_mode = %d\nfps_overlay = %d\nstats_overlay = %d\n",
+            v.renderer, resolution, v.textureFilter, v.anisotropy, v.vsync ? 1 : 0, v.antialiasing, v.textureQuality, v.fov, v.windowMode, v.fpsOverlay ? 1 : 0, v.statsOverlay ? 1 : 0);
         fprintf(file, "[game]\naim_assist = %d\ncontroller = %d\nmouse_sensitivity = %.2f\n", v.aimAssist ? 1 : 0, v.controller ? 1 : 0, v.mouseSensitivity);
         fprintf(file, "[keys]\n");
         for (int i = 0; i < ActionCount; i++) fprintf(file, "key_%s = %d\n", ActionKeys[i], v.keys[i]);
@@ -230,8 +234,21 @@ const std::vector<Settings::Mode>& Settings::DisplayModes()
 std::string Settings::TitleConfigLines()
 {
     const Values v = Get();
+    std::string lines;
     // The title's own aim assist is three switches of its console. Off is
     // said outright; on is the title's default, so nothing is said.
-    if (v.aimAssist) return {};
-    return "seta aim_slowdown_enabled \"0\"\nseta aim_lockon_enabled \"0\"\nseta aim_autoaim_enabled \"0\"\n";
+    if (!v.aimAssist) lines += "seta aim_slowdown_enabled \"0\"\nseta aim_lockon_enabled \"0\"\nseta aim_autoaim_enabled \"0\"\n";
+    // The field of view is the title's cg_fov; 65 is its own.
+    if (v.fov != 65) lines += "seta cg_fov \"" + std::to_string(v.fov) + "\"\n";
+    return lines;
+}
+
+std::string Settings::TitleCommandsChanged()
+{
+    static int appliedFov = 0;
+    const Values v = Get();
+    if (appliedFov == 0) { appliedFov = v.fov; return {}; }   // the config at start has it
+    if (v.fov == appliedFov) return {};
+    appliedFov = v.fov;
+    return "cg_fov " + std::to_string(v.fov);
 }

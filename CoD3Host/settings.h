@@ -33,6 +33,8 @@ namespace Settings
         int anisotropy = 16;          // 2..16, with textureFilter 3
         bool vsync = true;
         int antialiasing = 3;         // 0 none, 1 FXAA, 2 MSAA 2x, 3 MSAA 4x, 4 MSAA 8x, 5 MSAA 4x and FXAA
+        int textureQuality = 2;       // 0 low (two mip levels dropped), 1 medium (one), 2 high (all)
+        int fov = 65;                 // the title's cg_fov, 65 (its own) .. 100
         int windowMode = 0;           // 0 windowed, 1 borderless full screen
         bool fpsOverlay = false;
         bool statsOverlay = false;    // the renderer's counters over the picture
@@ -62,6 +64,12 @@ namespace Settings
     void Save();
 
     // The console commands the settings ask of the title, for the config
-    // the file layer appends to default.cfg: the aim assist switches.
+    // the file layer appends to default.cfg: the aim assist switches and
+    // the field of view.
     std::string TitleConfigLines();
+
+    // The console commands that follow a change of the values while the
+    // title runs (the field of view), for the command buffer. Empty when
+    // nothing changed since the last ask.
+    std::string TitleCommandsChanged();
 }

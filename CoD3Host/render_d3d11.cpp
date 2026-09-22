@@ -978,6 +978,10 @@ namespace
             if (scale < 0.5f) scale = 0.5f;
         }
         RenderResources::RequestScale(scale);
+        // The texture quality: COD3_TEXQUALITY=0|1|2 over the settings.
+        static const int qualityOverride = []() { const char* t = getenv("COD3_TEXQUALITY"); return t ? int(strtol(t, nullptr, 10)) : -1; }();
+        const int quality = qualityOverride >= 0 ? qualityOverride : settings.textureQuality;
+        RenderResources::RequestMipSkip(quality >= 2 ? 0 : quality == 1 ? 1 : 2);
 
         // The texture filtering, unless the environment said.
         static const bool filterPinned = getenv("COD3_TEXTURE_FILTER") != nullptr || getenv("COD3_ANISO") != nullptr;

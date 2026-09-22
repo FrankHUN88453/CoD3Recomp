@@ -730,8 +730,44 @@ namespace
                     i = ifElse ? elseTarget : target;
                     break;
                 }
+                case 7:
+                {
+                    // A loop whose end is the loop end that names it, with
+                    // nothing inside that ends the program, is a for: the
+                    // count, the start and the step come from the loop
+                    // constant, as the sequencer read them. Anything else
+                    // is the loop over a switch.
+                    const uint32_t loopEnd = uint32_t(instruction) & 0x1FFF;
+                    const bool repeat = ((instruction >> 13) & 1) != 0;
+                    const uint32_t loopId = uint32_t(instruction >> 32) & 0x1F;
+                    if (loopEnd <= i || loopEnd >= end) return false;
+                    const uint64_t last = flow[loopEnd];
+                    if ((uint32_t(last >> 44) & 0xF) != 8 || (uint32_t(last) & 0x1FFF) != i) return false;
+                    for (uint32_t j = i + 1; j < loopEnd; j++)
+                    {
+                        const uint32_t inside = uint32_t(flow[j] >> 44) & 0xF;
+                        if (inside == 2 || inside == 4 || inside == 6 || inside == 14) return false;
+                    }
+                    const bool predicated = ((last >> 13) & 1) != 0;
+                    const bool condition = ((last >> 42) & 1) != 0;
+                    Line(Format("{ uint loopConstant%u = loops[%u][%u]; uint loopCount%u = loopConstant%u & 0xFFu;", i, loopId / 4, loopId & 3, i, i));
+                    Line(Format("  int loopStep%u = (int)((loopConstant%u >> 16) & 0xFFu); if (loopStep%u >= 128) loopStep%u -= 256;", i, i, i, i));
+                    Line(Format("  int savedAL%u = aL; aL = (int)((loopConstant%u >> 8) & 0xFFu);", i, i));
+                    Line(Format("  if (loopCount%u != 0u || %s) {", i, repeat ? "true" : "false"));
+                    Line(Format("  [loop] for (uint loopIndex%u = 0; loopIndex%u < 1024u; loopIndex%u++) {", i, i, i));
+                    indent += 2;
+                    if (!EmitStructured(flow, i + 1, loopEnd, inLoop)) return false;
+                    Line(Format("loopCount%u--; aL += loopStep%u;", i, i));
+                    if (predicated) Line(Format("if (loopCount%u == 0u || p0 == %s) break;", i, condition ? "true" : "false"));
+                    else Line(Format("if (loopCount%u == 0u) break;", i));
+                    indent -= 2;
+                    Line("  } }");
+                    Line(Format("  aL = savedAL%u; }", i));
+                    i = loopEnd + 1;
+                    break;
+                }
                 default:
-                    return false;   // loops, calls: the loop over a switch
+                    return false;   // calls, a loop end on its own: the loop over a switch
                 }
             }
             return true;

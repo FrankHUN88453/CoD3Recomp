@@ -279,6 +279,9 @@ namespace
                     }
                     const char* aa[] = { "None", "FXAA", "MSAA 2x", "MSAA 4x", "MSAA 8x", "MSAA 4x + FXAA" };
                     ImGui::Combo("Anti-aliasing", &g_edit.antialiasing, aa, 6);
+                    const char* qualities[] = { "Low", "Medium", "High" };
+                    ImGui::Combo("Texture quality", &g_edit.textureQuality, qualities, 3);
+                    ImGui::SliderInt("Field of view", &g_edit.fov, 65, 100, g_edit.fov == 65 ? "65 (the game's own)" : "%d");
                     ImGui::Checkbox("Vertical sync (VSync)", &g_edit.vsync);
                     ImGui::Checkbox("Show FPS", &g_edit.fpsOverlay);
                     ImGui::Checkbox("Renderer statistics", &g_edit.statsOverlay);

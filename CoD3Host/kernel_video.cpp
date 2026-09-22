@@ -22,6 +22,7 @@
 #include "scheduler.h"
 #include "gpu.h"
 #include "render.h"
+#include "settings.h"
 #include "window.h"
 #include "pool_trace.h"
 #include "timeline.h"
@@ -34,6 +35,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <vector>
 #include <condition_variable>
 #include <thread>
 
@@ -698,6 +700,81 @@ namespace
                         mapStarted = true;
                         Kernel::QueueConsoleCommand("spmap " + name);
                     }
+                }
+                // COD3_CMD="second:command;second:command": console commands
+                // at those seconds, for a scripted run (cg_fov 90, r_...).
+                {
+                    static const char* const cmdWanted = getenv("COD3_CMD");
+                    static std::vector<std::pair<long, std::string>> pending = []() {
+                        std::vector<std::pair<long, std::string>> list;
+                        if (cmdWanted == nullptr) return list;
+                        std::string all(cmdWanted);
+                        size_t at = 0;
+                        while (at < all.size())
+                        {
+                            size_t semi = all.find(';', at); if (semi == std::string::npos) semi = all.size();
+                            const std::string item = all.substr(at, semi - at);
+                            const size_t colon = item.find(':');
+                            if (colon != std::string::npos) list.emplace_back(strtol(item.c_str(), nullptr, 10), item.substr(colon + 1));
+                            at = semi + 1;
+                        }
+                        return list;
+                    }();
+                    for (size_t i = 0; i < pending.size(); i++)
+                        if (long(frame / 60) == pending[i].first) { Kernel::QueueConsoleCommand(pending[i].second); pending.erase(pending.begin() + i); break; }
+                }
+                // COD3_STRINGS="prefix,prefix[,second]": the strings in the
+                // title's image that start so, listed once, that many
+                // seconds in (twenty by default): what its console knows.
+                {
+                    static const char* const stringsWanted = getenv("COD3_STRINGS");
+                    static bool listed = false;
+                    if (stringsWanted != nullptr && !listed)
+                    {
+                        std::vector<std::string> prefixes;
+                        long second = 20;
+                        std::string all(stringsWanted);
+                        size_t at = 0;
+                        while (at <= all.size())
+                        {
+                            size_t comma = all.find(',', at); if (comma == std::string::npos) comma = all.size();
+                            const std::string item = all.substr(at, comma - at);
+                            if (!item.empty() && item.find_first_not_of("0123456789") == std::string::npos) second = strtol(item.c_str(), nullptr, 10);
+                            else if (!item.empty()) prefixes.push_back(item);
+                            at = comma + 1;
+                        }
+                        if (long(frame / 60) == second)
+                        {
+                            listed = true;
+                            const uint32_t first = 0x82000000u, last = 0x82000000u + (16u << 20);
+                            std::string found;
+                            uint32_t count = 0;
+                            for (uint32_t a = first; a + 4 < last; a++)
+                            {
+                                const uint8_t* p = Guest::Base + a;
+                                if (a > first && p[-1] != 0) continue;   // the start of a string
+                                for (const std::string& prefix : prefixes)
+                                {
+                                    if (memcmp(p, prefix.data(), prefix.size()) != 0) continue;
+                                    size_t n = 0;
+                                    while (n < 64 && p[n] >= 0x20 && p[n] < 0x7F) n++;
+                                    if (n < prefix.size() + 1 || p[n] != 0) break;
+                                    found += std::string(reinterpret_cast<const char*>(p), n) + ' ';
+                                    count++;
+                                    break;
+                                }
+                            }
+                            printf("strings: %u in the image starting with %s: %s\n", count, stringsWanted, found.c_str());
+                            fflush(stdout);
+                        }
+                    }
+                }
+                // The settings that are the title's own console variables,
+                // when they changed: once a second is often enough.
+                if (frame % 60 == 0)
+                {
+                    const std::string changed = Settings::TitleCommandsChanged();
+                    if (!changed.empty()) Kernel::QueueConsoleCommand(changed);
                 }
                 // The host console's commands, and COD3_MAP's, onto the
                 // title's command buffer: the text through the title's va

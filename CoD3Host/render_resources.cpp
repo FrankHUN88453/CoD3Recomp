@@ -39,6 +39,7 @@ namespace
     float g_requestedScale = 1.0f;
     uint32_t g_samples = 1;
     uint32_t g_requestedSamples = 1;
+    uint32_t g_mipSkip = 0, g_requestedMipSkip = 0;   // the texture quality: top levels left out
 
     // The count the device can do, at or under the one asked for.
     uint32_t SupportedSamples(uint32_t wanted)
@@ -318,6 +319,10 @@ namespace
         }
         static const bool noMips = getenv("COD3_NOMIPS") != nullptr;
         if (noMips) levels = 1;
+        // The texture quality: the top levels left out, when there are
+        // levels below them to keep. The title's arithmetic sees the size
+        // it named; only the texels are fewer.
+        const uint32_t skip = std::min(g_mipSkip, levels - 1);
 
         // A cube map: six faces, each a whole tiled picture of the size,
         // one after another, each taking its rows rounded up to whole
@@ -326,20 +331,22 @@ namespace
         const bool cube = ((fetch[5] >> 9) & 3) == 3;
         const uint32_t faces = cube ? 6 : 1;
         if (cube) levels = 1;
-        std::vector<std::vector<uint8_t>> pixels(levels * faces);
-        std::vector<D3D11_SUBRESOURCE_DATA> initial(levels * faces);
+        const uint32_t kept = cube ? 1 : levels - skip;   // the levels uploaded, from `skip` down
+        std::vector<std::vector<uint8_t>> pixels(kept * faces);
+        std::vector<D3D11_SUBRESOURCE_DATA> initial(kept * faces);
         uint32_t packedX = 0, packedY = 0;
         PackedBaseOffset(packedMips, width, height, packedX, packedY);
         uint32_t rowBytes = 0;
         entry.bytes = 0;
-        for (uint32_t face = 0; face < faces; face++)
-        {
-            const uint32_t blocksHigh = (height + blockTexels - 1) / blockTexels;
-            const uint32_t faceBytes = std::max(pitch / blockTexels, 1u) * ((blocksHigh + 31) & ~31u) * blockBytes;
-            LinearLevel(data + size_t(face) * faceBytes, format, endian, width, height, pitch, tiled, packedX, packedY, pixels[face * levels], rowBytes);
-            initial[face * levels] = { pixels[face * levels].data(), rowBytes, 0 };
-            entry.bytes += pixels[face * levels].size();
-        }
+        if (cube || skip == 0)
+            for (uint32_t face = 0; face < faces; face++)
+            {
+                const uint32_t blocksHigh = (height + blockTexels - 1) / blockTexels;
+                const uint32_t faceBytes = std::max(pitch / blockTexels, 1u) * ((blocksHigh + 31) & ~31u) * blockBytes;
+                LinearLevel(data + size_t(face) * faceBytes, format, endian, width, height, pitch, tiled, packedX, packedY, pixels[face * kept], rowBytes);
+                initial[face * kept] = { pixels[face * kept].data(), rowBytes, 0 };
+                entry.bytes += pixels[face * kept].size();
+            }
 
         uint32_t offset = 0;
         for (uint32_t level = 1; level < levels; level++)
@@ -347,17 +354,21 @@ namespace
             const uint32_t w = std::max(width >> level, 1u), h = std::max(height >> level, 1u);
             const uint32_t blocksWide = (w + blockTexels - 1) / blockTexels, blocksHigh = (h + blockTexels - 1) / blockTexels;
             const uint32_t pitchBlocks = (blocksWide + 31) & ~31u, rowsBlocks = (blocksHigh + 31) & ~31u;
-            const uint8_t* levelData = Guest::Base + Guest::PhysicalAlias(mipAddress + offset);
-            LinearLevel(levelData, format, endian, w, h, pitchBlocks * blockTexels, tiled, 0, 0, pixels[level], rowBytes);
-            initial[level] = { pixels[level].data(), rowBytes, 0 };
-            entry.bytes += pixels[level].size();
+            if (level >= skip)
+            {
+                const uint8_t* levelData = Guest::Base + Guest::PhysicalAlias(mipAddress + offset);
+                LinearLevel(levelData, format, endian, w, h, pitchBlocks * blockTexels, tiled, 0, 0, pixels[level - skip], rowBytes);
+                initial[level - skip] = { pixels[level - skip].data(), rowBytes, 0 };
+                entry.bytes += pixels[level - skip].size();
+            }
             offset += pitchBlocks * rowsBlocks * blockBytes;
         }
 
+        const uint32_t topWidth = std::max(width >> skip, 1u), topHeight = std::max(height >> skip, 1u);
         D3D11_TEXTURE2D_DESC desc{};
-        desc.Width = compressed ? ((width + 3) & ~3u) : width;
-        desc.Height = compressed ? ((height + 3) & ~3u) : height;
-        desc.MipLevels = levels;
+        desc.Width = compressed ? ((topWidth + 3) & ~3u) : topWidth;
+        desc.Height = compressed ? ((topHeight + 3) & ~3u) : topHeight;
+        desc.MipLevels = kept;
         desc.ArraySize = faces;
         desc.Format = hostFormat;
         desc.SampleDesc.Count = 1;
@@ -381,7 +392,7 @@ namespace
         }
         entry.width = width;
         entry.height = height;
-        entry.levels = levels;
+        entry.levels = kept;
         g_textureUploads.fetch_add(1, std::memory_order_relaxed);
         g_textureBytes.fetch_add(entry.bytes, std::memory_order_relaxed);
         RenderStats::Frame().textureUploads++;
@@ -551,6 +562,25 @@ bool RenderResources::BeginFrame(uint64_t frame)
 {
     g_frame = frame;
     bool remade = false;
+    if (g_requestedMipSkip != g_mipSkip)
+    {
+        // Every texture goes, to come back with the levels the quality asks.
+        remade = true;
+        g_mipSkip = g_requestedMipSkip;
+        for (uint32_t i = 0; i < g_textures.size(); i++)
+        {
+            TextureEntry& entry = g_textures[i];
+            if (!entry.live) continue;
+            g_textureKeys.Erase(entry.key);
+            g_resourceBytes -= entry.bytes;
+            entry.texture.Reset();
+            entry.resource.Reset();
+            entry.face.Reset();
+            entry.live = false;
+            g_freeTextures.push_back(i + 1);
+        }
+        printf("render: textures are uploaded from mip level %u\n", g_mipSkip);
+    }
     if (g_requestedSamples != g_samples)
     {
         remade = true;
@@ -607,6 +637,10 @@ void RenderResources::RequestScale(float scale)
 }
 
 float RenderResources::Scale() { return g_scale; }
+
+void RenderResources::RequestMipSkip(uint32_t levels) { g_requestedMipSkip = levels > 4 ? 4 : levels; }
+
+uint32_t RenderResources::MipSkip() { return g_mipSkip; }
 
 void RenderResources::RequestMultisample(uint32_t samples)
 {

@@ -54,6 +54,12 @@ namespace RenderResources
     void RequestMultisample(uint32_t samples);
     uint32_t Multisample();
 
+    // The texture quality: how many of a texture's top mip levels are left
+    // out on upload (0 all of them kept). A change takes effect at the
+    // next frame, when every texture is dropped to be uploaded again.
+    void RequestMipSkip(uint32_t levels);
+    uint32_t MipSkip();
+
     // --- render targets ---------------------------------------------------------------
 
     struct ColorTarget
