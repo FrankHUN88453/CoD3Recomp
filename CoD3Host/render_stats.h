@@ -85,6 +85,10 @@ namespace RenderStats
     };
     Snapshot Current();
 
+    // A program compiled or read from the disk cache, from any thread:
+    // the stats line carries the totals.
+    void NoteProgram(bool fromDisk);
+
     bool Wanted();        // COD3_RENDER_STATS=1: a line a second on stdout
     bool GpuProfiled();   // COD3_GPU_PROFILE=1
     bool Debug();         // COD3_RENDER_DEBUG=1: the commands of a frame, once

@@ -50,16 +50,40 @@ constants' swizzles and sign modes.
 game logic (recompiled)  ->  PM4 packets  ->  register file        gpu.cpp
    Render::Draw / Resolve / Swap / ShaderLoaded                    render.h
    RenderState::Snapshot   the registers of a draw, read once      render_state.*
-   handles                 pipeline objects, programs, resources   render_pipeline.*, render_shaders.*, render_resources.*
-   the executor            compares handles with what is bound,    render_d3d11.cpp
+   the PC render layer     Snapshot -> DrawCommand: handles from   render_commands.cpp
+                           the caches, views, host pixels, the
+                           constants and indices in their rings
+   caches                  pipeline objects, programs, resources   render_pipeline.*, render_shaders.*, render_resources.*
+   the executor            runs a DrawCommand: compares each       render_d3d11.cpp
+                           handle and view with what is bound,
                            sets what changed, one draw call
    Direct3D 11             one immediate context, one thread
 ```
 
 **render_state**: `RenderState::Read` copies the thirty registers a draw
 depends on into a plain struct (relaxed loads; the command thread is the
-thread that writes them). Nothing after reads the register file except
-the constant files and fetch constants, which are read by index.
+thread that writes them). `ReadResolve` does the same for a resolve.
+Nothing after reads the register file except the PC render layer, which
+reads the constant files and the fetch constants by index.
+
+**render_commands, the PC render layer**: where the console's terms end.
+`PrepareDraw` turns a Snapshot into a `DrawCommand`: the programs and
+the blend, depth and rasteriser states as integer handles into the
+caches; the render targets, textures, samplers and vertex buffers as the
+views the caches own; the viewport and scissor in host pixels; the
+constants the programs read gathered into the constant ring and named
+by offset; the indices turned round into the index ring. The EDRAM tile
+a surface is named by becomes a render target handle here, a fetch
+constant becomes a view and a sampler, a big endian index list becomes a
+range of the ring. `PrepareResolve` does the same for the copy that
+ends a pass. The executor below never sees a register; it runs commands.
+The command is prepared and run at once, on the command thread: a
+deferred queue would only add a copy, since Direct3D 11's immediate
+context is single threaded anyway, and the profile shows no two
+consecutive draws that could have been one (the title changes a
+texture, a constant or a state between nearly every pair), so there is
+nothing for a reordering pass to merge that the order-dependent draws
+(blended, particles, the HUD) would allow.
 
 **render_pipeline**: blend, depth stencil, rasteriser and sampler states
 by integer handle. The key is the register words that define the state
@@ -112,8 +136,9 @@ What is unused for 1800 frames is released.
 **render_d3d11**: the executor. Targets are set before the textures so a
 surface about to be drawn into is unbound from the slots holding it, and
 only those. Each texture, sampler, vertex buffer, state object, program
-and constant offset is compared with what the context has and set only
-when it differs. Indices are converted into a scratch that never shrinks.
+and constant offset the command names is compared with what the context
+has (the `Bound` struct, the CPU's shadow of the context) and set only
+when it differs.
 The present happens here too, at the title's swap: the resolved front
 buffer onto the window, 16:9 centred, through FXAA when asked, the
 overlay on top, and `Present(1)` or `Present(0, ALLOW_TEARING)` as the
@@ -122,11 +147,24 @@ which is exactly what throttles the title to the display.
 
 **render_stats**: counters per frame folded into one second averages: fps,
 frame time, CPU time on the command thread, GPU time from timestamp
-queries (`COD3_GPU_PROFILE=1`), draws, triangles, resolves, and the
+queries (`COD3_GPU_PROFILE=1`), draws, triangles, resolves, the
 program, texture, pipeline and target switches, the uploads and the bytes
-streamed. `COD3_RENDER_STATS=1` prints a line a second; the settings menu
-shows the same panel over the picture. `COD3_RENDER_DEBUG=1` logs one
-frame's draws (the same as `COD3_D3DFRAME=auto`).
+streamed, the programs compiled and read from the disk cache.
+`COD3_RENDER_STATS=1` prints a line a second; the settings menu
+shows the same panel over the picture. `COD3_RENDER_PROFILE=1` adds a
+line with the draw path's sections timed by the cycle counter (state,
+targets, pipeline, textures, buffers, constants, bind, indices, draw),
+the constant blocks uploaded and the draws that could have joined the
+one before. `COD3_RENDER_DEBUG=1` logs one frame's draws (the same as
+`COD3_D3DFRAME=auto`).
+
+**The translation's control flow**: a program's jumps that nest as
+blocks are written as ifs, a loop whose end names its start as a for
+over the loop constant's count, start and step. Of the 949 programs the
+title has loaded across every level, six still get the loop over a
+switch on the program counter: captured programs whose loop end names a
+nop, which the title never draws with. Every drawn program is straight
+HLSL.
 
 ## Resolution and picture
 
@@ -152,11 +190,22 @@ console's.
 In the F11 menu, kept in `CoD3Recomp.ini`: window or borderless full
 screen (Alt+Enter too), the resolution the frame is drawn at (the
 desktop's by default), texture filtering and anisotropy, anti aliasing,
-vertical sync, the fps and stats panels. From
+texture quality (Low and Medium leave the top two or one mip levels of
+every texture out on upload), the field of view (the title's own
+`cg_fov`, 65 to 100, in the config at start and on the command buffer
+when it changes), vertical sync, the fps and stats panels. What the
+title has no knob for is not offered: its shadow map is one resolution
+(it already scales with the frame), its post processing is one chain,
+and there is no `r_shadow` or `r_glow` in its console. From
 the environment, over the menu: `COD3_SCALE`, `COD3_TEXTURE_FILTER=native|
 bilinear|trilinear|anisotropic`, `COD3_ANISO=1..16`, `COD3_VSYNC=0|1`,
-`COD3_AA=0|fxaa|msaa2|msaa4|msaa8|msaa4fxaa`, `COD3_FULLSCREEN=0|1`, `COD3_NOMIPS=1`,
-`COD3_NOSHADERCACHE=1`, `COD3_NOPRECOMPILE=1`. Diagnostics: `COD3_D3DDEBUG`
+`COD3_AA=0|fxaa|msaa2|msaa4|msaa8|msaa4fxaa`, `COD3_TEXQUALITY=0|1|2`,
+`COD3_FULLSCREEN=0|1`, `COD3_NOMIPS=1`,
+`COD3_NOSHADERCACHE=1`, `COD3_NOPRECOMPILE=1`. For a scripted run,
+`COD3_CMD="second:command;..."` puts console commands on the title's
+buffer at those seconds and `COD3_STRINGS="prefix,..."` lists the
+strings of the image that start so (the console variables the title
+knows). Diagnostics: `COD3_D3DDEBUG`
 (the debug layer), `COD3_D3DFRAME=N|auto|loading` with `COD3_D3DDRAWDUMP`,
 `COD3_FRAMEDUMP`, `COD3_D3DSKIPVS`, `COD3_D3DFLAT`, `COD3_DUMPHLSL`,
 `COD3_D3DTEXDUMP`. In the frame log a texture that reads white says why
@@ -192,6 +241,32 @@ with the old backend's ten second report.
 At 4x (4160x2496 targets) the level also holds 60 with 5 ms of CPU a
 frame: the CPU cost is per draw, not per pixel.
 
+The profile of the draw path (`COD3_RENDER_PROFILE=1`, the forest level,
+2560 draws a frame), before and after the PC render layer was split from
+the executor, in microseconds a draw:
+
+|                        | before | after |
+| ---------------------- | ------ | ----- |
+| state (registers, programs) | 0.06 | 0.06 |
+| targets and scissor    | 0.06   | 0.06  |
+| pipeline handles       | 0.03   | 0.02  |
+| textures and samplers  | 0.18   | 0.14  |
+| vertex buffers         | 0.16   | 0.13  |
+| constants into the ring | 0.44  | 0.29  |
+| binding on the context | (in the above) | 0.18 |
+| indices into the ring  | 0.39   | 0.22  |
+| the draw call          | 0.01   | 0.02  |
+| a draw                 | 1.35   | 1.13  |
+| CPU a frame            | 3.9 ms | 3.2 ms |
+
+The indices are turned round straight into the mapped ring, eight or
+four at a time, instead of through a scratch and a copy; the constants
+a program reads are copied in runs. The 4780 constant blocks a frame
+are the title's: it writes a few constants before nearly every draw, so
+the vertex program's block goes up nearly every draw, packed to what
+the program reads. At 2560x1440 with MSAA 8x and 16x anisotropic
+filtering the level holds 60 at 3.2 ms of CPU a frame.
+
 ## Visual differences
 
 `scripts/compare_frames.py` matches each frame dump of one run to the
@@ -217,8 +292,13 @@ volume" read their flat texture instead of white.
   further (the crossroads level's 1024 row shadow map): the surfaces of
   that pitch are made again taller, colour and depth together.
 - No sRGB or HDR output path.
-- The vertex fetch is by raw loads; an input layout would let the GPU's
-  vertex fetch do the work. The programs' loops still go through the
-  switch when they cannot be structured.
+- The vertex fetch is by raw loads with the words turned round in the
+  program; an input layout would let the GPU's vertex fetch do the work,
+  but the buffers would have to be turned round on upload by the fetch
+  constant's byte order, and the GPU's time is not in the vertex fetch.
+- A draw is prepared and run at once; the DrawCommand is a value that a
+  deferred queue could carry, but nothing today would gain from one.
+- Settings the title has no knob for: shadow quality, post processing.
+  A render scale beside the resolution was left out on purpose.
 - The fingerprint that catches a rewritten texture or buffer samples 64
   points; a one texel change can be missed until the next.

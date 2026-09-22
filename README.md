@@ -55,15 +55,17 @@ the title's main menu, over the title's own options page) has the window
 mode (windowed or borderless full screen; Alt+Enter switches too), the
 resolution (the desktop's by default; the window is made that size, full
 screen scales it, and the frame is drawn at it), the texture filtering
-and anisotropy, anti aliasing (MSAA 2x to 8x, FXAA, or both),
+and anisotropy, anti aliasing (MSAA 2x to 8x, FXAA, or both), the
+texture quality, the field of view (65 to 100),
 vertical sync, a frame counter and the renderer's statistics, the mouse
 sensitivity, the title's aim assist, the pad, and the keys. It is drawn
 in the colours of the title's own menus. It keeps its values in `CoD3Recomp.ini` beside the
 executable. `CoD3.cfg` beside the executable holds console commands run at
 start (`seta com_maxfps 60` by default). The same settings can be forced
 from the environment for a run: `COD3_SCALE`, `COD3_TEXTURE_FILTER`,
-`COD3_ANISO`, `COD3_AA`, `COD3_VSYNC`, `COD3_FULLSCREEN`; and
-`COD3_RENDER_STATS=1` prints the renderer's counters once a second.
+`COD3_ANISO`, `COD3_AA`, `COD3_TEXQUALITY`, `COD3_VSYNC`, `COD3_FULLSCREEN`;
+`COD3_RENDER_STATS=1` prints the renderer's counters once a second and
+`COD3_RENDER_PROFILE=1` where a draw's microseconds go.
 
 The console (the key left of 1, which the title's own configs bind to
 `toggleconsole`) takes the title's console commands and puts them on its
@@ -156,7 +158,7 @@ five seconds, A at eight) see to in a scripted run. The level names are the fold
 | `CoD3Host/kernel_stubs.cpp` | Generated for everything not on that list |
 | `tools/XenonRecomp/` | The recompiler, with local fixes described in STATUS.md |
 | `CoD3Host/xenos_hlsl.cpp` | The title's shader microcode translated to HLSL |
-| `CoD3Host/render*.cpp` | The Direct3D 11 renderer: state, pipeline and shader caches, resources, stats, the device ([docs/renderer.md](docs/renderer.md)) |
+| `CoD3Host/render*.cpp` | The renderer: the registers read once (`render_state`), the PC render layer that makes draw commands of them (`render_commands`), the pipeline, shader and resource caches, the stats, and the Direct3D 11 executor and device (`render_d3d11`) ([docs/renderer.md](docs/renderer.md)) |
 | `scripts/compare_frames.py` | Compares two runs' frame dumps, for the renderer's visual regression check |
 | `scripts/sendkeys.py` | Posts keys to the game's window without taking the focus, for scripted runs (the console included) |
 | `CoD3Host/overlay.cpp`, `settings.cpp` | The settings menu (Dear ImGui) and its file |

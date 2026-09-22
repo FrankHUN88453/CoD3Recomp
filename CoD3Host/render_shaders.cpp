@@ -1,4 +1,5 @@
 #include "render_shaders.h"
+#include "render_stats.h"
 
 #include <chrono>
 #include <condition_variable>
@@ -235,6 +236,7 @@ namespace
         const char* what = program.pixel ? "pixel program" : "vertex program";
         if (ReadCache(program))
         {
+            RenderStats::NoteProgram(true);
             program.state.store(MakeShaderObject(program) ? State::Ready : State::Failed, std::memory_order_release);
             return;
         }
@@ -298,6 +300,7 @@ namespace
         }
         if (errors) errors->Release();
         g_compiled.fetch_add(1, std::memory_order_relaxed);
+        RenderStats::NoteProgram(false);
         program.bytecode.assign(static_cast<const uint8_t*>(code->GetBufferPointer()),
             static_cast<const uint8_t*>(code->GetBufferPointer()) + code->GetBufferSize());
         code->Release();

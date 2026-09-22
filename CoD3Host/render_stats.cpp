@@ -1,6 +1,7 @@
 #include "render_stats.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -202,6 +203,10 @@ RenderStats::Snapshot RenderStats::Current()
     return g_snapshot;
 }
 
+namespace { std::atomic<uint32_t> g_compiled{ 0 }, g_fromDisk{ 0 }; }
+
+void RenderStats::NoteProgram(bool fromDisk) { (fromDisk ? g_fromDisk : g_compiled).fetch_add(1, std::memory_order_relaxed); }
+
 bool RenderStats::Wanted()
 {
     static const bool wanted = getenv("COD3_RENDER_STATS") != nullptr;
@@ -221,11 +226,12 @@ void RenderStats::Tick()
     if (!Wanted()) return;
     const Snapshot s = Current();
     printf("stats: %.1f fps, frame %.2f ms, cpu %.2f ms%s%.2f ms, %.0f draws (%.0f skipped), %.0f k triangles, %.0f resolves, "
-           "switches: %.0f shader %.0f texture %.0f pipeline %.0f target; uploads %.0f tex %.0f buf (%.0f KB), streamed %.0f KB\n",
+           "switches: %.0f shader %.0f texture %.0f pipeline %.0f target; uploads %.0f tex %.0f buf (%.0f KB), streamed %.0f KB; programs %u compiled %u from disk\n",
         s.fps, s.frameMilliseconds, s.cpuMilliseconds, s.gpuProfiled ? ", gpu " : ", gpu n/a ", s.gpuMilliseconds,
         s.draws, s.skipped, s.triangles / 1000.0f, s.resolves,
         s.shaderSwitches, s.textureSwitches, s.pipelineSwitches, s.targetSwitches,
-        s.textureUploads, s.bufferUploads, s.uploadKilobytes, s.streamKilobytes);
+        s.textureUploads, s.bufferUploads, s.uploadKilobytes, s.streamKilobytes,
+        g_compiled.load(std::memory_order_relaxed), g_fromDisk.load(std::memory_order_relaxed));
     if (Profiled())
     {
         float total = 0;

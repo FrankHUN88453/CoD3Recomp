@@ -107,6 +107,15 @@ render scale from the window's height. The forest level went from 30 to
 the design and the audit of what was emulation are in
 [docs/renderer.md](docs/renderer.md).
 
+The layer between the registers and Direct3D was then made explicit:
+`render_commands.cpp` turns the registers of a draw into a `DrawCommand`
+of handles, views, host pixels and ring offsets, and the executor in
+`render_d3d11.cpp` runs commands without seeing a register. A profile of
+the draw path (`COD3_RENDER_PROFILE=1`) showed the indices and the
+constants as most of a draw's cost; the indices are turned round straight
+into the ring now and the constants copied in runs, 1.35 to 1.13 µs a
+draw. The settings gained texture quality and the field of view.
+
 ### Sound, and the films
 
 The XMA contexts decode through FFmpeg's `xma1` decoder (the title's voices
