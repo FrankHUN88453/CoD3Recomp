@@ -123,6 +123,8 @@ namespace RenderResources
     // volume is white.
     ID3D11ShaderResourceView* TextureView(Handle handle, uint32_t dimension);
     Handle WhiteTexture();
+    // Why the last TextureFor gave the white texture, for the frame log.
+    const char* WhiteReason();
 
     // --- vertex buffers ---------------------------------------------------------------------
 

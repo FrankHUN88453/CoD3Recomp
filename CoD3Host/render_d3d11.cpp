@@ -711,6 +711,16 @@ namespace
         const RenderShaders::State psState = ps->state.load(std::memory_order_acquire);
         if (vsState != RenderShaders::State::Ready || psState != RenderShaders::State::Ready)
         {
+            // A program that failed is said the first time a draw wants it:
+            // that is what a missing thing on screen comes from.
+            for (const RenderShaders::Program* program : { vs, ps })
+            {
+                if (program->state.load(std::memory_order_acquire) != RenderShaders::State::Failed || program->announced) continue;
+                const_cast<RenderShaders::Program*>(program)->announced = true;
+                printf("render: a draw wants %s program %016llx, which could not be built: %s\n",
+                    program->pixel ? "pixel" : "vertex", (unsigned long long)program->hash, program->problem.empty() ? "the compile failed" : program->problem.c_str());
+                fflush(stdout);
+            }
             Skip(vsState == RenderShaders::State::Failed || psState == RenderShaders::State::Failed ? SkipProgram : SkipProgramBuilding);
             return;
         }
@@ -1221,7 +1231,9 @@ namespace
                 {
                     uint32_t w[6];
                     RenderState::ReadTextureFetch(fetch.slot, w);
-                    printf("   %stexture %u (read as %uD): format %u %ux%u at %08X%s swizzle %03X signs %02X, words %08X %08X %08X %08X %08X %08X\n", stage == 0 ? "" : "vs ", fetch.slot, fetch.dimension == 3 ? 6 : fetch.dimension + 1, w[1] & 0x3F,
+                    uint32_t tw, th; bool tr;
+                    const bool white = RenderResources::TextureFor(w, tw, th, tr) == 1 && !tr;
+                    printf("   %stexture %u (read as %uD)%s%s: format %u %ux%u at %08X%s swizzle %03X signs %02X, words %08X %08X %08X %08X %08X %08X\n", stage == 0 ? "" : "vs ", fetch.slot, fetch.dimension == 3 ? 6 : fetch.dimension + 1, white ? " WHITE: " : "", white ? RenderResources::WhiteReason() : "", w[1] & 0x3F,
                         (w[2] & 0x1FFF) + 1, ((w[2] >> 13) & 0x1FFF) + 1, w[1] & 0xFFFFF000u, RenderResources::ResolvedAt(w[1] & 0xFFFFF000u) ? " (resolved)" : "",
                         (w[3] >> 1) & 0xFFF, (w[0] >> 2) & 0xFF, w[0], w[1], w[2], w[3], w[4], w[5]);
                 }

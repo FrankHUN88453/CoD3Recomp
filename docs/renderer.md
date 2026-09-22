@@ -159,7 +159,11 @@ bilinear|trilinear|anisotropic`, `COD3_ANISO=1..16`, `COD3_VSYNC=0|1`,
 `COD3_NOSHADERCACHE=1`, `COD3_NOPRECOMPILE=1`. Diagnostics: `COD3_D3DDEBUG`
 (the debug layer), `COD3_D3DFRAME=N|auto|loading` with `COD3_D3DDRAWDUMP`,
 `COD3_FRAMEDUMP`, `COD3_D3DSKIPVS`, `COD3_D3DFLAT`, `COD3_DUMPHLSL`,
-`COD3_D3DTEXDUMP`.
+`COD3_D3DTEXDUMP`. In the frame log a texture that reads white says why
+(`WHITE: no texture in the fetch constant`, `format not uploaded`, `upload
+failed`), and the first draw that wants a program that could not be built
+says which and why; the captured programs that fail to translate are only
+counted, since the title loads hundreds it never draws with.
 
 ## Performance
 

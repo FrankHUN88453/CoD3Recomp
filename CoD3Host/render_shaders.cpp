@@ -39,7 +39,7 @@ namespace
     Handle g_current[2] = { 0, 0 };
     uint64_t g_currentHash[2] = { 0, 0 };
 
-    std::atomic<uint64_t> g_loads{ 0 }, g_fromDisk{ 0 }, g_compiled{ 0 }, g_failed{ 0 }, g_compileMilliseconds{ 0 };
+    std::atomic<uint64_t> g_loads{ 0 }, g_fromDisk{ 0 }, g_compiled{ 0 }, g_failed{ 0 }, g_capturedFailed{ 0 }, g_compileMilliseconds{ 0 };
     std::atomic<uint32_t> g_pending{ 0 };
 
     std::string g_cacheDirectory;
@@ -243,9 +243,13 @@ namespace
         const XenosHlsl::Translation translation = XenosHlsl::Translate(*job.words, program.pixel);
         if (!translation.ok)
         {
-            static std::atomic<int> announced{ 0 };
-            if (announced.fetch_add(1) < 400)
-                printf("render: %s %016llx (%zu dwords) could not be translated: %s\n", what, (unsigned long long)program.hash, job.words->size(), translation.problem.c_str());
+            // The stream's programs are said here; a captured one is said
+            // when a draw wants it, which most of the failures never are
+            // (the title loads programs it does not draw with), and counted
+            // for the report.
+            program.problem = translation.problem;
+            if (program.captured) g_capturedFailed.fetch_add(1, std::memory_order_relaxed);
+            else printf("render: %s %016llx (%zu dwords) could not be translated: %s\n", what, (unsigned long long)program.hash, job.words->size(), translation.problem.c_str());
             g_failed.fetch_add(1, std::memory_order_relaxed);
             program.state.store(State::Failed, std::memory_order_release);
             return;
@@ -350,6 +354,7 @@ namespace
         Program& program = g_programs.back();
         program.hash = hash;
         program.pixel = pixel;
+        program.captured = !fromStream;
         std::vector<uint32_t>& words = g_microcode.back().words;
         words.resize(sizeDwords);
         for (uint32_t i = 0; i < sizeDwords; i++)
@@ -489,4 +494,9 @@ void RenderShaders::Report()
     printf("render: %llu program uploads, %llu distinct programs, %llu from the disk cache, %llu compiled (%llu failed, %.2f s), %u building\n",
         (unsigned long long)s.loads, (unsigned long long)s.programs, (unsigned long long)s.fromDisk,
         (unsigned long long)s.compiled, (unsigned long long)s.failed, s.compileMilliseconds / 1000.0, s.pending);
+    // Once: the report comes every second when the statistics are on.
+    static uint64_t said = 0;
+    const uint64_t captured = g_capturedFailed.load(std::memory_order_relaxed);
+    if (captured != said && g_pending.load(std::memory_order_relaxed) == 0 && (said = captured) != 0)
+        printf("render: %llu of the captured programs could not be translated; a draw that wants one says so\n", (unsigned long long)captured);
 }

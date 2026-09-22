@@ -812,6 +812,9 @@ const RenderResources::Resolved* RenderResources::ResolvedAt(uint32_t physical)
 
 RenderState::Handle RenderResources::WhiteTexture() { return 1; }
 
+namespace { const char* g_whiteReason = ""; }
+const char* RenderResources::WhiteReason() { return g_whiteReason; }
+
 RenderState::Handle RenderResources::TextureFor(const uint32_t fetch[6], uint32_t& width, uint32_t& height, bool& resolved)
 {
     const uint32_t format = fetch[1] & 0x3F;
@@ -819,7 +822,7 @@ RenderState::Handle RenderResources::TextureFor(const uint32_t fetch[6], uint32_
     width = (fetch[2] & 0x1FFF) + 1;
     height = ((fetch[2] >> 13) & 0x1FFF) + 1;
     resolved = false;
-    if ((fetch[0] & 3) != 2 || base == 0 || width > 8192 || height > 8192) return 1;
+    if ((fetch[0] & 3) != 2 || base == 0 || width > 8192 || height > 8192) { g_whiteReason = "no texture in the fetch constant"; return 1; }
 
     // A surface a resolve made, at the size the frame was drawn: those are
     // the shadow maps and the post processing's copies of the frame.
@@ -831,7 +834,7 @@ RenderState::Handle RenderResources::TextureFor(const uint32_t fetch[6], uint32_
         // Handle 0 with `resolved` set: the caller binds the surface itself.
         return 0;
     }
-    if (format != 2 && format != 6 && format != 18 && format != 19 && format != 20) return 1;
+    if (format != 2 && format != 6 && format != 18 && format != 19 && format != 20) { g_whiteReason = "format not uploaded"; return 1; }
 
     const uint32_t dimension = (fetch[5] >> 9) & 3;
     // What is not uploaded is said once each, so a level that needs a
@@ -857,7 +860,7 @@ RenderState::Handle RenderResources::TextureFor(const uint32_t fetch[6], uint32_
         if (fingerprint == entry.fingerprint) return handle;
         entry.fingerprint = fingerprint;
         g_resourceBytes -= entry.bytes;
-        if (!UploadTexture(entry, fetch, data)) { g_textureKeys.Erase(entry.key); entry.live = false; g_freeTextures.push_back(handle); return 1; }
+        if (!UploadTexture(entry, fetch, data)) { g_textureKeys.Erase(entry.key); entry.live = false; g_freeTextures.push_back(handle); g_whiteReason = "upload failed"; return 1; }
         g_resourceBytes += entry.bytes;
         return handle;
     }
@@ -869,7 +872,7 @@ RenderState::Handle RenderResources::TextureFor(const uint32_t fetch[6], uint32_
     memcpy(entry.key, key, sizeof(entry.key));
     entry.fingerprint = Fingerprint(data, std::min(SourceBytes(fetch), size_t(64u << 20)));
     entry.checkedFrame = entry.usedFrame = g_frame;
-    if (!UploadTexture(entry, fetch, data)) { g_freeTextures.push_back(handle); return 1; }
+    if (!UploadTexture(entry, fetch, data)) { g_freeTextures.push_back(handle); g_whiteReason = "upload failed"; return 1; }
     entry.live = true;
     g_textureKeys.Insert(key, handle);
     g_resourceBytes += entry.bytes;

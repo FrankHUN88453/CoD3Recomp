@@ -21,6 +21,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 struct ID3D11Device;
@@ -46,7 +47,10 @@ namespace RenderShaders
         uint64_t hash = 0;
         bool pixel = false;
         bool skipped = false;              // COD3_D3DSKIPVS names it
+        bool captured = false;             // from the shaders folder, not the stream (yet)
+        bool announced = false;            // the draw path has said it cannot be drawn with
         std::atomic<State> state{ State::New };
+        std::string problem;               // why it failed, set before the state says so
         ID3D11DeviceChild* shader = nullptr;   // a vertex or pixel shader, once ready
         std::vector<XenosHlsl::VertexFetch> vertexFetches;
         std::vector<XenosHlsl::TextureFetch> textureFetches;
