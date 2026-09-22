@@ -56,14 +56,14 @@ mode (windowed or borderless full screen; Alt+Enter switches too), the
 resolution (the desktop's by default; the window is made that size, full
 screen scales it, and the frame is drawn at it), the texture filtering
 and anisotropy, anti aliasing (MSAA 2x to 8x, FXAA, or both), the
-texture quality, the field of view (65 to 100),
+texture quality, the field of view (65 to 100), the blur while aiming,
 vertical sync, a frame counter and the renderer's statistics, the mouse
 sensitivity, the title's aim assist, the pad, and the keys. It is drawn
 in the colours of the title's own menus. It keeps its values in `CoD3Recomp.ini` beside the
 executable. `CoD3.cfg` beside the executable holds console commands run at
 start (`seta com_maxfps 60` by default). The same settings can be forced
 from the environment for a run: `COD3_SCALE`, `COD3_TEXTURE_FILTER`,
-`COD3_ANISO`, `COD3_AA`, `COD3_TEXQUALITY`, `COD3_VSYNC`, `COD3_FULLSCREEN`;
+`COD3_ANISO`, `COD3_AA`, `COD3_TEXQUALITY`, `COD3_AIMBLUR`, `COD3_VSYNC`, `COD3_FULLSCREEN`;
 `COD3_RENDER_STATS=1` prints the renderer's counters once a second and
 `COD3_RENDER_PROFILE=1` where a draw's microseconds go.
 

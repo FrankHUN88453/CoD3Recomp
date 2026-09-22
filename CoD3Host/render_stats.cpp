@@ -153,6 +153,7 @@ void RenderStats::EndFrame()
     g_second.pipelineSwitches += g_frame.pipelineSwitches; g_second.targetSwitches += g_frame.targetSwitches;
     g_second.textureUploads += g_frame.textureUploads; g_second.bufferUploads += g_frame.bufferUploads;
     g_second.constantUploads += g_frame.constantUploads; g_second.mergeable += g_frame.mergeable;
+    g_second.fingerprints += g_frame.fingerprints; g_second.fingerprintBytes += g_frame.fingerprintBytes;
     g_second.uploadBytes += g_frame.uploadBytes; g_second.streamBytes += g_frame.streamBytes;
     for (uint32_t i = 0; i < SectionCount; i++) g_second.sectionCycles[i] += g_frame.sectionCycles[i];
     g_second.drawNanoseconds += g_frame.drawNanoseconds; g_second.resolveNanoseconds += g_frame.resolveNanoseconds; g_second.presentNanoseconds += g_frame.presentNanoseconds;
@@ -172,6 +173,7 @@ void RenderStats::EndFrame()
     s.pipelineSwitches = g_second.pipelineSwitches / frames; s.targetSwitches = g_second.targetSwitches / frames;
     s.textureUploads = g_second.textureUploads / frames; s.bufferUploads = g_second.bufferUploads / frames;
     s.constantUploads = g_second.constantUploads / frames; s.mergeable = g_second.mergeable / frames;
+    s.fingerprints = g_second.fingerprints / frames; s.fingerprintKilobytes = float(g_second.fingerprintBytes / 1024.0 / frames);
     s.uploadKilobytes = float(g_second.uploadBytes / 1024.0 / frames); s.streamKilobytes = float(g_second.streamBytes / 1024.0 / frames);
     s.frames = g_frames;
     if (Profiled())
@@ -238,7 +240,7 @@ void RenderStats::Tick()
         for (uint32_t i = 0; i < SectionCount; i++) total += s.sectionMicroseconds[i];
         printf("profile: %.2f us a draw:", total);
         for (uint32_t i = 0; i < SectionCount; i++) printf(" %s %.2f", SectionName(Section(i)), s.sectionMicroseconds[i]);
-        printf("; %.0f constant blocks, %.0f mergeable draws a frame\n", s.constantUploads, s.mergeable);
+        printf("; %.0f constant blocks, %.0f mergeable draws, %.0f fingerprints over %.0f KB a frame\n", s.constantUploads, s.mergeable, s.fingerprints, s.fingerprintKilobytes);
     }
     fflush(stdout);
 }

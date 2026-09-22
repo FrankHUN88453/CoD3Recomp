@@ -27,4 +27,8 @@ namespace RenderCommands
 
     // The draws that were not made, by reason, for the report.
     void ReportSkips();
+
+    // Whether the title's blur while aiming down the sights is drawn: its
+    // depth of field pass, three draws the pixel programs name.
+    void SetAimBlur(bool drawn);
 }

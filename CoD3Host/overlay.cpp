@@ -282,6 +282,9 @@ namespace
                     const char* qualities[] = { "Low", "Medium", "High" };
                     ImGui::Combo("Texture quality", &g_edit.textureQuality, qualities, 3);
                     ImGui::SliderInt("Field of view", &g_edit.fov, 65, 100, g_edit.fov == 65 ? "65 (the game's own)" : "%d");
+                    ImGui::Checkbox("Blur while aiming", &g_edit.aimBlur);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(the game's depth of field down the sights)");
                     ImGui::Checkbox("Vertical sync (VSync)", &g_edit.vsync);
                     ImGui::Checkbox("Show FPS", &g_edit.fpsOverlay);
                     ImGui::Checkbox("Renderer statistics", &g_edit.statsOverlay);

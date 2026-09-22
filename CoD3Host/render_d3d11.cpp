@@ -500,6 +500,22 @@ namespace
         D3D11_TEXTURE2D_DESC desc{};
         texture->GetDesc(&desc);
         if (desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM && desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM) return pixels;
+        // A multisampled target is resolved to one sample first: a staging
+        // copy cannot be made of it directly.
+        ComPtr<ID3D11Texture2D> resolved;
+        if (desc.SampleDesc.Count > 1)
+        {
+            D3D11_TEXTURE2D_DESC single = desc;
+            single.SampleDesc.Count = 1;
+            single.SampleDesc.Quality = 0;
+            single.BindFlags = D3D11_BIND_RENDER_TARGET;
+            single.MiscFlags = 0;
+            if (FAILED(g_device->CreateTexture2D(&single, nullptr, &resolved))) return pixels;
+            g_context->ResolveSubresource(resolved.Get(), 0, texture, 0, desc.Format);
+            texture = resolved.Get();
+            desc.SampleDesc.Count = 1;
+            desc.SampleDesc.Quality = 0;
+        }
         desc.Usage = D3D11_USAGE_STAGING;
         desc.BindFlags = 0;
         desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
@@ -978,6 +994,9 @@ namespace
             if (scale < 0.5f) scale = 0.5f;
         }
         RenderResources::RequestScale(scale);
+        // The blur while aiming: COD3_AIMBLUR=0|1 over the settings.
+        static const int aimBlurOverride = []() { const char* t = getenv("COD3_AIMBLUR"); return t ? (t[0] == '0' ? 0 : 1) : -1; }();
+        RenderCommands::SetAimBlur(aimBlurOverride >= 0 ? aimBlurOverride != 0 : settings.aimBlur);
         // The texture quality: COD3_TEXQUALITY=0|1|2 over the settings.
         static const int qualityOverride = []() { const char* t = getenv("COD3_TEXQUALITY"); return t ? int(strtol(t, nullptr, 10)) : -1; }();
         const int quality = qualityOverride >= 0 ? qualityOverride : settings.textureQuality;

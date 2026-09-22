@@ -190,7 +190,8 @@ namespace
     // keyboard: COD3_PAD="5:start 8:a 9:down 10:a" presses each button at
     // that many seconds from the start. Names are start back a b x y up
     // down left right ls rs; a plus joins several ("10:down+a"), and the
-    // seconds can have a decimal.
+    // seconds can have a decimal. "40:lt/6" and "40:rt/6" hold the left
+    // or right trigger for that many seconds (aiming, firing).
     //
     // A press lasts two of the title's own reads of the pad and no longer.
     // It used to last a quarter of a second, and a menu that opened while
@@ -200,6 +201,8 @@ namespace
     // fast the screens came.
     struct ScriptedPress { double at; uint16_t buttons; int readsLeft; bool begun; };
     std::vector<ScriptedPress> g_script;
+    struct ScriptedHold { double at, until; bool left; };
+    std::vector<ScriptedHold> g_holds;
     bool g_scriptParsed = false;
     std::chrono::steady_clock::time_point g_scriptStart;
 
@@ -234,6 +237,11 @@ namespace
                     if (colon == std::string::npos) continue;
                     ScriptedPress press{ atof(item.substr(0, colon).c_str()), 0, 2, false };
                     std::string rest = item.substr(colon + 1);
+                    if (rest.compare(0, 3, "lt/") == 0 || rest.compare(0, 3, "rt/") == 0)
+                    {
+                        g_holds.push_back({ press.at, press.at + atof(rest.c_str() + 3), rest[0] == 'l' });
+                        continue;
+                    }
                     size_t from = 0;
                     while (from <= rest.size())
                     {
@@ -244,7 +252,7 @@ namespace
                     }
                     g_script.push_back(press);
                 }
-                printf("input: %zu scripted presses from COD3_PAD\n", g_script.size());
+                printf("input: %zu scripted presses and %zu holds from COD3_PAD\n", g_script.size(), g_holds.size());
             }
         }
         if (g_script.empty()) return 0;
@@ -264,6 +272,15 @@ namespace
             buttons |= press.buttons;
         }
         return buttons;
+    }
+
+    // The triggers a script holds now.
+    void ScriptedTriggers(uint8_t& left, uint8_t& right)
+    {
+        if (g_holds.empty()) return;
+        const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - g_scriptStart).count();
+        for (const ScriptedHold& hold : g_holds)
+            if (seconds >= hold.at && seconds < hold.until) (hold.left ? left : right) = 255;
     }
 
     // The title has read the pad: the presses it saw count down.
@@ -429,7 +446,7 @@ namespace
         const auto now = std::chrono::steady_clock::now();
 
         std::lock_guard<std::mutex> lock(g_mutex);
-        if (now - g_lastRead < std::chrono::milliseconds(4) && g_script.empty()) return;
+        if (now - g_lastRead < std::chrono::milliseconds(4) && g_script.empty() && g_holds.empty()) return;
         g_lastRead = now;
 
         FindXInput();
@@ -442,6 +459,7 @@ namespace
         const uint16_t fromScript = ScriptedButtons();
         uint16_t fromPad = 0;
         pad.buttons |= fromScript;
+        ScriptedTriggers(pad.leftTrigger, pad.rightTrigger);
         // COD3_NOPAD=1 ignores a physical pad the same way, for the same
         // reason: one lying on the desk with a button pressed walked the
         // title's menus in place of the script.

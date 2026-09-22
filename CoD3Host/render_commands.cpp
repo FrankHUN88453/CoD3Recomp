@@ -35,8 +35,21 @@ namespace
 {
     // --- what a draw was not made for ---------------------------------------------------------------
 
-    enum SkipReason { SkipBackendOff, SkipPrimitive, SkipProgram, SkipProgramBuilding, SkipProgramOnRequest, SkipPitch, SkipTarget, SkipScissor, SkipBuffer, SkipCount };
-    const char* const SkipNames[SkipCount] = { "render backend off", "primitive type", "program", "program building", "program skipped on request", "no surface pitch", "no target", "empty scissor", "vertex buffer" };
+    enum SkipReason { SkipBackendOff, SkipPrimitive, SkipProgram, SkipProgramBuilding, SkipProgramOnRequest, SkipPitch, SkipTarget, SkipScissor, SkipBuffer, SkipAimBlur, SkipCount };
+    const char* const SkipNames[SkipCount] = { "render backend off", "primitive type", "program", "program building", "program skipped on request", "no surface pitch", "no target", "empty scissor", "vertex buffer", "aim blur off" };
+
+    // The title's depth of field while aiming: the frame downsampled to a
+    // quarter (10e0411b), blurred (0925661f), and blended back over the
+    // frame by depth (56ccd878), the weapon nearer than the plane staying
+    // sharp. When the settings say, the last of the three is left out and
+    // the frame stays as it was before it: the scene and the weapon,
+    // sharp. The two before it still run, so the surface they make is
+    // there for anything else that reads it.
+    bool g_aimBlur = true;
+    bool IsAimBlurProgram(uint64_t hash)
+    {
+        return hash == 0x56ccd878c09e55bbull;
+    }
     uint64_t g_skips[SkipCount] = {};
 
     void Skip(SkipReason reason)
@@ -137,6 +150,7 @@ namespace
             return false;
         }
         if (vs->skipped) { Skip(SkipProgramOnRequest); return false; }
+        if (!g_aimBlur && IsAimBlurProgram(ps->hash)) { Skip(SkipAimBlur); return false; }
         out.vs = static_cast<ID3D11VertexShader*>(vs->shader);
         out.ps = static_cast<ID3D11PixelShader*>(ps->shader);
         return true;
@@ -523,11 +537,11 @@ namespace
     void Log(const RenderState::Snapshot& state, const RenderShaders::Program* vs, const RenderShaders::Program* ps, const DrawCommand& out)
     {
         printf("frame %llu (dump %d): draw %u of %u indices (%s), vte %03X viewport %g %g %g %g z %g %g, target %u %ux%u, scissor %d,%d-%d,%d, "
-               "depth %08X blend %08X mask %X, mode %u, cull %08X, alpha %08X, vs %016llx ps %016llx\n",
+               "depth %08X blend %08X factor %g %g %g %g mask %X, mode %u, cull %08X, alpha %08X, vs %016llx ps %016llx\n",
             (unsigned long long)RenderInternal::Swaps(), RenderInternal::DumpNumber(), state.primitive, state.indexCount, out.indexed ? "indexed" : "plain",
             state.vteControl, state.viewport[0], state.viewport[1], state.viewport[2], state.viewport[3], state.viewport[4], state.viewport[5],
             out.targetCount, out.targetWidth, out.targetHeight, out.scissor[0], out.scissor[1], out.scissor[2], out.scissor[3],
-            state.depthControl, state.blendControl[0], state.colorMask, state.modeControl, state.suScModeControl, state.colorControl,
+            state.depthControl, state.blendControl[0], state.blendFactor[0], state.blendFactor[1], state.blendFactor[2], state.blendFactor[3], state.colorMask, state.modeControl, state.suScModeControl, state.colorControl,
             (unsigned long long)vs->hash, (unsigned long long)ps->hash);
         for (int stage = 0; stage < 2; stage++)
         {
@@ -746,6 +760,8 @@ bool RenderCommands::PrepareResolve(ResolveCommand& out)
     }
     return out.copy || out.colorClear || out.depthClear;
 }
+
+void RenderCommands::SetAimBlur(bool drawn) { g_aimBlur = drawn; }
 
 void RenderCommands::ReportSkips()
 {

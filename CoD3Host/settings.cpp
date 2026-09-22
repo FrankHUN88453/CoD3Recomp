@@ -147,6 +147,7 @@ void Settings::Load(const std::filesystem::path& exeDirectory)
             else if (key == "antialiasing") v.antialiasing = atoi(value.c_str());
             else if (key == "texture_quality") v.textureQuality = atoi(value.c_str());
             else if (key == "fov") v.fov = atoi(value.c_str());
+            else if (key == "aim_blur") v.aimBlur = atoi(value.c_str()) != 0;
             else if (key == "window_mode") v.windowMode = atoi(value.c_str());
             else if (key == "fps_overlay") v.fpsOverlay = atoi(value.c_str()) != 0;
             else if (key == "stats_overlay") v.statsOverlay = atoi(value.c_str()) != 0;
@@ -184,8 +185,8 @@ void Settings::Save()
         char resolution[32];
         if (v.resolutionWidth > 0 && v.resolutionHeight > 0) snprintf(resolution, sizeof(resolution), "%dx%d", v.resolutionWidth, v.resolutionHeight);
         else snprintf(resolution, sizeof(resolution), "desktop");
-        fprintf(file, "[graphics]\nrenderer = %d\nresolution = %s\ntexture_filter = %d\nanisotropy = %d\nvsync = %d\nantialiasing = %d\ntexture_quality = %d\nfov = %d\nwindow_mode = %d\nfps_overlay = %d\nstats_overlay = %d\n",
-            v.renderer, resolution, v.textureFilter, v.anisotropy, v.vsync ? 1 : 0, v.antialiasing, v.textureQuality, v.fov, v.windowMode, v.fpsOverlay ? 1 : 0, v.statsOverlay ? 1 : 0);
+        fprintf(file, "[graphics]\nrenderer = %d\nresolution = %s\ntexture_filter = %d\nanisotropy = %d\nvsync = %d\nantialiasing = %d\ntexture_quality = %d\nfov = %d\naim_blur = %d\nwindow_mode = %d\nfps_overlay = %d\nstats_overlay = %d\n",
+            v.renderer, resolution, v.textureFilter, v.anisotropy, v.vsync ? 1 : 0, v.antialiasing, v.textureQuality, v.fov, v.aimBlur ? 1 : 0, v.windowMode, v.fpsOverlay ? 1 : 0, v.statsOverlay ? 1 : 0);
         fprintf(file, "[game]\naim_assist = %d\ncontroller = %d\nmouse_sensitivity = %.2f\n", v.aimAssist ? 1 : 0, v.controller ? 1 : 0, v.mouseSensitivity);
         fprintf(file, "[keys]\n");
         for (int i = 0; i < ActionCount; i++) fprintf(file, "key_%s = %d\n", ActionKeys[i], v.keys[i]);

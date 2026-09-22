@@ -35,6 +35,7 @@ namespace Settings
         int antialiasing = 3;         // 0 none, 1 FXAA, 2 MSAA 2x, 3 MSAA 4x, 4 MSAA 8x, 5 MSAA 4x and FXAA
         int textureQuality = 2;       // 0 low (two mip levels dropped), 1 medium (one), 2 high (all)
         int fov = 65;                 // the title's cg_fov, 65 (its own) .. 100
+        bool aimBlur = true;          // the title's depth of field while aiming down the sights
         int windowMode = 0;           // 0 windowed, 1 borderless full screen
         bool fpsOverlay = false;
         bool statsOverlay = false;    // the renderer's counters over the picture

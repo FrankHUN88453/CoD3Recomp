@@ -43,6 +43,8 @@ namespace RenderStats
         uint32_t textureUploads = 0, bufferUploads = 0;
         uint32_t constantUploads = 0;      // constant blocks through the ring
         uint32_t mergeable = 0;            // draws that could have joined the one before
+        uint32_t fingerprints = 0;         // resources sampled for a change
+        uint64_t fingerprintBytes = 0;     // the bytes those resources span
         uint64_t uploadBytes = 0;          // textures and vertex buffers
         uint64_t streamBytes = 0;          // indices and constants through the rings
         uint64_t drawNanoseconds = 0;      // CPU time inside the draw path
@@ -78,6 +80,7 @@ namespace RenderStats
         float shaderSwitches = 0, textureSwitches = 0, pipelineSwitches = 0, targetSwitches = 0;
         float textureUploads = 0, bufferUploads = 0;
         float constantUploads = 0, mergeable = 0;
+        float fingerprints = 0, fingerprintKilobytes = 0;
         float uploadKilobytes = 0, streamKilobytes = 0;
         float sectionMicroseconds[SectionCount] = {};   // a draw's, on average
         uint64_t frames = 0;

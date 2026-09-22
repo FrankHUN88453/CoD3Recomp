@@ -91,24 +91,55 @@ namespace
              + (((((y & 8u) >> 2) + (x >> 3)) & 3u) << 6) + (offset & 0x3Fu);
     }
 
-    uint64_t Fingerprint(const uint8_t* data, size_t bytes)
+    // What a resource's memory looks like, for telling whether the title
+    // has written it since the upload. Dense: every byte, in four lanes,
+    // for a resource that changed lately (the title's dynamic buffers,
+    // a texture it draws into), so no change of theirs is missed. Sampled:
+    // sixty four words across the range plus the ends, for one that has
+    // been still, where a change is a rare and large thing (the memory
+    // reused for something else).
+    uint64_t Fingerprint(const uint8_t* data, size_t bytes, bool dense)
     {
-        // Sixty four samples across the range plus the ends: a change
-        // anywhere large shows, a change in one texel may not, and a texture
-        // that changes by one texel is one this runtime redraws slightly late.
+        RenderStats::Frame().fingerprints++;
+        RenderStats::Frame().fingerprintBytes += dense ? bytes : std::min<size_t>(bytes, 65 * 64);
+        constexpr uint64_t K = 1099511628211ull;
         uint64_t hash = 1469598103934665603ull ^ bytes;
+        if (dense)
+        {
+            uint64_t b = 0x9E3779B97F4A7C15ull, c = 0xBF58476D1CE4E5B9ull, d = 0x94D049BB133111EBull;
+            size_t at = 0;
+            for (; at + 32 <= bytes; at += 32)
+            {
+                uint64_t w[4];
+                memcpy(w, data + at, 32);
+                hash = (hash ^ w[0]) * K; b = (b ^ w[1]) * K; c = (c ^ w[2]) * K; d = (d ^ w[3]) * K;
+            }
+            for (; at + 8 <= bytes; at += 8)
+            {
+                uint64_t word;
+                memcpy(&word, data + at, 8);
+                hash = (hash ^ word) * K;
+            }
+            if (at < bytes)
+            {
+                uint64_t word = 0;
+                memcpy(&word, data + at, bytes - at);
+                hash = (hash ^ word) * K;
+            }
+            return ((hash ^ b) * K) ^ ((c ^ d) * K);
+        }
         const size_t step = std::max<size_t>(bytes / 64, 64);
         for (size_t at = 0; at + 8 <= bytes; at += step)
         {
             uint64_t word;
             memcpy(&word, data + at, 8);
-            hash = (hash ^ word) * 1099511628211ull;
+            hash = (hash ^ word) * K;
         }
         if (bytes >= 8)
         {
             uint64_t word;
             memcpy(&word, data + bytes - 8, 8);
-            hash = (hash ^ word) * 1099511628211ull;
+            hash = (hash ^ word) * K;
         }
         return hash;
     }
@@ -155,6 +186,8 @@ namespace
 
     // --- textures --------------------------------------------------------------------------------
 
+    constexpr uint32_t StableLooks = 8;   // looks without a change before a resource counts as still
+
     struct TextureEntry
     {
         ComPtr<ID3D11Texture2D> texture;
@@ -165,11 +198,26 @@ namespace
         uint64_t fingerprint = 0;
         uint64_t checkedFrame = 0;      // the frame the fingerprint was last compared in
         uint64_t usedFrame = 0;
+        uint32_t stable = StableLooks;  // checks in a row that found no change; a texture starts as still
+        bool dense = false;             // the fingerprint is of every byte
         uint32_t width = 0, height = 0, levels = 0;
         uint64_t bytes = 0;
         bool live = false;
     };
     std::deque<TextureEntry> g_textures;   // by handle less one; handle 1 is the white texture
+
+    // Whether a resource's memory is looked at this frame. One that has
+    // not changed in eight looks is looked at every fourth frame, the
+    // frames spread by handle so the looks are even; one that was not used
+    // for a second is looked at as soon as it is used, since the title
+    // may have put something else there. A change a dynamic resource
+    // makes every frame is seen every frame, a change a quiet one makes
+    // within three frames.
+    bool LookThisFrame(uint32_t& stable, uint64_t usedFrame, uint32_t handle)
+    {
+        if (g_frame - usedFrame > 60) stable = 0;
+        return stable < StableLooks || ((g_frame + handle) & 3) == 0;
+    }
     ComPtr<ID3D11Texture2D> g_whiteCube;
     ComPtr<ID3D11ShaderResourceView> g_whiteCubeView;
     ComPtr<ID3D11Texture3D> g_whiteVolume;
@@ -185,6 +233,8 @@ namespace
         uint64_t fingerprint = 0;
         uint64_t checkedFrame = 0;
         uint64_t usedFrame = 0;
+        uint32_t stable = 0;            // checks in a row that found no change; a buffer starts as changing
+        bool dense = true;              // the fingerprint is of every byte
         uint32_t bytes = 0;             // the buffer's size
         uint32_t seen = 0;              // the largest size a fetch asked for
         bool live = false;
@@ -887,12 +937,26 @@ RenderState::Handle RenderResources::TextureFor(const uint32_t fetch[6], uint32_
     if (handle != 0)
     {
         TextureEntry& entry = g_textures[handle - 1];
-        entry.usedFrame = g_frame;
         if (entry.checkedFrame == g_frame) return handle;
+        const bool look = LookThisFrame(entry.stable, entry.usedFrame, handle);
+        entry.usedFrame = g_frame;
+        if (!look) return handle;
         entry.checkedFrame = g_frame;
-        const uint64_t fingerprint = Fingerprint(data, std::min(SourceBytes(fetch), size_t(64u << 20)));
-        if (fingerprint == entry.fingerprint) return handle;
-        entry.fingerprint = fingerprint;
+        // Compared in the kind the stored fingerprint is; the kind changes
+        // only once the memory is known to be the same, so no change is
+        // lost in the switch.
+        const size_t span = std::min(SourceBytes(fetch), size_t(64u << 20));
+        const uint64_t fingerprint = Fingerprint(data, span, entry.dense);
+        if (fingerprint == entry.fingerprint)
+        {
+            if (entry.stable < StableLooks) entry.stable++;
+            const bool wantDense = entry.stable < StableLooks;
+            if (wantDense != entry.dense) { entry.dense = wantDense; entry.fingerprint = Fingerprint(data, span, wantDense); }
+            return handle;
+        }
+        entry.stable = 0;
+        entry.fingerprint = entry.dense ? fingerprint : Fingerprint(data, span, true);
+        entry.dense = true;
         g_resourceBytes -= entry.bytes;
         if (!UploadTexture(entry, fetch, data)) { g_textureKeys.Erase(entry.key); entry.live = false; g_freeTextures.push_back(handle); g_whiteReason = "upload failed"; return 1; }
         g_resourceBytes += entry.bytes;
@@ -904,7 +968,7 @@ RenderState::Handle RenderResources::TextureFor(const uint32_t fetch[6], uint32_
     TextureEntry& entry = g_textures[handle - 1];
     entry = TextureEntry();
     memcpy(entry.key, key, sizeof(entry.key));
-    entry.fingerprint = Fingerprint(data, std::min(SourceBytes(fetch), size_t(64u << 20)));
+    entry.fingerprint = Fingerprint(data, std::min(SourceBytes(fetch), size_t(64u << 20)), entry.dense);
     entry.checkedFrame = entry.usedFrame = g_frame;
     if (!UploadTexture(entry, fetch, data)) { g_freeTextures.push_back(handle); g_whiteReason = "upload failed"; return 1; }
     entry.live = true;
@@ -934,13 +998,25 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
     if (handle != 0)
     {
         BufferEntry& entry = g_buffers[handle - 1];
-        entry.usedFrame = g_frame;
         if (entry.checkedFrame == g_frame && entry.seen >= bytes) return handle;
+        const bool look = LookThisFrame(entry.stable, entry.usedFrame, handle) || entry.seen < bytes;
+        entry.usedFrame = g_frame;
+        if (!look) return handle;
         entry.checkedFrame = g_frame;
         wanted = std::max(bytes, entry.seen);
-        const uint64_t fingerprint = Fingerprint(data, wanted);
-        if (fingerprint == entry.fingerprint && entry.bytes >= wanted) return handle;
-        entry.fingerprint = fingerprint;
+        // As for a texture: compared in the stored kind, the kind changed
+        // only when the memory is known to be the same.
+        const uint64_t fingerprint = Fingerprint(data, wanted, entry.dense);
+        if (fingerprint == entry.fingerprint && entry.bytes >= wanted)
+        {
+            if (entry.stable < StableLooks) entry.stable++;
+            const bool wantDense = entry.stable < StableLooks;
+            if (wantDense != entry.dense) { entry.dense = wantDense; entry.fingerprint = Fingerprint(data, wanted, wantDense); }
+            return handle;
+        }
+        entry.stable = 0;
+        entry.fingerprint = entry.dense ? fingerprint : Fingerprint(data, wanted, true);
+        entry.dense = true;
         entry.seen = wanted;
         if (entry.bytes < wanted)
         {
@@ -970,7 +1046,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
     BufferEntry& entry = g_buffers[handle - 1];
     entry = BufferEntry();
     memcpy(entry.key, key, sizeof(entry.key));
-    entry.fingerprint = Fingerprint(data, wanted);
+    entry.fingerprint = Fingerprint(data, wanted, entry.dense);
     entry.checkedFrame = entry.usedFrame = g_frame;
     entry.seen = wanted;
     // A little room to grow: the title's dynamic buffers are asked for at

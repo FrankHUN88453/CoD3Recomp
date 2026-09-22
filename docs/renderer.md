@@ -122,8 +122,15 @@ switch, which the host compiler handles.
 uploaded once with their mip levels (from the fetch constant's mip
 address, each level's pitch and height rounded up to whole 32 block tiles,
 down to 32 texels; the packed tail is left to the sampler's clamp), cube
-maps as six faces; a change under a texture the title rewrites (the HUD)
-is caught by a 64 sample fingerprint taken once a frame, not once a draw.
+maps as six faces. A change under a texture or a buffer the title
+rewrites is caught by a fingerprint of its memory: every byte of it, in
+four lanes, while the resource has changed lately (the dynamic buffers,
+a texture drawn into), so no change of theirs is missed; sixty four
+samples once it has been still for eight looks, and then only every
+fourth frame, the frames spread by handle. A resource not used for a
+second is looked at densely again when it next is, since the title may
+have put something else there. The forest level went from 720 sampled
+fingerprints a frame to 180, most of them dense, over 3 MB.
 Vertex buffers by address, raw byte address buffers, `UpdateSubresource`
 straight from guest memory. Indices through a 16 MB ring mapped
 `NO_OVERWRITE` (16 bit indices stay 16 bit; the strip cut index is the
@@ -193,19 +200,24 @@ desktop's by default), texture filtering and anisotropy, anti aliasing,
 texture quality (Low and Medium leave the top two or one mip levels of
 every texture out on upload), the field of view (the title's own
 `cg_fov`, 65 to 100, in the config at start and on the command buffer
-when it changes), vertical sync, the fps and stats panels. What the
+when it changes), the blur while aiming (the title's depth of field down
+the sights: three draws downsample the frame to a quarter, blur it and
+blend it back over the frame by depth; the last of them is left out when
+the setting is off, and the frame stays sharp with the weapon on it),
+vertical sync, the fps and stats panels. What the
 title has no knob for is not offered: its shadow map is one resolution
 (it already scales with the frame), its post processing is one chain,
 and there is no `r_shadow` or `r_glow` in its console. From
 the environment, over the menu: `COD3_SCALE`, `COD3_TEXTURE_FILTER=native|
 bilinear|trilinear|anisotropic`, `COD3_ANISO=1..16`, `COD3_VSYNC=0|1`,
-`COD3_AA=0|fxaa|msaa2|msaa4|msaa8|msaa4fxaa`, `COD3_TEXQUALITY=0|1|2`,
+`COD3_AA=0|fxaa|msaa2|msaa4|msaa8|msaa4fxaa`, `COD3_TEXQUALITY=0|1|2`, `COD3_AIMBLUR=0|1`,
 `COD3_FULLSCREEN=0|1`, `COD3_NOMIPS=1`,
 `COD3_NOSHADERCACHE=1`, `COD3_NOPRECOMPILE=1`. For a scripted run,
 `COD3_CMD="second:command;..."` puts console commands on the title's
-buffer at those seconds and `COD3_STRINGS="prefix,..."` lists the
+buffer at those seconds, `COD3_STRINGS="prefix,..."` lists the
 strings of the image that start so (the console variables the title
-knows). Diagnostics: `COD3_D3DDEBUG`
+knows), and `COD3_PAD="40:lt/8"` holds the left (or `rt`, right)
+trigger for that many seconds: aiming, firing. Diagnostics: `COD3_D3DDEBUG`
 (the debug layer), `COD3_D3DFRAME=N|auto|loading` with `COD3_D3DDRAWDUMP`,
 `COD3_FRAMEDUMP`, `COD3_D3DSKIPVS`, `COD3_D3DFLAT`, `COD3_DUMPHLSL`,
 `COD3_D3DTEXDUMP`. In the frame log a texture that reads white says why
@@ -300,5 +312,11 @@ volume" read their flat texture instead of white.
   deferred queue could carry, but nothing today would gain from one.
 - Settings the title has no knob for: shadow quality, post processing.
   A render scale beside the resolution was left out on purpose.
-- The fingerprint that catches a rewritten texture or buffer samples 64
-  points; a one texel change can be missed until the next.
+- A still resource's fingerprint samples 64 points every fourth frame; a
+  one texel change to one can be missed until it changes more. A
+  changing one is hashed whole.
+- Twice in some twenty runs today the title's driver waited for a fence
+  the GPU never wrote at a level's start (the watchdog: "wants the GPU
+  past 0x... on lap 208; the GPU's word is on lap 207"), with the ring
+  empty; five plain loads in a row did not. The driver's own indirect
+  buffer pool logic under a slow host GPU, not yet understood.
