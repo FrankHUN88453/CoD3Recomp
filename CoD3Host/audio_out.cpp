@@ -8,6 +8,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <thread>
+#include <chrono>
 
 #include <Windows.h>
 #include <mmsystem.h>
@@ -158,17 +160,26 @@ bool Audio::SubmitFrame(uint32_t guestAddress)
     if (guestAddress == 0) return false;
     if (!Open()) return false;
 
-    std::lock_guard<std::mutex> lock(g_mutex);
+    std::unique_lock<std::mutex> lock(g_mutex);
     if (g_device == nullptr) return false;
 
-    // The next buffer in the ring, if the device has finished with it. Waiting
-    // for one would hold up the guest's audio thread, which is the one thing
-    // this must not do.
+    // The next buffer in the ring, once the device has finished with it.
+    // The frames come from this runtime's own pump thread, so a short wait
+    // here is how the pump keeps the device's time rather than its own:
+    // a frame a second was dropped with a click when the two drifted
+    // apart. Longer than a few frames' worth and the frame is dropped
+    // rather than the pump held.
     Block& block = g_blocks[g_next];
-    if ((block.header.dwFlags & WHDR_DONE) == 0)
+    for (int waited = 0; (block.header.dwFlags & WHDR_DONE) == 0; waited++)
     {
-        g_dropped.fetch_add(1, std::memory_order_relaxed);
-        return false;
+        if (waited >= 20)
+        {
+            g_dropped.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+        lock.unlock();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        lock.lock();
     }
     g_next = (g_next + 1) % Buffers;
 
