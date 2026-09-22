@@ -299,12 +299,18 @@ namespace
             // instruction left in the register, and with the write first it
             // took the dot product the vector had just put there instead.
             // Two to the tenth of that: every lit wall came out white.)
+            // COD3_OLDALUPAIR=1 writes it first again, to see what the
+            // rule is worth.
+            static const bool writeFirst = getenv("COD3_OLDALUPAIR") != nullptr;
             std::string vectorDestination;
             if (vectorMask != 0)
             {
                 if (vectorClamp) vector = "saturate(" + vector + ")";
                 vectorDestination = Destination(vectorDest, exported);
-                Line(Format("float4 vectorValue = (%s);", vector.c_str()));
+                if (writeFirst)
+                    Line(Format("%s.%s = (%s).%s;", vectorDestination.c_str(), Mask(vectorMask).c_str(),
+                        vector.c_str(), Mask(vectorMask).c_str()));
+                else Line(Format("float4 vectorValue = (%s);", vector.c_str()));
             }
 
             // The scalar operation, on the third operand's two components.
@@ -387,7 +393,7 @@ namespace
             }
             if (scalarClamp) scalar = "saturate(" + scalar + ")";
             Line(Format("ps = %s;", scalar.c_str()));
-            if (vectorMask != 0)
+            if (vectorMask != 0 && !writeFirst)
                 Line(Format("%s.%s = vectorValue.%s;", vectorDestination.c_str(),
                     Mask(vectorMask).c_str(), Mask(vectorMask).c_str()));
             if (scalarMask != 0)
@@ -998,6 +1004,7 @@ uint64_t XenosHlsl::Version()
     if (const char* lanes = getenv("COD3_SCALARLANES")) { text += " lanes="; text += lanes; }
     if (const char* show = getenv("COD3_D3DSHOW")) { text += " show="; text += show; }
     if (getenv("COD3_NOFETCHOFFSET")) text += " no offsets";
+    if (getenv("COD3_OLDALUPAIR")) text += " write first";
     uint64_t hash = 14695981039346656037ull;
     for (unsigned char c : text) { hash ^= c; hash *= 1099511628211ull; }
     return hash;

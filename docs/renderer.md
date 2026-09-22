@@ -91,7 +91,9 @@ the instruction and only then write. A scalar that reads the very
 register the vector writes has to see the old value, so the translation
 keeps the vector's result aside and writes it once the scalar has read.
 The level shaders' third light is written that way, and with the write
-first its specular came out as two to the tenth: every lit wall white.
+first its specular came out as two to the tenth: every lit wall white,
+and the soldiers' uniforms a hard wet sheen. `COD3_OLDALUPAIR=1` writes
+it first again, to see the difference.
 
 A texture fetch carries three signed offsets in halves of a texel, and
 they are put into the coordinates. The title's shadows are one map
