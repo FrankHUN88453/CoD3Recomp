@@ -85,10 +85,10 @@ namespace
         g_consoleHistoryAt = -1;
         if (line == "help" || line == "?")
         {
-            ConsoleLine("A parancsok a játék saját parancspufferére kerülnek, mint a chapter select \"spmap\"-je.");
-            ConsoleLine("Példák: spmap forest   map_restart   cg_fov 80   timescale 0.5   god   noclip   give all   seta com_maxfps 60");
-            ConsoleLine("A játék válaszai (Com_Printf) ebből a buildből ki vannak fordítva, ezért ide csak a saját sorai kerülnek.");
-            ConsoleLine("clear: a napló törlése.   ` vagy ~ vagy Esc: bezárás.");
+            ConsoleLine("Commands go on the game's own command buffer, the way the chapter select runs \"spmap\".");
+            ConsoleLine("Examples: spmap forest   map_restart   cg_fov 80   timescale 0.5   god   noclip   give all   seta com_maxfps 60");
+            ConsoleLine("The game's replies (Com_Printf) were compiled out of this build, so only this side's lines appear here.");
+            ConsoleLine("clear: empties the log.   ` or ~ or Esc: closes the console.");
             return;
         }
         if (line == "clear") { g_consoleLines.clear(); return; }
@@ -100,7 +100,7 @@ namespace
         ImGui::SetNextWindowPos(ImVec2(0, 0));
         ImGui::SetNextWindowSize(ImVec2(float(width), float(height) * 0.45f));
         ImGui::SetNextWindowBgAlpha(0.85f);
-        if (!ImGui::Begin("Konzol", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings))
+        if (!ImGui::Begin("Console", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings))
         {
             ImGui::End();
             return;
@@ -108,7 +108,7 @@ namespace
         const float inputHeight = ImGui::GetFrameHeightWithSpacing() + 4.0f;
         if (ImGui::BeginChild("log", ImVec2(0, -inputHeight), false, ImGuiWindowFlags_HorizontalScrollbar))
         {
-            if (g_consoleLines.empty()) ImGui::TextDisabled("Konzol. \"help\" a példákhoz.");
+            if (g_consoleLines.empty()) ImGui::TextDisabled("Console. Type \"help\" for examples.");
             for (const std::string& line : g_consoleLines) ImGui::TextUnformatted(line.c_str());
             if (g_consoleScroll) { ImGui::SetScrollHereY(1.0f); g_consoleScroll = false; }
         }
@@ -218,54 +218,54 @@ namespace
         if (!g_editLoaded) { g_edit = Settings::Get(); g_editLoaded = true; }
         bool changed = false;   // something differs from what is applied
         const Settings::Values applied = Settings::Get();
-        ImGui::SetNextWindowSize(ImVec2(560 * g_fontScale, 0), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(620 * g_fontScale, 0), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowPos(ImVec2(width * 0.5f, height * 0.5f), ImGuiCond_FirstUseEver, ImVec2(0.5f, 0.5f));
         bool open = true;
-        if (ImGui::Begin("Beállítások (F11)", &open, ImGuiWindowFlags_NoCollapse))
+        if (ImGui::Begin("Settings (F11)", &open, ImGuiWindowFlags_NoCollapse))
         {
             if (ImGui::BeginTabBar("tabs"))
             {
-                if (ImGui::BeginTabItem("Grafika"))
+                if (ImGui::BeginTabItem("Graphics"))
                 {
-                    const char* renderers[] = { "DirectX 11", "DirectX 12 (még nincs)", "Vulkan (még nincs)" };
+                    const char* renderers[] = { "DirectX 11", "DirectX 12 (not yet)", "Vulkan (not yet)" };
                     int renderer = g_edit.renderer;
-                    if (ImGui::Combo("Megjelenítő", &renderer, renderers, 3))
+                    if (ImGui::Combo("Renderer", &renderer, renderers, 3))
                     {
                         // Only the first exists; the others stay names for now.
                         g_edit.renderer = 0;
                     }
-                    if (renderer != 0) ImGui::TextDisabled("Egyelőre csak a DirectX 11 érhető el.");
-                    const char* modes[] = { "Ablak", "Keret nélküli teljes képernyő" };
-                    ImGui::Combo("Megjelenítés", &g_edit.windowMode, modes, 2);
-                    ImGui::TextDisabled("Alt+Enter is váltja.");
-                    const char* scales[] = { "Ablak magassága szerint", "1x (1040x624)", "2x (2080x1248)", "3x (3120x1872)", "4x (4160x2496)" };
-                    ImGui::Combo("Belső felbontás", &g_edit.renderScale, scales, 5);
-                    ImGui::TextDisabled("A játék 1040x624-et rajzolt; itt az ablak magasságához, vagy egy többszöröséhez igazodik.");
-                    const char* filters[] = { "A játék saját", "Bilineáris", "Trilineáris", "Anizotróp" };
-                    ImGui::Combo("Textúraszűrés", &g_edit.textureFilter, filters, 4);
+                    if (renderer != 0) ImGui::TextDisabled("Only DirectX 11 is available for now.");
+                    const char* modes[] = { "Windowed", "Borderless full screen" };
+                    ImGui::Combo("Window mode", &g_edit.windowMode, modes, 2);
+                    ImGui::TextDisabled("Alt+Enter switches it too.");
+                    const char* scales[] = { "By the window's height", "1x (1040x624)", "2x (2080x1248)", "3x (3120x1872)", "4x (4160x2496)" };
+                    ImGui::Combo("Internal resolution", &g_edit.renderScale, scales, 5);
+                    ImGui::TextDisabled("The game drew 1040x624; here it follows the window's height, or a multiple of that.");
+                    const char* filters[] = { "The game's own", "Bilinear", "Trilinear", "Anisotropic" };
+                    ImGui::Combo("Texture filtering", &g_edit.textureFilter, filters, 4);
                     if (g_edit.textureFilter == 3)
                     {
                         const char* levels[] = { "2x", "4x", "8x", "16x" };
                         int level = g_edit.anisotropy >= 16 ? 3 : g_edit.anisotropy >= 8 ? 2 : g_edit.anisotropy >= 4 ? 1 : 0;
-                        if (ImGui::Combo("Anizotrópia", &level, levels, 4)) g_edit.anisotropy = 2 << level;
+                        if (ImGui::Combo("Anisotropy", &level, levels, 4)) g_edit.anisotropy = 2 << level;
                     }
-                    const char* aa[] = { "Nincs", "FXAA" };
-                    ImGui::Combo("Élsimítás", &g_edit.antialiasing, aa, 2);
-                    ImGui::Checkbox("Függőleges szinkron (VSync)", &g_edit.vsync);
-                    ImGui::Checkbox("FPS megjelenítése", &g_edit.fpsOverlay);
-                    ImGui::Checkbox("Renderelő statisztika", &g_edit.statsOverlay);
+                    const char* aa[] = { "None", "FXAA" };
+                    ImGui::Combo("Anti-aliasing", &g_edit.antialiasing, aa, 2);
+                    ImGui::Checkbox("Vertical sync (VSync)", &g_edit.vsync);
+                    ImGui::Checkbox("Show FPS", &g_edit.fpsOverlay);
+                    ImGui::Checkbox("Renderer statistics", &g_edit.statsOverlay);
                     ImGui::EndTabItem();
                 }
-                if (ImGui::BeginTabItem("Irányítás"))
+                if (ImGui::BeginTabItem("Controls"))
                 {
-                    ImGui::SliderFloat("Egér érzékenység", &g_edit.mouseSensitivity, 0.1f, 3.0f, "%.2f");
-                    ImGui::TextDisabled("Az X és az Y tengelyre egyformán.");
-                    ImGui::Checkbox("Aim Assist", &g_edit.aimAssist);
+                    ImGui::SliderFloat("Mouse sensitivity", &g_edit.mouseSensitivity, 0.1f, 3.0f, "%.2f");
+                    ImGui::TextDisabled("Both axes alike.");
+                    ImGui::Checkbox("Aim assist", &g_edit.aimAssist);
                     ImGui::SameLine();
-                    ImGui::TextDisabled("(a játék saját célsegítése; újraindítás után él)");
-                    ImGui::Checkbox("Kontroller támogatás", &g_edit.controller);
+                    ImGui::TextDisabled("(the game's own; takes effect after a restart)");
+                    ImGui::Checkbox("Controller support", &g_edit.controller);
                     ImGui::Separator();
-                    ImGui::TextUnformatted("Billentyűk");
+                    ImGui::TextUnformatted("Keys");
                     if (ImGui::BeginTable("keys", 2, ImGuiTableFlags_SizingStretchProp))
                     {
                         for (int i = 0; i < Settings::ActionCount; i++)
@@ -276,13 +276,13 @@ namespace
                             ImGui::TableNextColumn();
                             ImGui::PushID(i);
                             const bool waiting = g_capturing == i;
-                            if (ImGui::Button(waiting ? "Nyomj egy gombot... (Esc: mégse)" : Settings::KeyName(g_edit.keys[i]), ImVec2(-1, 0)))
+                            if (ImGui::Button(waiting ? "Press a key... (Esc: cancel)" : Settings::KeyName(g_edit.keys[i]), ImVec2(-1, 0)))
                                 g_capturing = waiting ? -1 : i;
                             ImGui::PopID();
                         }
                         ImGui::EndTable();
                     }
-                    if (ImGui::Button("Alapértelmezett billentyűk"))
+                    if (ImGui::Button("Default keys"))
                     {
                         const Settings::Values defaults = Settings::Defaults();
                         for (int i = 0; i < Settings::ActionCount; i++) g_edit.keys[i] = defaults.keys[i];
@@ -295,22 +295,22 @@ namespace
             // Apply writes and uses the values; Cancel drops the edits.
             const bool dirty = memcmp(&g_edit, &applied, sizeof(Settings::Values)) != 0;
             ImGui::BeginDisabled(!dirty);
-            if (ImGui::Button("Alkalmaz", ImVec2(140 * g_fontScale, 0)))
+            if (ImGui::Button("Apply", ImVec2(140 * g_fontScale, 0)))
             {
                 Settings::Set(g_edit);
                 g_capturing = -1;
             }
             ImGui::EndDisabled();
             ImGui::SameLine();
-            if (ImGui::Button("Mégse", ImVec2(140 * g_fontScale, 0)))
+            if (ImGui::Button("Cancel", ImVec2(140 * g_fontScale, 0)))
             {
                 g_edit = applied;
                 g_capturing = -1;
             }
             ImGui::SameLine();
-            if (ImGui::Button("Bezár", ImVec2(140 * g_fontScale, 0))) open = false;
-            if (dirty) { ImGui::SameLine(); ImGui::TextDisabled("(nem alkalmazott változások)"); }
-            ImGui::TextDisabled("F11: menü   F12: képernyőkép a screenshots mappába   Esc: vissza a játékba");
+            if (ImGui::Button("Close", ImVec2(140 * g_fontScale, 0))) open = false;
+            if (dirty) { ImGui::SameLine(); ImGui::TextDisabled("(unapplied changes)"); }
+            ImGui::TextDisabled("F11: this menu   F12: screenshot   ` (left of 1): console   Esc: back to the game");
         }
         ImGui::End();
         (void)changed;
@@ -339,6 +339,68 @@ void Overlay::Initialize(void* hwnd, ID3D11Device* device, ID3D11DeviceContext* 
     if (io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 20.0f * g_fontScale, &config, ranges) == nullptr)
         io.Fonts->AddFontDefault();
     ImGui::StyleColorsDark();
+    {
+        // The title's own front end: dark sepia panels, tan text, the
+        // chosen entry in a lighter gold, thin brown rules.
+        ImGuiStyle& style = ImGui::GetStyle();
+        ImVec4* c = style.Colors;
+        const ImVec4 tan(0.86f, 0.80f, 0.64f, 1.00f), gold(0.95f, 0.84f, 0.52f, 1.00f), dim(0.58f, 0.52f, 0.40f, 1.00f);
+        const ImVec4 panel(0.10f, 0.085f, 0.065f, 0.94f), panelLight(0.16f, 0.13f, 0.095f, 1.00f);
+        const ImVec4 frame(0.22f, 0.18f, 0.13f, 0.95f), frameHover(0.33f, 0.27f, 0.18f, 1.00f), frameActive(0.44f, 0.36f, 0.22f, 1.00f);
+        const ImVec4 rule(0.45f, 0.38f, 0.24f, 0.70f);
+        c[ImGuiCol_Text] = tan;
+        c[ImGuiCol_TextDisabled] = dim;
+        c[ImGuiCol_WindowBg] = panel;
+        c[ImGuiCol_ChildBg] = ImVec4(0, 0, 0, 0);
+        c[ImGuiCol_PopupBg] = ImVec4(0.12f, 0.10f, 0.075f, 0.97f);
+        c[ImGuiCol_Border] = rule;
+        c[ImGuiCol_BorderShadow] = ImVec4(0, 0, 0, 0);
+        c[ImGuiCol_FrameBg] = frame;
+        c[ImGuiCol_FrameBgHovered] = frameHover;
+        c[ImGuiCol_FrameBgActive] = frameActive;
+        c[ImGuiCol_TitleBg] = panelLight;
+        c[ImGuiCol_TitleBgActive] = ImVec4(0.22f, 0.18f, 0.12f, 1.00f);
+        c[ImGuiCol_TitleBgCollapsed] = panel;
+        c[ImGuiCol_MenuBarBg] = panelLight;
+        c[ImGuiCol_ScrollbarBg] = ImVec4(0.08f, 0.07f, 0.05f, 0.8f);
+        c[ImGuiCol_ScrollbarGrab] = frameHover;
+        c[ImGuiCol_ScrollbarGrabHovered] = frameActive;
+        c[ImGuiCol_ScrollbarGrabActive] = ImVec4(0.60f, 0.50f, 0.30f, 1.00f);
+        c[ImGuiCol_CheckMark] = gold;
+        c[ImGuiCol_SliderGrab] = ImVec4(0.75f, 0.63f, 0.38f, 1.00f);
+        c[ImGuiCol_SliderGrabActive] = gold;
+        c[ImGuiCol_Button] = ImVec4(0.30f, 0.25f, 0.16f, 1.00f);
+        c[ImGuiCol_ButtonHovered] = ImVec4(0.46f, 0.38f, 0.23f, 1.00f);
+        c[ImGuiCol_ButtonActive] = ImVec4(0.62f, 0.50f, 0.28f, 1.00f);
+        c[ImGuiCol_Header] = ImVec4(0.30f, 0.25f, 0.16f, 1.00f);
+        c[ImGuiCol_HeaderHovered] = ImVec4(0.46f, 0.38f, 0.23f, 1.00f);
+        c[ImGuiCol_HeaderActive] = ImVec4(0.62f, 0.50f, 0.28f, 1.00f);
+        c[ImGuiCol_Separator] = rule;
+        c[ImGuiCol_SeparatorHovered] = gold;
+        c[ImGuiCol_SeparatorActive] = gold;
+        c[ImGuiCol_ResizeGrip] = rule;
+        c[ImGuiCol_ResizeGripHovered] = gold;
+        c[ImGuiCol_ResizeGripActive] = gold;
+        c[ImGuiCol_Tab] = ImVec4(0.20f, 0.16f, 0.11f, 1.00f);
+        c[ImGuiCol_TabHovered] = ImVec4(0.46f, 0.38f, 0.23f, 1.00f);
+        c[ImGuiCol_TabActive] = ImVec4(0.36f, 0.29f, 0.18f, 1.00f);
+        c[ImGuiCol_TabUnfocused] = panelLight;
+        c[ImGuiCol_TabUnfocusedActive] = ImVec4(0.28f, 0.23f, 0.15f, 1.00f);
+        c[ImGuiCol_TableHeaderBg] = panelLight;
+        c[ImGuiCol_TableBorderStrong] = rule;
+        c[ImGuiCol_TableBorderLight] = ImVec4(0.30f, 0.25f, 0.16f, 0.5f);
+        c[ImGuiCol_TableRowBg] = ImVec4(0, 0, 0, 0);
+        c[ImGuiCol_TableRowBgAlt] = ImVec4(1.0f, 0.9f, 0.7f, 0.04f);
+        c[ImGuiCol_TextSelectedBg] = ImVec4(0.62f, 0.50f, 0.28f, 0.45f);
+        c[ImGuiCol_NavHighlight] = gold;
+        c[ImGuiCol_ModalWindowDimBg] = ImVec4(0.05f, 0.04f, 0.03f, 0.6f);
+        style.WindowRounding = 2.0f;
+        style.FrameRounding = 2.0f;
+        style.GrabRounding = 2.0f;
+        style.TabRounding = 2.0f;
+        style.WindowBorderSize = 1.0f;
+        style.FrameBorderSize = 1.0f;
+    }
     ImGui::GetStyle().ScaleAllSizes(g_fontScale);
     ImGui_ImplWin32_Init(g_hwnd);
     ImGui_ImplDX11_Init(device, context);
@@ -346,7 +408,36 @@ void Overlay::Initialize(void* hwnd, ID3D11Device* device, ID3D11DeviceContext* 
     g_ready.store(true);
 }
 
-void Overlay::NoteFrame() { g_frames.fetch_add(1, std::memory_order_relaxed); }
+namespace
+{
+    // The front end's pages seen this frame and the last, as bits.
+    std::atomic<uint32_t> g_frontEndNow{ 0 };
+    uint32_t g_frontEndLast = 0;
+}
+
+void Overlay::NoteFrame()
+{
+    g_frames.fetch_add(1, std::memory_order_relaxed);
+    const uint32_t now = g_frontEndNow.exchange(0);
+    // The options page arriving from the main menu: the player pressed
+    // OPTIONS, and the settings come up over it. Not when it comes back
+    // from one of its own sub pages, and not while the menu is up already.
+    const bool wasMain = (g_frontEndLast & uint32_t(FrontEndText::MainMenu)) != 0;
+    const bool isOptions = (now & uint32_t(FrontEndText::OptionsMenu)) != 0;
+    const bool wasOptions = (g_frontEndLast & uint32_t(FrontEndText::OptionsMenu)) != 0;
+    if (isOptions && !wasOptions && wasMain && !g_open.load() && !g_console.load())
+    {
+        g_open.store(true);
+        g_capturing = -1;
+        g_editLoaded = false;
+    }
+    g_frontEndLast = now;
+}
+
+void Overlay::NoteFrontEndText(FrontEndText text)
+{
+    g_frontEndNow.fetch_or(uint32_t(text), std::memory_order_relaxed);
+}
 
 bool Overlay::IsOpen() { return g_open.load() || g_console.load(); }
 

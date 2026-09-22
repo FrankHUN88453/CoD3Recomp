@@ -50,12 +50,14 @@ takes it again. Every key can be changed in the settings menu.
 | F12 | screenshot into `screenshots/` |
 | ` (the key left of 1) | the console |
 
-The settings menu (F11) has the window mode (windowed or borderless full
-screen; Alt+Enter switches too), the internal resolution (the window's
-height, or a multiple of the title's 1040 by 624), the texture filtering
-and anisotropy, anti aliasing (FXAA), vertical sync, a frame counter and
-the renderer's statistics, the mouse sensitivity, the title's aim assist,
-the pad, and the keys. It keeps its values in `CoD3Recomp.ini` beside the
+The settings menu (F11, and it opens by itself when OPTIONS is chosen in
+the title's main menu, over the title's own options page) has the window
+mode (windowed or borderless full screen; Alt+Enter switches too), the
+internal resolution (the window's height, or a multiple of the title's
+1040 by 624), the texture filtering and anisotropy, anti aliasing (FXAA),
+vertical sync, a frame counter and the renderer's statistics, the mouse
+sensitivity, the title's aim assist, the pad, and the keys. It is drawn
+in the colours of the title's own menus. It keeps its values in `CoD3Recomp.ini` beside the
 executable. `CoD3.cfg` beside the executable holds console commands run at
 start (`seta com_maxfps 60` by default). The same settings can be forced
 from the environment for a run: `COD3_SCALE`, `COD3_TEXTURE_FILTER`,

@@ -28,6 +28,7 @@ namespace
 {
     std::mutex g_mutex;
     uint32_t g_watched = 0;          // guest address, zero when nothing is watched
+    bool g_reads = false;            // reads too, not only writes
     std::set<uint32_t> g_armed;      // os thread ids already carrying the watch
     std::atomic<int> g_reports{ 0 };
 
@@ -43,7 +44,7 @@ namespace
         // bytes. The two bit fields for slot zero sit at bits 16 and 18.
         context.Dr7 &= ~uint64_t(0xF << 16);
         context.Dr7 |= uint64_t(1) << 0;          // local enable, slot zero
-        context.Dr7 |= uint64_t(0b01) << 16;      // break on write
+        context.Dr7 |= uint64_t(g_reads ? 0b11 : 0b01) << 16;   // break on write, or on read and write
         context.Dr7 |= uint64_t(0b11) << 18;      // four bytes
 
         context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
@@ -51,7 +52,7 @@ namespace
     }
 }
 
-void Kernel::WatchWrite(uint32_t guestAddress)
+void Kernel::WatchWrite(uint32_t guestAddress, bool reads)
 {
     std::lock_guard<std::mutex> lock(g_mutex);
 
@@ -61,8 +62,9 @@ void Kernel::WatchWrite(uint32_t guestAddress)
     if (g_watched != 0) return;
 
     g_watched = guestAddress;
+    g_reads = reads;
     g_armed.clear();
-    printf("watchpoint: watching guest address 0x%08X for writes\n", guestAddress);
+    printf("watchpoint: watching guest address 0x%08X for %s\n", guestAddress, reads ? "reads and writes" : "writes");
     fflush(stdout);
 }
 
@@ -201,11 +203,13 @@ bool Kernel::ReportWatchpoint(void* winContext)
     // second with the writes that are right. The ones that matter are
     // those that leave something that is not a pointer, and they are
     // printed whoever made them and however many came before.
-    const uint32_t now = Guest::Read32(Guest::Base, g_watched);
-    const bool suspicious = now < 0x10000u || now >= 0xC0000000u;
+    // Not read here when reads are watched: the handler's own read would
+    // trip the watch again, inside itself, without end.
+    const uint32_t now = g_reads ? 0 : Guest::Read32(Guest::Base, g_watched);
+    const bool suspicious = !g_reads && (now < 0x10000u || now >= 0xC0000000u);
     if (!suspicious && (!guestCode || report >= 40)) return true;
 
-    printf("\nwatchpoint: guest address 0x%08X was written\n", g_watched);
+    printf("\nwatchpoint: guest address 0x%08X was %s\n", g_watched, g_reads ? "touched" : "written");
     if (count > 0)
     {
         printf("  guest call chain, innermost first:");

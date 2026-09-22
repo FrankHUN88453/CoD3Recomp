@@ -209,7 +209,7 @@ namespace Kernel
     // A hardware watch on one word of guest memory. The processor raises an
     // exception on the instruction that writes it, which is the only way to
     // find out who changed a value that used to be right.
-    void WatchWrite(uint32_t guestAddress);
+    void WatchWrite(uint32_t guestAddress, bool reads = false);
     void ArmWatchpoints();
     bool ReportWatchpoint(void* winContext);
     bool SelfTestWatchpoint();

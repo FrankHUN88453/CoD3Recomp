@@ -302,9 +302,13 @@ int Run(int argc, char** argv)
     // COD3_WATCH takes a hexadecimal guest address: its first four words are
     // printed here, before any guest code runs, and a hardware write watchpoint
     // is set on it so the next write to it says which guest function did it.
-    if (const char* watch = getenv("COD3_WATCH"))
+    // COD3_WATCH=hex,r watches reads as well as writes: who reads a string,
+    // for instance. COD3_WATCH_SECOND=N arms it that many seconds in
+    // instead (kernel_video.cpp), for something that is not there yet.
+    if (const char* watch = getenv("COD3_WATCH"); watch != nullptr && getenv("COD3_WATCH_SECOND") == nullptr)
     {
         const uint32_t address = uint32_t(strtoul(watch, nullptr, 16));
+        const bool reads = strchr(watch, ',') != nullptr && strchr(watch, 'r') != nullptr;
         if (*watch != 0)   // zero is a valid address to watch: the null object
         {
             printf("watch: 0x%08X holds %08X %08X %08X %08X before the guest starts\n",
@@ -313,7 +317,7 @@ int Run(int argc, char** argv)
                 Guest::Read32(Guest::Base, address + 4),
                 Guest::Read32(Guest::Base, address + 8),
                 Guest::Read32(Guest::Base, address + 12));
-            Kernel::WatchWrite(address);
+            Kernel::WatchWrite(address, reads);
             Kernel::ArmWatchpoints();
         }
     }

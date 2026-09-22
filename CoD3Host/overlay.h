@@ -35,4 +35,10 @@ namespace Overlay
 
     // Frames the title finished, for the counter; called at every swap.
     void NoteFrame();
+
+    // What the front end drew this frame (title_trace.cpp): the main
+    // menu, or its options page. The settings menu opens itself when the
+    // options page follows the main menu, which is the OPTIONS entry.
+    enum class FrontEndText { MainMenu = 1, OptionsMenu = 2 };
+    void NoteFrontEndText(FrontEndText text);
 }

@@ -727,6 +727,22 @@ namespace
                     printf("video: \"%s\" put on the title's command buffer\n", command.c_str());
                     fflush(stdout);
                 }
+                // COD3_WATCH_SECOND=N with COD3_WATCH: the watch armed now.
+                {
+                    static const long watchSecond = []() { const char* t = getenv("COD3_WATCH_SECOND"); return t ? strtol(t, nullptr, 10) : -1; }();
+                    static bool watchArmed = false;
+                    if (watchSecond >= 0 && !watchArmed && long(frame / 60) == watchSecond)
+                    {
+                        watchArmed = true;
+                        const char* watch = getenv("COD3_WATCH");
+                        const uint32_t address = watch ? uint32_t(strtoul(watch, nullptr, 16)) : 0;
+                        if (address != 0)
+                        {
+                            Kernel::WatchWrite(address, strchr(watch, ',') != nullptr && strchr(watch, 'r') != nullptr);
+                            Kernel::ArmWatchpoints();
+                        }
+                    }
+                }
                 // COD3_DUMPMEM=hexaddress,bytes,second: that much of guest
                 // memory, once, that many seconds in (five by default), as
                 // words and text.

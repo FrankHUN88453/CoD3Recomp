@@ -5,11 +5,13 @@
 // All of it is behind COD3_TRACETITLE=1 and costs nothing otherwise.
 
 #include "kernel.h"
+#include "overlay.h"
 
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
 #include <Windows.h>
 
@@ -33,7 +35,7 @@ namespace
 extern "C" PPC_FUNC(__imp__sub_824E7998);
 PPC_FUNC(sub_824E7998)
 {
-    if (Wanted()) { printf("title: panel \"%s\" (argument %08X)\n", Text(base, ctx.r4.u32), ctx.r5.u32); fflush(stdout); }
+    if (Wanted()) { printf("title: panel \"%s\" (argument %08X) on manager %08X\n", Text(base, ctx.r4.u32), ctx.r5.u32, ctx.r3.u32); fflush(stdout); }
     __imp__sub_824E7998(ctx, base);
 }
 
@@ -193,4 +195,42 @@ PPC_FUNC(sub_822C0F90)
     __imp__sub_822C0F90(ctx, base);
     if (MixTrace() && shown++ < 20) printf("title: mixer thread function (%08X, %08X) returns %u at %llu ms\n", a, b, ctx.r3.u32, (unsigned long long)Now());
     fflush(stdout);
+}
+
+// Cbuf_AddText, sub_824644D0(text): every command the title puts on its own
+// buffer, which is how its menus act.
+extern "C" PPC_FUNC(__imp__sub_824644D0);
+PPC_FUNC(sub_824644D0)
+{
+    if (Wanted())
+    {
+        std::string text = Text(base, ctx.r3.u32);
+        while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
+        printf("title: command \"%s\"\n", text.c_str());
+        fflush(stdout);
+    }
+    __imp__sub_824644D0(ctx, base);
+}
+
+// A text element's draw, sub_824CFBE8(element, ...): what the front end
+// shows, each frame. The element's text object is at word seven, its
+// characters twelve bytes in. Two of the texts say which page is up: the
+// main menu's first entry and the options page's title, and the overlay
+// opens its own settings when the one gives way to the other, which is
+// the player pressing OPTIONS.
+extern "C" PPC_FUNC(__imp__sub_824CFBE8);
+PPC_FUNC(sub_824CFBE8)
+{
+    const uint32_t element = ctx.r3.u32;
+    if (element >= 0x10000 && element < 0xFFFF0000u)
+    {
+        const uint32_t text = Guest::Read32(base, element + 28);
+        if (text >= 0x10000 && text < 0xFFFF0000u)
+        {
+            const char* characters = Text(base, text + 12);
+            if (strcmp(characters, "OPTIONS MENU") == 0) Overlay::NoteFrontEndText(Overlay::FrontEndText::OptionsMenu);
+            else if (strcmp(characters, "SINGLE PLAYER") == 0) Overlay::NoteFrontEndText(Overlay::FrontEndText::MainMenu);
+        }
+    }
+    __imp__sub_824CFBE8(ctx, base);
 }
