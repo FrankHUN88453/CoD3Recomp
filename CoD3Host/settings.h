@@ -32,7 +32,7 @@ namespace Settings
         int textureFilter = 3;        // 0 the title's own, 1 bilinear, 2 trilinear, 3 anisotropic
         int anisotropy = 16;          // 2..16, with textureFilter 3
         bool vsync = true;
-        int antialiasing = 1;         // 0 none, 1 FXAA
+        int antialiasing = 3;         // 0 none, 1 FXAA, 2 MSAA 2x, 3 MSAA 4x, 4 MSAA 8x, 5 MSAA 4x and FXAA
         int windowMode = 0;           // 0 windowed, 1 borderless full screen
         bool fpsOverlay = false;
         bool statsOverlay = false;    // the renderer's counters over the picture

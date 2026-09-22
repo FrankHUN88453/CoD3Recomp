@@ -163,7 +163,7 @@ void Settings::Load(const std::filesystem::path& exeDirectory)
     if (v.resolutionWidth < 320 || v.resolutionHeight < 240 || v.resolutionWidth > 16384 || v.resolutionHeight > 16384) { v.resolutionWidth = 0; v.resolutionHeight = 0; }
     if (v.textureFilter < 0 || v.textureFilter > 3) v.textureFilter = 3;
     if (v.anisotropy < 2 || v.anisotropy > 16) v.anisotropy = 16;
-    if (v.antialiasing < 0 || v.antialiasing > 1) v.antialiasing = 1;
+    if (v.antialiasing < 0 || v.antialiasing > 5) v.antialiasing = 3;
     if (v.windowMode < 0 || v.windowMode > 1) v.windowMode = 0;
     if (!(v.mouseSensitivity >= 0.1f && v.mouseSensitivity <= 3.0f)) v.mouseSensitivity = 1.0f;
     std::lock_guard<std::mutex> lock(g_mutex);

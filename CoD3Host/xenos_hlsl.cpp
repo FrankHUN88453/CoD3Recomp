@@ -582,9 +582,13 @@ namespace
             const std::string size = Format("textureSize[%u]", slot);
             // A vertex program has no derivatives to pick a level by: it
             // samples the level it names, or the first.
+            // A fetch that says volume reads a flat texture here: every one
+            // the title issues names a flat texture in its fetch constant
+            // (the particle sprites, 128 by 128 DXT), which is what the
+            // hardware addresses by, and no volume texture has been seen.
+            // The third coordinate is dropped, as the constant would drop it.
             std::string location;
             if (dimension == 3) location = Format("cubeDirection(%s)", coordinate.c_str());
-            else if (dimension == 2) location = unnormalised ? Format("(%s * %s.xyz)", coordinate.c_str(), size.c_str()) : coordinate;
             else location = unnormalised ? Format("((%s).xy * %s.zw)", coordinate.c_str(), size.c_str()) : Format("(%s).xy", coordinate.c_str());
             if (useRegisterLod || !pixel)
                 sample = Format("%s.SampleLevel(%s, %s, %s)", texture.c_str(), sampler.c_str(), location.c_str(),
@@ -896,7 +900,7 @@ uint64_t XenosHlsl::Version()
     // A number that changes when the translation would, or when one of the
     // environment knobs that shape the HLSL is set: the disk cache keyed by
     // it then starts afresh rather than serving the other translation.
-    std::string text = "xenos_hlsl 2026-09-21 bswap packed";
+    std::string text = "xenos_hlsl 2026-09-22 bswap packed flat3d";
     if (const char* lanes = getenv("COD3_SCALARLANES")) { text += " lanes="; text += lanes; }
     if (const char* show = getenv("COD3_D3DSHOW")) { text += " show="; text += show; }
     uint64_t hash = 14695981039346656037ull;
@@ -964,7 +968,7 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
     // Textures and samplers, and the adjustment the fetch constant asks for.
     for (const TextureFetch& fetch : out.textureFetches)
     {
-        const char* type = fetch.dimension == 3 ? "TextureCube" : fetch.dimension == 2 ? "Texture3D" : "Texture2D";
+        const char* type = fetch.dimension == 3 ? "TextureCube" : "Texture2D";
         hlsl += Format("%s t%u : register(t%u);\nSamplerState s%u : register(s%u);\n",
             type, fetch.slot, fetch.slot, fetch.sampler, fetch.sampler);
     }

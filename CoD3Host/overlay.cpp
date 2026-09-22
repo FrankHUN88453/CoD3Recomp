@@ -277,8 +277,8 @@ namespace
                         int level = g_edit.anisotropy >= 16 ? 3 : g_edit.anisotropy >= 8 ? 2 : g_edit.anisotropy >= 4 ? 1 : 0;
                         if (ImGui::Combo("Anisotropy", &level, levels, 4)) g_edit.anisotropy = 2 << level;
                     }
-                    const char* aa[] = { "None", "FXAA" };
-                    ImGui::Combo("Anti-aliasing", &g_edit.antialiasing, aa, 2);
+                    const char* aa[] = { "None", "FXAA", "MSAA 2x", "MSAA 4x", "MSAA 8x", "MSAA 4x + FXAA" };
+                    ImGui::Combo("Anti-aliasing", &g_edit.antialiasing, aa, 6);
                     ImGui::Checkbox("Vertical sync (VSync)", &g_edit.vsync);
                     ImGui::Checkbox("Show FPS", &g_edit.fpsOverlay);
                     ImGui::Checkbox("Renderer statistics", &g_edit.statsOverlay);

@@ -185,6 +185,7 @@ namespace
         desc.FrontCounterClockwise = ((key >> 2) & 1) == 0 ? TRUE : FALSE;
         desc.DepthClipEnable = FALSE;
         desc.ScissorEnable = (key & 8) ? TRUE : FALSE;
+        desc.MultisampleEnable = TRUE;   // for the multisampled targets; nothing to a single sampled one
         ComPtr<ID3D11RasterizerState> state;
         g_device->CreateRasterizerState(&desc, &state);
         return state;

@@ -121,20 +121,20 @@ namespace
     ComPtr<ID3D11Buffer> g_floatConstants[2];   // when the ring is not available
     ComPtr<ID3D11Buffer> g_drawConstants;
 
+    int AntiAliasing(const Settings::Values& settings);
+
     // --- the built in programs -------------------------------------------------------------------
 
     ComPtr<ID3D11GeometryShader> g_rectangleShader;
     ComPtr<ID3D11VertexShader> g_quadVertexShader;   // a triangle over the target, from the vertex id
     ComPtr<ID3D11PixelShader> g_copyPixelShader;     // a rectangle of a texture, point sampled
+    ComPtr<ID3D11PixelShader> g_copyColourMS[4];     // the same of a multisampled colour target, the samples averaged: 2, 4, 8
+    ComPtr<ID3D11PixelShader> g_copyDepthMS[4];      // and of a depth target, its first sample
     ComPtr<ID3D11PixelShader> g_presentPixelShader;  // the frame, linear sampled
     ComPtr<ID3D11PixelShader> g_fxaaPixelShader;
     ComPtr<ID3D11PixelShader> g_flatPixelShader;
     ComPtr<ID3D11SamplerState> g_pointSampler, g_linearSampler;
     ComPtr<ID3D11Buffer> g_quadConstants;
-    ComPtr<ID3D11Texture2D> g_presentTexture;        // the picture before the anti aliasing
-    ComPtr<ID3D11RenderTargetView> g_presentView;
-    ComPtr<ID3D11ShaderResourceView> g_presentResource;
-    int g_presentWidth = 0, g_presentHeight = 0;
 
     // The console's rectangle list, three corners with the fourth implied,
     // as two triangles. The three can come in any order: the diagonal is
@@ -215,16 +215,27 @@ namespace
         "    float2 finalUv = uv; if (horizontal) finalUv.y += finalOffset * step; else finalUv.x += finalOffset * step;\n"
         "    return float4(source.Sample(smp, finalUv).rgb, 1.0); }\n";
 
+    // The copy of a multisampled target, which has no sampler: the texel
+    // by position, a colour as the average of its samples, a depth as its
+    // first, as the console's own resolve took one. SAMPLES is defined
+    // when this is compiled, once for each count.
+    const char* const CopyMultisampledSource =
+        "cbuffer Quad : register(b0) { float4 uvRect; float4 texel; };\n"
+        "struct V { float4 position : SV_Position; float2 uv : TEXCOORD0; };\n"
+        "Texture2DMS<float4, SAMPLES> sourceMS : register(t0);\n"
+        "float4 copyColourMS(V v) : SV_Target { int2 p = int2(v.uv / texel.xy); float4 sum = 0; [unroll] for (int i = 0; i < SAMPLES; i++) sum += sourceMS.Load(p, i); return sum / SAMPLES; }\n"
+        "float4 copyDepthMS(V v) : SV_Target { int2 p = int2(v.uv / texel.xy); return sourceMS.Load(p, 0); }\n";
+
     // COD3_D3DFLAT=1: every opaque draw in a flat colour made from its pixel
     // program's hash, so a frame shows which program painted what.
     const char* const FlatSource =
         "cbuffer DrawConstants : register(b2) { float4 viewportScale; float4 viewportOffset; float4 targetSize; uint4 flags; };\n"
         "float4 main() : SV_Target { uint h = flags.w; return float4(float(h & 255u) / 255.0, float((h >> 8) & 255u) / 255.0, float((h >> 16) & 255u) / 255.0, 1.0); }\n";
 
-    ComPtr<ID3DBlob> CompileBuiltIn(const char* source, const char* entry, const char* profile, const char* what)
+    ComPtr<ID3DBlob> CompileBuiltIn(const char* source, const char* entry, const char* profile, const char* what, const D3D_SHADER_MACRO* defines = nullptr)
     {
         ComPtr<ID3DBlob> code, errors;
-        const HRESULT hr = g_compile(source, strlen(source), what, nullptr, nullptr, entry, profile, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errors);
+        const HRESULT hr = g_compile(source, strlen(source), what, defines, nullptr, entry, profile, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errors);
         if (FAILED(hr))
         {
             printf("render: the %s did not compile: %s\n", what, errors ? static_cast<const char*>(errors->GetBufferPointer()) : "no message");
@@ -242,6 +253,15 @@ namespace
             g_device->CreateVertexShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &g_quadVertexShader);
         if (ComPtr<ID3DBlob> code = CompileBuiltIn(QuadSource, "copy", "ps_5_0", "copy program"))
             g_device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &g_copyPixelShader);
+        for (int i = 1; i <= 3; i++)
+        {
+            const char* const counts[4] = { "1", "2", "4", "8" };
+            const D3D_SHADER_MACRO defines[2] = { { "SAMPLES", counts[i] }, { nullptr, nullptr } };
+            if (ComPtr<ID3DBlob> code = CompileBuiltIn(CopyMultisampledSource, "copyColourMS", "ps_5_0", "multisampled copy program", defines))
+                g_device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &g_copyColourMS[i]);
+            if (ComPtr<ID3DBlob> code = CompileBuiltIn(CopyMultisampledSource, "copyDepthMS", "ps_5_0", "multisampled depth copy program", defines))
+                g_device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &g_copyDepthMS[i]);
+        }
         if (ComPtr<ID3DBlob> code = CompileBuiltIn(QuadSource, "present", "ps_5_0", "present program"))
             g_device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &g_presentPixelShader);
         if (ComPtr<ID3DBlob> code = CompileBuiltIn(QuadSource, "fxaa", "ps_5_0", "anti aliasing program"))
@@ -663,7 +683,15 @@ namespace
         bool rectangles = false, convertQuads = false, convertFan = false;
         switch (state.primitive)
         {
-        case RenderState::Points: topology = D3D11_PRIMITIVE_TOPOLOGY_POINTLIST; break;
+        case RenderState::Points:
+        {
+            // The host draws a point as one pixel; a wider one is noted.
+            topology = D3D11_PRIMITIVE_TOPOLOGY_POINTLIST;
+            static int announced = 0;
+            if (((state.pointSize & 0xFFFF) > 8 || (state.pointSize >> 16) > 8) && announced++ < 4)
+                printf("render: a point list of %u with a point size of %u by %u eighths of a pixel, drawn as pixels\n", state.indexCount, state.pointSize & 0xFFFF, state.pointSize >> 16);
+            break;
+        }
         case RenderState::Lines: topology = D3D11_PRIMITIVE_TOPOLOGY_LINELIST; break;
         case RenderState::LineStrip: topology = D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP; break;
         case RenderState::Triangles: topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST; break;
@@ -688,6 +716,15 @@ namespace
         }
         if (vs->skipped) { Skip(SkipProgramOnRequest); return; }
         if (state.pitch == 0) { Skip(SkipPitch); return; }
+
+        // The rows the scissor reaches, so the surfaces are tall enough
+        // before they are looked up.
+        {
+            const uint32_t tl = state.scissorTopLeft, br = state.scissorBottomRight;
+            const int32_t offsetY = (tl & 0x80000000u) ? 0 : (int32_t(state.windowOffset << 1) >> 17);
+            const int32_t bottom = int32_t((br >> 16) & 0x7FFF) + offsetY;
+            if (bottom > 0 && RenderResources::EnsureRows(state.pitch, uint32_t(bottom))) ForgetBindings();
+        }
 
         // Targets: only the ones the pixel program writes, each once: the
         // title leaves the other target registers pointing at the same
@@ -718,7 +755,21 @@ namespace
                 depthTexture = depth->texture;
             }
         }
-        if (targetCount == 0 && depthView == nullptr) { Skip(SkipTarget); return; }
+        if (targetCount == 0 && depthView == nullptr)
+        {
+            // The first few, with their state: what a draw with nowhere to
+            // draw is asking for.
+            static int announced = 0;
+            if (announced++ < 6)
+            {
+                printf("render: draw with no target: primitive %u, %u indices, mode %u, colour mask %08X, depth control %08X, targets written %X, colour info %08X, depth info %08X, vs %016llx ps %016llx\n",
+                    state.primitive, state.indexCount, state.modeControl, state.colorMask, state.depthControl, ps->colourTargets, state.colorInfo[0], state.depthInfo,
+                    (unsigned long long)vs->hash, (unsigned long long)ps->hash);
+                fflush(stdout);
+            }
+            Skip(SkipTarget);
+            return;
+        }
 
         // The target's host size, and the scissor in it. Bit 31 of the
         // scissor says the window offset does not apply.
@@ -1170,7 +1221,7 @@ namespace
                 {
                     uint32_t w[6];
                     RenderState::ReadTextureFetch(fetch.slot, w);
-                    printf("   %stexture %u: format %u %ux%u at %08X%s swizzle %03X signs %02X, words %08X %08X %08X %08X %08X %08X\n", stage == 0 ? "" : "vs ", fetch.slot, w[1] & 0x3F,
+                    printf("   %stexture %u (read as %uD): format %u %ux%u at %08X%s swizzle %03X signs %02X, words %08X %08X %08X %08X %08X %08X\n", stage == 0 ? "" : "vs ", fetch.slot, fetch.dimension == 3 ? 6 : fetch.dimension + 1, w[1] & 0x3F,
                         (w[2] & 0x1FFF) + 1, ((w[2] >> 13) & 0x1FFF) + 1, w[1] & 0xFFFFF000u, RenderResources::ResolvedAt(w[1] & 0xFFFFF000u) ? " (resolved)" : "",
                         (w[3] >> 1) & 0xFFF, (w[0] >> 2) & 0xFF, w[0], w[1], w[2], w[3], w[4], w[5]);
                 }
@@ -1215,6 +1266,7 @@ namespace
         const bool colorClear = ((control >> 8) & 1) != 0;
         const bool depthClear = ((control >> 9) & 1) != 0;
         RenderStats::Frame().resolves++;
+        if (RenderResources::EnsureRows(pitch, y1)) ForgetBindings();
 
         uint32_t targetWidth, targetHeight;
         float scaleX, scaleY;
@@ -1231,7 +1283,7 @@ namespace
         {
             const bool fromDepth = sourceSelect == 4;
             ID3D11ShaderResourceView* source = nullptr;
-            uint32_t sourceWidth = 0, sourceHeight = 0;
+            uint32_t sourceWidth = 0, sourceHeight = 0, sourceSamples = 1;
             DXGI_FORMAT format = DXGI_FORMAT_R8G8B8A8_UNORM;
             if (fromDepth)
             {
@@ -1240,6 +1292,7 @@ namespace
                 source = depth->resource;
                 sourceWidth = depth->width;
                 sourceHeight = depth->height;
+                sourceSamples = depth->samples;
                 format = DXGI_FORMAT_R32_FLOAT;
             }
             else
@@ -1250,6 +1303,7 @@ namespace
                 source = color->resource;
                 sourceWidth = color->width;
                 sourceHeight = color->height;
+                sourceSamples = color->samples;
                 format = color->format;
             }
             RenderResources::Resolved* out = RenderResources::ResolvedFor(destBase, hostWidth, hostHeight, format, fromDepth);
@@ -1260,7 +1314,14 @@ namespace
             // and the destination too: both go.
             UnbindResource(out->resource);
             const D3D11_VIEWPORT viewport{ 0.0f, 0.0f, float(hostWidth), float(hostHeight), 0.0f, 1.0f };
-            DrawQuad(source, sourceWidth, sourceHeight, hostX0, hostY0, float(hostWidth), float(hostHeight), out->view, viewport, g_copyPixelShader.Get(), g_pointSampler.Get());
+            ID3D11PixelShader* copy = g_copyPixelShader.Get();
+            if (sourceSamples > 1)
+            {
+                const int slot = sourceSamples >= 8 ? 3 : sourceSamples >= 4 ? 2 : 1;
+                copy = fromDepth ? g_copyDepthMS[slot].Get() : g_copyColourMS[slot].Get();
+            }
+            if (copy != nullptr)
+                DrawQuad(source, sourceWidth, sourceHeight, hostX0, hostY0, float(hostWidth), float(hostHeight), out->view, viewport, copy, g_pointSampler.Get());
         }
 
         if (colorClear)
@@ -1340,28 +1401,6 @@ namespace
         return g_backView != nullptr;
     }
 
-    // The picture before the anti aliasing, at the window's size.
-    bool PresentTextureReady(int width, int height)
-    {
-        if (g_presentTexture && g_presentWidth == width && g_presentHeight == height) return true;
-        g_presentTexture.Reset(); g_presentView.Reset(); g_presentResource.Reset();
-        D3D11_TEXTURE2D_DESC desc{};
-        desc.Width = width;
-        desc.Height = height;
-        desc.MipLevels = 1;
-        desc.ArraySize = 1;
-        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-        desc.SampleDesc.Count = 1;
-        desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-        if (FAILED(g_device->CreateTexture2D(&desc, nullptr, &g_presentTexture))) return false;
-        g_device->CreateRenderTargetView(g_presentTexture.Get(), nullptr, &g_presentView);
-        g_device->CreateShaderResourceView(g_presentTexture.Get(), nullptr, &g_presentResource);
-        g_presentWidth = width;
-        g_presentHeight = height;
-        return true;
-    }
-
     // The last swapped frame onto the window, the overlay over it, and the
     // present with or without vertical sync.
     void PresentLocked(const Settings::Values& settings)
@@ -1373,10 +1412,7 @@ namespace
         g_context->ClearRenderTargetView(g_backView.Get(), black);
 
         const RenderResources::Resolved* frame = RenderResources::ResolvedAt(g_frontBuffer);
-        // COD3_AA=0|fxaa over the settings.
-        static const int aaOverride = []() { const char* t = getenv("COD3_AA"); return t ? (strcmp(t, "fxaa") == 0 ? 1 : 0) : -1; }();
-        const int antialiasing = aaOverride >= 0 ? aaOverride : settings.antialiasing;
-        const bool fxaa = antialiasing == 1 && g_fxaaPixelShader && PresentTextureReady(clientWidth, clientHeight);
+        const bool fxaa = (AntiAliasing(settings) == 1 || AntiAliasing(settings) == 5) && g_fxaaPixelShader;
         if (frame != nullptr && frame->resource != nullptr)
         {
             // Sixteen by nine, as the console sends it, centred.
@@ -1384,20 +1420,12 @@ namespace
             float width = float(clientWidth), height = width / aspect;
             if (height > clientHeight) { height = float(clientHeight); width = height * aspect; }
             const D3D11_VIEWPORT viewport{ std::floor((clientWidth - width) * 0.5f), std::floor((clientHeight - height) * 0.5f), std::floor(width), std::floor(height), 0.0f, 1.0f };
-            if (fxaa)
-            {
-                g_context->ClearRenderTargetView(g_presentView.Get(), black);
-                DrawQuad(frame->resource, frame->width, frame->height, 0, 0, float(frame->width), float(frame->height),
-                         g_presentView.Get(), viewport, g_presentPixelShader.Get(), g_linearSampler.Get());
-                const D3D11_VIEWPORT whole{ 0.0f, 0.0f, float(clientWidth), float(clientHeight), 0.0f, 1.0f };
-                DrawQuad(g_presentResource.Get(), clientWidth, clientHeight, 0, 0, float(clientWidth), float(clientHeight),
-                         g_backView.Get(), whole, g_fxaaPixelShader.Get(), g_linearSampler.Get());
-            }
-            else
-            {
-                DrawQuad(frame->resource, frame->width, frame->height, 0, 0, float(frame->width), float(frame->height),
-                         g_backView.Get(), viewport, g_presentPixelShader.Get(), g_linearSampler.Get());
-            }
+            // The anti aliasing reads the frame itself, in its own pixels,
+            // and writes into the picture's rectangle: the frame is the
+            // chosen resolution, so its rows are the window's, and it has
+            // no black either side to bleed a dark rim into the edges.
+            DrawQuad(frame->resource, frame->width, frame->height, 0, 0, float(frame->width), float(frame->height),
+                     g_backView.Get(), viewport, fxaa ? g_fxaaPixelShader.Get() : g_presentPixelShader.Get(), g_linearSampler.Get());
         }
         // The menu, the counters and the screenshot key, over the picture.
         Overlay::Initialize(g_swapChainWindow, g_device.Get(), g_context.Get());
@@ -1422,9 +1450,29 @@ namespace
         if (getenv("COD3_D3DDEBUG") != nullptr) DrainDebugMessages();
     }
 
+    // The anti aliasing asked for: 0 none, 1 FXAA, 2 MSAA 2x, 3 MSAA 4x,
+    // 4 MSAA 8x, 5 MSAA 4x with FXAA over it. COD3_AA=0|fxaa|msaa2|msaa4|
+    // msaa8|msaa4fxaa over the settings.
+    int AntiAliasing(const Settings::Values& settings)
+    {
+        static const int override = []() {
+            const char* t = getenv("COD3_AA");
+            if (t == nullptr) return -1;
+            if (strcmp(t, "fxaa") == 0) return 1;
+            if (strcmp(t, "msaa2") == 0) return 2;
+            if (strcmp(t, "msaa4") == 0) return 3;
+            if (strcmp(t, "msaa8") == 0) return 4;
+            if (strcmp(t, "msaa4fxaa") == 0) return 5;
+            return 0;
+        }();
+        return override >= 0 ? override : settings.antialiasing;
+    }
+
     // What the settings ask of the renderer, applied at the frame's edge.
     void ApplySettings(const Settings::Values& settings)
     {
+        const int antialiasing = AntiAliasing(settings);
+        RenderResources::RequestMultisample(antialiasing == 2 ? 2 : antialiasing == 3 || antialiasing == 5 ? 4 : antialiasing == 4 ? 8 : 1);
         // The render scale: the chosen resolution's height over the title's
         // 624 rows (the desktop's height by default). COD3_SCALE=N pins it,
         // fractions allowed.

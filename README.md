@@ -55,7 +55,7 @@ the title's main menu, over the title's own options page) has the window
 mode (windowed or borderless full screen; Alt+Enter switches too), the
 resolution (the desktop's by default; the window is made that size, full
 screen scales it, and the frame is drawn at it), the texture filtering
-and anisotropy, anti aliasing (FXAA),
+and anisotropy, anti aliasing (MSAA 2x to 8x, FXAA, or both),
 vertical sync, a frame counter and the renderer's statistics, the mouse
 sensitivity, the title's aim assist, the pad, and the keys. It is drawn
 in the colours of the title's own menus. It keeps its values in `CoD3Recomp.ini` beside the

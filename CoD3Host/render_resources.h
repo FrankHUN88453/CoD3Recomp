@@ -48,6 +48,12 @@ namespace RenderResources
     void RequestScale(float scale);
     float Scale();
 
+    // Samples a pixel of the render targets: 1, 2, 4 or 8. A change takes
+    // effect at the next frame like the scale; the count the device does
+    // not support falls back to what it does.
+    void RequestMultisample(uint32_t samples);
+    uint32_t Multisample();
+
     // --- render targets ---------------------------------------------------------------
 
     struct ColorTarget
@@ -57,6 +63,7 @@ namespace RenderResources
         ID3D11ShaderResourceView* resource = nullptr;
         uint32_t width = 0, height = 0;      // host pixels
         uint32_t pitch = 0, rows = 0;        // title pixels
+        uint32_t samples = 1;
         DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
     };
     struct DepthTarget
@@ -66,9 +73,16 @@ namespace RenderResources
         ID3D11ShaderResourceView* resource = nullptr;
         uint32_t width = 0, height = 0;
         uint32_t pitch = 0, rows = 0;
+        uint32_t samples = 1;
     };
     Handle ColorTargetFor(uint32_t colorInfo, uint32_t pitch);
     Handle DepthTargetFor(uint32_t depthInfo, uint32_t pitch);
+
+    // The surfaces of a pitch must reach this many of the title's rows: a
+    // draw or a resolve is about to use them. The targets of that pitch
+    // are made again taller when they do not, colour and depth alike so
+    // they stay the same size, and true says so: what was bound is gone.
+    bool EnsureRows(uint32_t pitch, uint32_t rows);
     const ColorTarget* ColorTargetOf(Handle handle);
     const DepthTarget* DepthTargetOf(Handle handle);
 

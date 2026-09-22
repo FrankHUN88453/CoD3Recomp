@@ -137,20 +137,25 @@ it). The viewport is folded into the vertex program in clip space, so any
 target size works without the programs knowing; scissors and resolves are
 scaled by the target's real size over the title's. The picture is then
 put on the window at 16:9 with black either side, as the console's scaler
-did. FXAA 3.11 (quality path) runs over the presented picture when the
-menu says; MSAA is not offered, since the title's resolves and its depth
-sampled as shadow maps would need resolving in the middle of the frame.
-Colour stays as the title computes it, its gamma in its own programs,
-with no sRGB or HDR path added: an SDR picture identical to the console's.
+did. Anti aliasing is MSAA 2x, 4x or 8x on the render targets (the
+default is 4x): the title's resolves copy a multisampled target through
+a program that averages the samples of a colour target and takes the
+first of a depth target, as the console's own resolve did, so the shadow
+maps and the post processing's copies see a single sampled surface; and
+FXAA 3.11 (quality path) over the frame at the present, alone or over
+MSAA 4x. Colour stays as the title computes it, its gamma in its own
+programs, with no sRGB or HDR path added: an SDR picture identical to the
+console's.
 
 ## Settings and knobs
 
 In the F11 menu, kept in `CoD3Recomp.ini`: window or borderless full
-screen (Alt+Enter too), internal resolution, texture filtering and
-anisotropy, anti aliasing, vertical sync, the fps and stats panels. From
+screen (Alt+Enter too), the resolution the frame is drawn at (the
+desktop's by default), texture filtering and anisotropy, anti aliasing,
+vertical sync, the fps and stats panels. From
 the environment, over the menu: `COD3_SCALE`, `COD3_TEXTURE_FILTER=native|
 bilinear|trilinear|anisotropic`, `COD3_ANISO=1..16`, `COD3_VSYNC=0|1`,
-`COD3_AA=0|fxaa`, `COD3_FULLSCREEN=0|1`, `COD3_NOMIPS=1`,
+`COD3_AA=0|fxaa|msaa2|msaa4|msaa8|msaa4fxaa`, `COD3_FULLSCREEN=0|1`, `COD3_NOMIPS=1`,
 `COD3_NOSHADERCACHE=1`, `COD3_NOPRECOMPILE=1`. Diagnostics: `COD3_D3DDEBUG`
 (the debug layer), `COD3_D3DFRAME=N|auto|loading` with `COD3_D3DDRAWDUMP`,
 `COD3_FRAMEDUMP`, `COD3_D3DSKIPVS`, `COD3_D3DFLAT`, `COD3_DUMPHLSL`,
@@ -192,17 +197,22 @@ by 6/255 on average, the difference being the runs' timing (the title's
 clock, the HUD's fades) rather than the rendering; between the new
 renderer with and without mip levels, 1.75/255. What is deliberately
 different: mip levels and anisotropic filtering (the console had both;
-the old backend had neither), FXAA when on, and the picture at the
-window's height rather than a whole multiple. Cube maps are uploaded as
-six faces now, where the old backend bound a flat texture and the
-reflection read black. Volume textures are still white.
+the old backend had neither), MSAA and FXAA when on, and the picture at
+the chosen resolution rather than a whole multiple. Cube maps are
+uploaded as six faces now, where the old backend bound a flat texture
+and the reflection read black; the sprites the title fetches "as a
+volume" read their flat texture instead of white.
 
 ## What is left
 
-- Volume (3D) textures are not uploaded (their tiling is different).
-- Render targets are allocated at 1440 rows times the scale for every
-  pitch, more than the title draws into; at 4x that is a lot of memory.
-- No MSAA; no sRGB or HDR output path.
+- A fetch that says volume reads a flat texture: every one the title
+  issues names a flat texture in its fetch constant, and no volume
+  texture has been seen. If one turns up the log says so.
+- Render targets start at 720 rows for the 1040 wide surfaces and the
+  pitch for the rest, and grow when a draw's scissor or a resolve reaches
+  further (the crossroads level's 1024 row shadow map): the surfaces of
+  that pitch are made again taller, colour and depth together.
+- No sRGB or HDR output path.
 - The vertex fetch is by raw loads; an input layout would let the GPU's
   vertex fetch do the work. The programs' loops still go through the
   switch when they cannot be structured.
