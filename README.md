@@ -32,6 +32,12 @@ The keyboard and mouse stand in for the console's pad. In a level the window
 takes the mouse and looks with it; Escape gives it back and pauses; a click
 takes it again. Every key can be changed in the settings menu.
 
+The look reads the mouse's own movement, the counts its device reports,
+rather than following the pointer across the screen: Windows' pointer
+speed and its "enhance pointer precision" do not reach it, so the same
+sweep of the hand is the same turn on every machine. The settings menu
+turns that off for anyone who wants the pointer's travel back.
+
 | | |
 | --- | --- |
 | Mouse | look; Mouse 1 fires, Mouse 2 aims; the wheel changes weapon |
@@ -59,7 +65,8 @@ in per cent of it, the texture filtering
 and anisotropy, anti aliasing (MSAA 2x to 8x, FXAA, or both), the
 texture quality, the field of view (65 to 100), the blur while aiming,
 vertical sync, a frame counter and the renderer's statistics, the mouse
-sensitivity, the title's aim assist, the pad, and the keys. It is drawn
+sensitivity and whether the mouse is read raw, the title's aim assist,
+the pad, and the keys. It is drawn
 in the colours of the title's own menus. It keeps its values in `CoD3Recomp.ini` beside the
 executable. `CoD3.cfg` beside the executable holds console commands run at
 start (`seta com_maxfps 60` by default). The same settings can be forced

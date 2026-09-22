@@ -43,6 +43,7 @@ namespace Settings
         bool aimAssist = true;        // the title's own, through its config
         bool controller = true;       // read a pad when one is there
         float mouseSensitivity = 1.0f;   // both axes, 0.1 .. 3
+        bool rawMouse = true;            // the mouse's own counts, not the pointer's travel
         int keys[ActionCount] = {};
     };
 

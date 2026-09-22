@@ -299,6 +299,9 @@ namespace
                 {
                     ImGui::SliderFloat("Mouse sensitivity", &g_edit.mouseSensitivity, 0.1f, 3.0f, "%.2f");
                     ImGui::TextDisabled("Both axes alike.");
+                    ImGui::Checkbox("Raw mouse input", &g_edit.rawMouse);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(the mouse's own movement, without Windows' pointer speed and acceleration)");
                     ImGui::Checkbox("Aim assist", &g_edit.aimAssist);
                     ImGui::SameLine();
                     ImGui::TextDisabled("(the game's own; takes effect after a restart)");

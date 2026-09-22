@@ -37,6 +37,12 @@ namespace
     std::atomic<bool> g_cursorHidden{ false };
     std::atomic<int> g_wheel{ 0 };   // wheel notches since the last take
 
+    // The mouse's own movement, added up as the device reports it and taken
+    // by whoever looks. Long is enough: a fast hand is a few thousand counts
+    // a second and a look happens every few milliseconds.
+    std::atomic<long> g_rawX{ 0 }, g_rawY{ 0 };
+    std::atomic<bool> g_rawRegistered{ false };
+
     // Frames the guest finished, counted where the front buffer changes.
     std::atomic<uint64_t> g_guestFrames{ 0 };
 
@@ -112,6 +118,45 @@ namespace
             g_wheel.fetch_add(GET_WHEEL_DELTA_WPARAM(w) / WHEEL_DELTA);
             return 0;
         }
+        // The mouse as its device reports it. Windows still moves the pointer
+        // as it always did; this is the movement beside it, before the
+        // pointer speed and the acceleration have had their say.
+        if (message == WM_INPUT)
+        {
+            alignas(8) uint8_t buffer[sizeof(RAWINPUT) + 16];
+            UINT size = sizeof(buffer);
+            const UINT got = GetRawInputData(reinterpret_cast<HRAWINPUT>(l), RID_INPUT, buffer, &size, sizeof(RAWINPUTHEADER));
+            if (got != UINT(-1) && got >= sizeof(RAWINPUTHEADER))
+            {
+                const RAWINPUT* raw = reinterpret_cast<const RAWINPUT*>(buffer);
+                if (raw->header.dwType == RIM_TYPEMOUSE)
+                {
+                    if ((raw->data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE) != 0)
+                    {
+                        // A tablet, a touch screen or a remote desktop, which
+                        // report where the pointer is rather than how far it
+                        // went: the step is the difference from the last one.
+                        static LONG lastX = 0, lastY = 0;
+                        static bool have = false;
+                        if (have)
+                        {
+                            g_rawX.fetch_add(raw->data.mouse.lLastX - lastX, std::memory_order_relaxed);
+                            g_rawY.fetch_add(raw->data.mouse.lLastY - lastY, std::memory_order_relaxed);
+                        }
+                        lastX = raw->data.mouse.lLastX;
+                        lastY = raw->data.mouse.lLastY;
+                        have = true;
+                    }
+                    else
+                    {
+                        g_rawX.fetch_add(raw->data.mouse.lLastX, std::memory_order_relaxed);
+                        g_rawY.fetch_add(raw->data.mouse.lLastY, std::memory_order_relaxed);
+                    }
+                }
+            }
+            // Windows asks that this one always go on for its own cleanup.
+            return DefWindowProcW(window, message, w, l);
+        }
         // No beep for Alt combinations the menu does not have.
         if (message == WM_SYSCHAR) return 0;
         return DefWindowProcW(window, message, w, l);
@@ -149,6 +194,18 @@ namespace
         }
 
         g_window.store(window);
+
+        // The mouse's own movement, for the look. The window is the target
+        // and no flag is set, so the reports come only while it is in front:
+        // moving the mouse over another window is not steering.
+        RAWINPUTDEVICE mouse{};
+        mouse.usUsagePage = 0x01;   // generic desktop
+        mouse.usUsage = 0x02;       // mouse
+        mouse.dwFlags = 0;
+        mouse.hwndTarget = window;
+        if (RegisterRawInputDevices(&mouse, 1, sizeof(mouse)) != FALSE) g_rawRegistered.store(true);
+        else printf("window: raw mouse input could not be asked for, error %lu; the pointer is followed instead\n", GetLastError());
+
         ShowWindow(window, SW_SHOW);
         ReportSize(window);
         // In front and taking the keys from the start, rather than behind
@@ -254,6 +311,14 @@ bool Window::HasFocus()
 {
     const HWND window = g_window.load();
     return window != nullptr && GetForegroundWindow() == window;
+}
+
+bool Window::TakeRawMouse(long& x, long& y)
+{
+    if (!g_rawRegistered.load()) { x = 0; y = 0; return false; }
+    x = g_rawX.exchange(0, std::memory_order_relaxed);
+    y = g_rawY.exchange(0, std::memory_order_relaxed);
+    return true;
 }
 
 int Window::TakeWheel() { return g_wheel.exchange(0); }

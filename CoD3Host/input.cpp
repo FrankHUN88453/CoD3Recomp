@@ -127,14 +127,53 @@ namespace
     {
         outX = 0;
         outY = 0;
+
+        // The mouse's own movement is taken whether it is used or not, so
+        // that what piled up while the menu was open is not a jump the
+        // moment the window takes the mouse back.
+        long rawX = 0, rawY = 0;
+        const bool raw = Window::TakeRawMouse(rawX, rawY) && Settings::Get().rawMouse;
         if (!g_mouseHeld.load()) return;
 
-        POINT now{};
-        if (!GetCursorPos(&now)) return;
+        long dx = 0, dy = 0;
+        if (raw)
+        {
+            dx = rawX;
+            dy = rawY;
+            // The pointer is still put back in the middle: it is hidden and
+            // nothing reads it, but a click has to land in the window and it
+            // must never come to rest against an edge of the screen.
+            POINT now{};
+            if (GetCursorPos(&now) && (now.x != g_centre.x || now.y != g_centre.y))
+                SetCursorPos(g_centre.x, g_centre.y);
+        }
+        else
+        {
+            POINT now{};
+            if (!GetCursorPos(&now)) return;
+            dx = now.x - g_centre.x;
+            dy = now.y - g_centre.y;
+            if (dx != 0 || dy != 0) SetCursorPos(g_centre.x, g_centre.y);
+        }
 
-        const long dx = now.x - g_centre.x;
-        const long dy = now.y - g_centre.y;
-        if (dx != 0 || dy != 0) SetCursorPos(g_centre.x, g_centre.y);
+        // COD3_MOUSELOG=1: what the look took, once a second, to see that
+        // the mouse's own counts arrive and how many a turn is worth.
+        static const bool log = getenv("COD3_MOUSELOG") != nullptr;
+        if (log && (dx != 0 || dy != 0))
+        {
+            static uint64_t second = 0, counts = 0, reads = 0;
+            counts += uint64_t(std::abs(dx) + std::abs(dy));
+            reads++;
+            const uint64_t now = GetTickCount64() / 1000;
+            if (now != second)
+            {
+                second = now;
+                printf("input: %s, %llu counts over %llu reads\n", raw ? "the mouse's own movement" : "the pointer's travel",
+                    (unsigned long long)counts, (unsigned long long)reads);
+                fflush(stdout);
+                counts = 0; reads = 0;
+            }
+        }
 
         // The settings menu's sensitivity scales the gain, both axes alike.
         const long Gain = long(1300.0f * Settings::Get().mouseSensitivity);

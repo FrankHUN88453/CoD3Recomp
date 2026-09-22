@@ -28,6 +28,14 @@ namespace Window
 
     // Where the guest resolved its last frame, for the count of frames.
     void SetFrontBuffer(uint32_t address, uint32_t width, uint32_t height);
+    // How far the mouse itself moved since the last call, in the counts its
+    // device reports. This is the movement of the mouse, not of the pointer:
+    // the system's pointer speed and its "enhance pointer precision" never
+    // touch it, so a turn in the game is the same turn on every machine.
+    // False when the raw input could not be had, and the caller falls back
+    // to following the pointer.
+    bool TakeRawMouse(long& x, long& y);
+
     // Wheel notches turned since the last call, positive away from the user.
     int TakeWheel();
 }
