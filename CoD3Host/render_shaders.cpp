@@ -453,10 +453,12 @@ void RenderShaders::Precompile()
         if (name.size() != 23 || name.compare(19, 4, ".bin") != 0) continue;
         const bool pixel = name.compare(0, 3, "ps_") == 0;
         if (!pixel && name.compare(0, 3, "vs_") != 0) continue;
-        // Named by the hash: in the disk cache already means nothing to do,
-        // and the file need not be read.
+        // Named by the hash: one in the disk cache already is read from
+        // there by the worker and made into a shader object now, so a
+        // level's first draws find their programs ready instead of
+        // waiting on the driver's own compile of them.
         const uint64_t hash = strtoull(name.c_str() + 3, nullptr, 16);
-        if (!g_cacheDirectory.empty() && std::filesystem::exists(CachePath(hash, pixel), error)) { cached++; continue; }
+        if (!g_cacheDirectory.empty() && std::filesystem::exists(CachePath(hash, pixel), error)) cached++;
         FILE* file = fopen(entry.path().string().c_str(), "rb");
         if (file == nullptr) continue;
         std::vector<uint8_t> bytes;
@@ -473,8 +475,8 @@ void RenderShaders::Precompile()
         Intern(pixel, bytes.data(), uint32_t(bytes.size() / 4), false);
         queued++;
     }
-    if (queued != 0 || cached != 0)
-        printf("render: %u captured programs compiling in the background, %u already cached\n", queued, cached);
+    if (queued != 0)
+        printf("render: %u captured programs made ready in the background, %u of them from the disk cache\n", queued, cached);
 }
 
 RenderShaders::Statistics RenderShaders::Stats()
