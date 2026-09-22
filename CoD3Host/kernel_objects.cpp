@@ -728,6 +728,14 @@ PPC_FUNC(__imp__KeSetEvent)
     Guest::Write32(base, event + DISPATCH_SIGNAL_STATE, 1);
     Timeline::Mark("set event", event, uint32_t(ctx.lr));
     ctx.r3.u32 = previous;
+    // COD3_XMATRACE: the mixer's two events, the first few times.
+    static const bool audioTrace = getenv("COD3_XMATRACE") != nullptr;
+    static int shown = 0;
+    if (audioTrace && (event == 0x8291EB7Cu || event == 0x8291EB6Cu) && shown++ < 40)
+    {
+        printf("title: set event %08X (was %u) from %08X on thread %lu\n", event, previous, uint32_t(ctx.lr), GetCurrentThreadId());
+        fflush(stdout);
+    }
 }
 
 // LONG KeResetEvent(KEVENT* event)
@@ -755,10 +763,19 @@ PPC_FUNC(__imp__KeInitializeSemaphore)
     const uint32_t semaphore = ctx.r3.u32;
     if (semaphore == 0) return;
 
-    memset(Guest::Ptr(semaphore), 0, 0x18);
+    // A KSEMAPHORE is the sixteen byte dispatcher header and the limit:
+    // twenty bytes. This used to clear twenty four and put the limit at
+    // twenty, which is the first word of whatever the title keeps next.
+    // The audio mixer keeps its "mixed" event there: the limit of six
+    // landed on the event's type byte, a synchronisation event became a
+    // notification event that no wait ever cleared, and the callback that
+    // waits for the mixer stopped waiting after the first frame, read
+    // silence, and the mixer thread took its cleared request for a
+    // shutdown and left.
+    memset(Guest::Ptr(semaphore), 0, 0x14);
     Guest::Write32(base, semaphore + DISPATCH_TYPE, 5u << 24);   // SemaphoreObject
     Guest::Write32(base, semaphore + DISPATCH_SIGNAL_STATE, ctx.r4.u32);
-    Guest::Write32(base, semaphore + 0x14, ctx.r5.u32);          // limit
+    Guest::Write32(base, semaphore + 0x10, ctx.r5.u32);          // limit
 }
 
 // LONG KeReleaseSemaphore(KSEMAPHORE* semaphore, LONG increment, LONG adjust, BOOLEAN wait)
@@ -773,7 +790,7 @@ PPC_FUNC(__imp__KeReleaseSemaphore)
     if (semaphore == 0) { ctx.r3.u32 = 0; return; }
 
     const uint32_t previous = Guest::Read32(base, semaphore + DISPATCH_SIGNAL_STATE);
-    const uint32_t limit = Guest::Read32(base, semaphore + 0x14);
+    const uint32_t limit = Guest::Read32(base, semaphore + 0x10);
     uint32_t count = previous + ctx.r5.u32;
     if (limit > 0 && count > limit) count = limit;
 
@@ -801,6 +818,10 @@ PPC_FUNC(__imp__KeWaitForSingleObject)
     struct Leave { uint32_t object, from; ~Leave() { LeaveWait(); Timeline::Mark("ke waited", object, from); } } leave{ object, uint32_t(ctx.lr) };
     Timeline::Mark("ke wait", object, uint32_t(ctx.lr));
 
+    static const bool audioTrace = getenv("COD3_XMATRACE") != nullptr;
+    static int shown = 0;
+    const bool traced = audioTrace && (object == 0x8291EB7Cu || object == 0x8291EB6Cu) && shown < 40;
+    if (traced) { shown++; printf("title: wait on %08X (state %u, type %u) from %08X on thread %lu\n", object, Guest::Read32(base, object + 4), DispatchType(base, object), uint32_t(ctx.lr), GetCurrentThreadId()); fflush(stdout); }
     std::unique_lock<std::mutex> lock(Kernel::DispatcherLock());
     for (;;)
     {
@@ -810,6 +831,7 @@ PPC_FUNC(__imp__KeWaitForSingleObject)
             if (WaitConsumes(DispatchType(base, object)))
                 Guest::Write32(base, object + DISPATCH_SIGNAL_STATE, state - 1);
             ctx.r3.u32 = X_STATUS_SUCCESS;
+            if (traced) { printf("title:   wait on %08X done on thread %lu\n", object, GetCurrentThreadId()); fflush(stdout); }
             return;
         }
 
@@ -844,6 +866,25 @@ PPC_FUNC(__imp__KeWaitForMultipleObjects)
     std::chrono::steady_clock::time_point deadline;
     bool infinite = false;
     const bool mayWait = TimeoutToDeadline(base, timeoutPtr, deadline, infinite);
+
+    // COD3_XMATRACE: the audio callback's wait for the mixer thread, with
+    // its result and how long it took, a few times.
+    static const bool audioTrace = getenv("COD3_XMATRACE") != nullptr;
+    const bool traced = audioTrace && count >= 1 && Guest::Read32(base, objects) == 0x8291EB6Cu;
+    const auto started = std::chrono::steady_clock::now();
+    struct Report
+    {
+        bool traced; uint32_t& result; std::chrono::steady_clock::time_point started; const uint8_t* base; uint32_t objects; uint32_t count;
+        ~Report()
+        {
+            static int shown = 0;
+            if (!traced || shown++ >= 12) return;
+            printf("title: callback waited %lld us for the mixer, result %u, states now", (long long)std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count(), result);
+            for (uint32_t i = 0; i < count; i++) { const uint32_t o = Guest::Read32(base, objects + i * 4); printf(" %08X:%u (word0 %08X)", o, Guest::Read32(base, o + 4), Guest::Read32(base, o)); }
+            printf("\n");
+            fflush(stdout);
+        }
+    } report{ traced, ctx.r3.u32, started, base, objects, count };
 
     std::unique_lock<std::mutex> lock(Kernel::DispatcherLock());
     for (;;)

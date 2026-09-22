@@ -5,6 +5,7 @@
 #include <cmath>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 
@@ -45,6 +46,42 @@ namespace
     // sample leaving this file is a zero and the speakers are correctly silent.
     std::atomic<int> g_peak{ 0 };
     std::atomic<uint32_t> g_nonzeroBytes{ 0 };   // the most of a frame's bytes ever seen nonzero
+
+    // COD3_AUDIODUMP=path: everything that goes to the device, as a stereo
+    // 48 kHz WAV, for listening to a run after it or looking at the wave.
+    // The header's sizes are brought up to date every so often, so a run
+    // cut short still leaves a file that plays.
+    FILE* g_dump = nullptr;
+    uint32_t g_dumpBytes = 0;
+    uint32_t g_dumpFrames = 0;
+
+    void DumpHeader()
+    {
+        uint8_t header[44] = {};
+        auto put32 = [&](int at, uint32_t v) { header[at] = uint8_t(v); header[at + 1] = uint8_t(v >> 8); header[at + 2] = uint8_t(v >> 16); header[at + 3] = uint8_t(v >> 24); };
+        auto put16 = [&](int at, uint32_t v) { header[at] = uint8_t(v); header[at + 1] = uint8_t(v >> 8); };
+        memcpy(header, "RIFF", 4); put32(4, 36 + g_dumpBytes); memcpy(header + 8, "WAVEfmt ", 8);
+        put32(16, 16); put16(20, 1); put16(22, 2); put32(24, SampleRate); put32(28, SampleRate * 4); put16(32, 4); put16(34, 16);
+        memcpy(header + 36, "data", 4); put32(40, g_dumpBytes);
+        fseek(g_dump, 0, SEEK_SET);
+        fwrite(header, 1, sizeof(header), g_dump);
+        fseek(g_dump, 0, SEEK_END);
+    }
+
+    void Dump(const int16_t* samples, size_t bytes)
+    {
+        static const char* const path = getenv("COD3_AUDIODUMP");
+        if (path == nullptr) return;
+        if (g_dump == nullptr)
+        {
+            g_dump = fopen(path, "wb");
+            if (g_dump == nullptr) return;
+            DumpHeader();
+        }
+        fwrite(samples, 1, bytes, g_dump);
+        g_dumpBytes += uint32_t(bytes);
+        if (++g_dumpFrames % 64 == 0) { DumpHeader(); fflush(g_dump); }
+    }
 
     // A big endian float out of guest memory.
     float GuestFloat(uint32_t address)
@@ -168,6 +205,7 @@ bool Audio::SubmitFrame(uint32_t guestAddress)
             g_peak.store(loudest, std::memory_order_relaxed);
     }
 
+    Dump(block.samples, sizeof(block.samples));
     block.header.dwFlags &= ~WHDR_DONE;
     block.header.dwBufferLength = sizeof(block.samples);
     if (waveOutWrite(g_device, &block.header, sizeof(WAVEHDR)) != MMSYSERR_NOERROR)

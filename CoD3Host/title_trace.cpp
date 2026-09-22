@@ -6,9 +6,12 @@
 
 #include "kernel.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+
+#include <Windows.h>
 
 namespace
 {
@@ -125,4 +128,69 @@ PPC_FUNC(sub_823B8C60)
             Guest::Read32(base, dest), Guest::Read32(base, dest + 4));
         fflush(stdout);
     }
+}
+
+// --- the mixer ------------------------------------------------------------------
+// The audio callback sub_822C1108(mixer) runs on the render driver's
+// frame; with a mixer thread it wakes it and waits for it, without one it
+// mixes inline. The thread's loop is sub_822C0F90 and the mix itself
+// sub_822C0990(mixer, flag). Behind COD3_XMATRACE: how often each runs.
+
+namespace
+{
+    bool MixTrace()
+    {
+        static const bool wanted = getenv("COD3_XMATRACE") != nullptr;
+        return wanted;
+    }
+    uint64_t Now()
+    {
+        return uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+}
+
+extern "C" PPC_FUNC(__imp__sub_822C1108);
+PPC_FUNC(sub_822C1108)
+{
+    static int shown = 0;
+    static uint64_t lastSecond = 0, calls = 0;
+    const uint32_t mixer = ctx.r3.u32;
+    const uint32_t thread = Guest::Read32(base, mixer + 304);
+    calls++;
+    if (MixTrace() && shown++ < 8)
+        printf("title: audio callback mixer %08X thread %08X at %llu ms\n", mixer, thread, (unsigned long long)Now());
+    __imp__sub_822C1108(ctx, base);
+    if (MixTrace() && Now() - lastSecond >= 1000)
+    {
+        lastSecond = Now();
+        printf("title: audio callback %llu calls so far, thread %08X\n", (unsigned long long)calls, thread);
+        fflush(stdout);
+    }
+}
+
+extern "C" PPC_FUNC(__imp__sub_822C0990);
+PPC_FUNC(sub_822C0990)
+{
+    static uint64_t calls = 0, lastSecond = 0;
+    calls++;
+    const uint64_t started = Now();
+    __imp__sub_822C0990(ctx, base);
+    if (MixTrace() && Now() - lastSecond >= 1000)
+    {
+        lastSecond = Now();
+        printf("title: mix %llu calls so far, the last took %llu ms, flag %u\n", (unsigned long long)calls, (unsigned long long)(Now() - started), ctx.r4.u32);
+        fflush(stdout);
+    }
+}
+
+// The mixer thread's function, sub_822C0F90(a, b): loops while b is zero.
+extern "C" PPC_FUNC(__imp__sub_822C0F90);
+PPC_FUNC(sub_822C0F90)
+{
+    static int shown = 0;
+    const uint32_t a = ctx.r3.u32, b = ctx.r4.u32;
+    if (MixTrace() && shown < 20) printf("title: mixer thread function (%08X, %08X) enters on thread %lu at %llu ms\n", a, b, GetCurrentThreadId(), (unsigned long long)Now());
+    __imp__sub_822C0F90(ctx, base);
+    if (MixTrace() && shown++ < 20) printf("title: mixer thread function (%08X, %08X) returns %u at %llu ms\n", a, b, ctx.r3.u32, (unsigned long long)Now());
+    fflush(stdout);
 }
