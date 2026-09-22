@@ -40,6 +40,7 @@ add_executable(CoD3 WIN32
     "timeline.cpp"
     "render_d3d11.cpp"
     "render_state.cpp"
+    "render_commands.cpp"
     "render_pipeline.cpp"
     "render_shaders.cpp"
     "render_resources.cpp"

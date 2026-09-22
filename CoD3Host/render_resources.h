@@ -139,6 +139,9 @@ namespace RenderResources
     // The ring is discarded and started over when full, which is safe: an
     // offset is used by the draw that made it and never again.
     uint32_t IndexAppend(const void* data, uint32_t bytes);
+    // Or the room mapped, to write into in place: null when it could not be.
+    uint8_t* IndexMap(uint32_t bytes, uint32_t& offset);
+    void IndexUnmap();
     ID3D11Buffer* IndexRing();
 
     // Constants, the same way, in whole 256 byte units for the offset

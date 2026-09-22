@@ -1,5 +1,6 @@
 #include "render_stats.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -7,6 +8,7 @@
 #include <mutex>
 
 #include <d3d11_1.h>
+#include <intrin.h>
 #include <wrl/client.h>
 
 using Microsoft::WRL::ComPtr;
@@ -77,6 +79,40 @@ void RenderStats::Initialize(ID3D11Device* device, ID3D11DeviceContext* context)
 
 RenderStats::Counters& RenderStats::Frame() { return g_frame; }
 
+const char* RenderStats::SectionName(Section section)
+{
+    static const char* const names[SectionCount] = { "state", "targets", "pipeline", "textures", "buffers", "constants", "bind", "indices", "draw", "log" };
+    return section < SectionCount ? names[section] : "?";
+}
+
+bool RenderStats::Profiled()
+{
+    static const bool wanted = getenv("COD3_RENDER_PROFILE") != nullptr;
+    return wanted;
+}
+
+namespace
+{
+    uint64_t g_sectionStarted = 0;
+    RenderStats::Section g_section = RenderStats::SectionState;
+}
+
+void RenderStats::Enter(RenderStats::Section section)
+{
+    if (!Profiled()) return;
+    const uint64_t now = __rdtsc();
+    if (g_sectionStarted != 0) g_frame.sectionCycles[g_section] += now - g_sectionStarted;
+    g_sectionStarted = now;
+    g_section = section;
+}
+
+void RenderStats::Leave()
+{
+    if (g_sectionStarted == 0) return;
+    g_frame.sectionCycles[g_section] += __rdtsc() - g_sectionStarted;
+    g_sectionStarted = 0;
+}
+
 void RenderStats::BeginFrame()
 {
     g_frameStarted = std::chrono::steady_clock::now();
@@ -115,7 +151,9 @@ void RenderStats::EndFrame()
     g_second.shaderSwitches += g_frame.shaderSwitches; g_second.textureSwitches += g_frame.textureSwitches;
     g_second.pipelineSwitches += g_frame.pipelineSwitches; g_second.targetSwitches += g_frame.targetSwitches;
     g_second.textureUploads += g_frame.textureUploads; g_second.bufferUploads += g_frame.bufferUploads;
+    g_second.constantUploads += g_frame.constantUploads; g_second.mergeable += g_frame.mergeable;
     g_second.uploadBytes += g_frame.uploadBytes; g_second.streamBytes += g_frame.streamBytes;
+    for (uint32_t i = 0; i < SectionCount; i++) g_second.sectionCycles[i] += g_frame.sectionCycles[i];
     g_second.drawNanoseconds += g_frame.drawNanoseconds; g_second.resolveNanoseconds += g_frame.resolveNanoseconds; g_second.presentNanoseconds += g_frame.presentNanoseconds;
     g_frame = Counters();
 
@@ -132,8 +170,19 @@ void RenderStats::EndFrame()
     s.shaderSwitches = g_second.shaderSwitches / frames; s.textureSwitches = g_second.textureSwitches / frames;
     s.pipelineSwitches = g_second.pipelineSwitches / frames; s.targetSwitches = g_second.targetSwitches / frames;
     s.textureUploads = g_second.textureUploads / frames; s.bufferUploads = g_second.bufferUploads / frames;
+    s.constantUploads = g_second.constantUploads / frames; s.mergeable = g_second.mergeable / frames;
     s.uploadKilobytes = float(g_second.uploadBytes / 1024.0 / frames); s.streamKilobytes = float(g_second.streamBytes / 1024.0 / frames);
     s.frames = g_frames;
+    if (Profiled())
+    {
+        // Cycles into time by the draw path's own clock: the sections
+        // together are what drawNanoseconds measured.
+        uint64_t cycles = 0;
+        for (uint32_t i = 0; i < SectionCount; i++) cycles += g_second.sectionCycles[i];
+        const double draws = std::max(1.0, double(g_second.draws + g_second.skipped));
+        const double perCycle = cycles != 0 ? double(g_second.drawNanoseconds) / double(cycles) : 0.0;
+        for (uint32_t i = 0; i < SectionCount; i++) s.sectionMicroseconds[i] = float(g_second.sectionCycles[i] * perCycle / 1000.0 / draws);
+    }
     {
         std::lock_guard<std::mutex> lock(g_snapshotMutex);
         g_snapshot = s;
@@ -177,5 +226,13 @@ void RenderStats::Tick()
         s.draws, s.skipped, s.triangles / 1000.0f, s.resolves,
         s.shaderSwitches, s.textureSwitches, s.pipelineSwitches, s.targetSwitches,
         s.textureUploads, s.bufferUploads, s.uploadKilobytes, s.streamKilobytes);
+    if (Profiled())
+    {
+        float total = 0;
+        for (uint32_t i = 0; i < SectionCount; i++) total += s.sectionMicroseconds[i];
+        printf("profile: %.2f us a draw:", total);
+        for (uint32_t i = 0; i < SectionCount; i++) printf(" %s %.2f", SectionName(Section(i)), s.sectionMicroseconds[i]);
+        printf("; %.0f constant blocks, %.0f mergeable draws a frame\n", s.constantUploads, s.mergeable);
+    }
     fflush(stdout);
 }

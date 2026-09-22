@@ -1,15 +1,31 @@
 #pragma once
 
 // A draw's state, read once from the register file into plain fields, and
-// the command the backend runs it as.
+// the PC render command it becomes.
 //
 // The title's driver leaves the register file describing the draw it is
 // about to make: the surface, the depth and blend control, the scissor,
 // the fetch constants of the programs' inputs. Snapshot is those words,
 // nothing decoded from them but the fields the backend keys its caches by.
 // Reading them is thirty relaxed loads; everything after works on the copy.
+//
+// DrawCommand is the other side: what the PC renderer draws, in its own
+// terms. Programs and pipeline states by integer handle into the caches,
+// resources by the views the caches own, the scissor and the viewport in
+// host pixels, the constants already in the ring at offsets, the indices
+// already in the index ring. Nothing in it is a console register, and the
+// executor that runs it (render_d3d11.cpp) touches nothing but the
+// Direct3D context and what it remembers having set on it.
 
 #include <cstdint>
+
+struct ID3D11ShaderResourceView;
+struct ID3D11SamplerState;
+struct ID3D11RenderTargetView;
+struct ID3D11DepthStencilView;
+struct ID3D11Texture2D;
+struct ID3D11VertexShader;
+struct ID3D11PixelShader;
 
 namespace RenderState
 {
@@ -103,34 +119,139 @@ namespace RenderState
     void ReadTextureFetch(uint32_t slot, uint32_t words[6]);
     void ReadVertexFetch(uint32_t slot, uint32_t& word0, uint32_t& word1);
 
-    // --- the command -------------------------------------------------------------
+    // The registers of a resolve: the copy that ends a pass.
+    struct ResolveSnapshot
+    {
+        uint32_t control = 0;          // source, command, clears
+        uint32_t destBase = 0;         // physical, where the title will sample it
+        uint32_t destInfo = 0;
+        uint32_t pitch = 0;
+        uint32_t scissorTopLeft = 0, scissorBottomRight = 0;
+        uint32_t colorInfo[4] = {};
+        uint32_t depthInfo = 0;
+        uint32_t colorClearValue = 0, depthClearValue = 0;
+    };
+    void ReadResolve(ResolveSnapshot& out);
 
-    // Everything the backend binds is an integer handle into one of its
-    // caches, so a command compares to what is bound field by field and
-    // only what changed is set on the context. Handle 0 is "none". The
-    // textures, samplers and vertex buffers are bound by slot as the
-    // programs name them, through the same comparison, and are not here.
+    // --- the commands -------------------------------------------------------------
+
     using Handle = uint32_t;
 
+    // The programs' own constants (b2 in the translated HLSL): the viewport
+    // the vertex program folds in, the alpha test, and each texture's size
+    // and swizzle. The same layout the programs declare.
+    struct DrawConstants
+    {
+        float viewportScale[4];
+        float viewportOffset[4];
+        float targetSize[4];
+        uint32_t flags[4];
+        float textureSize[32][4];
+        uint32_t textureAdjustment[32][4];
+    };
+
+    // One draw, ready to run. Handles are indices into the caches; the
+    // views are the ones the caches own and keep, compared by identity
+    // with what the context has. Everything the draw streams (indices,
+    // constants) is in a ring already, at the offsets given here.
     struct DrawCommand
     {
+        // The programs.
         Handle vertexShader = 0, pixelShader = 0;
-        Handle blend = 0, depth = 0, rasterizer = 0;
-        Handle colorTarget[4] = {}, depthTarget = 0;
-        uint32_t targetCount = 0;
-        uint32_t topology = 0;         // D3D11_PRIMITIVE_TOPOLOGY
+        ID3D11VertexShader* vs = nullptr;
+        ID3D11PixelShader* ps = nullptr;
         bool rectangles = false;       // through the rectangle list geometry program
-        bool depthOnly = false;
-        uint32_t stencilReference = 0;
-        float blendFactor[4] = {};
-        int32_t scissor[4] = {};       // left, top, right, bottom in host pixels
-        uint32_t targetWidth = 0, targetHeight = 0;
+        bool opaque = false;           // no blending: the flat debug view may replace the pixel program
 
-        // Indices, in the index ring, or none: a plain draw of indexCount.
-        uint32_t indexCount = 0;
-        uint32_t indexRingOffset = 0;
+        // The pipeline.
+        Handle blend = 0, depth = 0, rasterizer = 0;
+        float blendFactor[4] = {};
+        uint32_t stencilReference = 0;
+        uint32_t topology = 0;         // D3D11_PRIMITIVE_TOPOLOGY
+
+        // The targets, and their own resource views so the executor can
+        // unbind a surface it is about to draw into.
+        ID3D11RenderTargetView* targets[4] = {};
+        ID3D11ShaderResourceView* targetResources[4] = {};
+        ID3D11DepthStencilView* depthView = nullptr;
+        ID3D11ShaderResourceView* depthResource = nullptr;
+        ID3D11Texture2D* colorTexture = nullptr;   // for the frame log's dump
+        ID3D11Texture2D* depthTexture = nullptr;
+        uint32_t targetCount = 0;
+        uint32_t targetWidth = 0, targetHeight = 0;   // the viewport
+        int32_t scissor[4] = {};       // left, top, right, bottom, host pixels
+
+        // The textures and samplers, by the slots the programs name.
+        struct Texture              // plain, so the array is not zeroed for every draw
+        {
+            uint8_t stage;             // 0 pixel, 1 vertex
+            uint8_t slot, samplerSlot;
+            ID3D11ShaderResourceView* view;
+            ID3D11SamplerState* sampler;
+        };
+        static constexpr uint32_t MaxTextures = 64;
+        Texture textures[MaxTextures];
+        uint32_t textureCount = 0;
+
+        // The vertex buffers, raw, by fetch slot (t32 upwards in the vertex program).
+        struct Buffer
+        {
+            uint8_t slot;
+            ID3D11ShaderResourceView* view;
+        };
+        static constexpr uint32_t MaxBuffers = 32;
+        Buffer buffers[MaxBuffers];
+        uint32_t bufferCount = 0;
+
+        // The constants. With the ring: the float files' and the draw
+        // block's offsets in it, in bytes, to bind. Without (no offsetting
+        // on the device): the whole files and the block, to upload when
+        // marked changed.
+        bool ring = false;
+        uint32_t floatAt[2] = {}, floatCount[2] = {};   // bytes, float4s
+        uint32_t drawAt = 0, drawBytes = 0;
+        const uint32_t* floatFile[2] = {};              // 1024 words each, when !ring and changed
+        bool floatChanged[2] = {};
+        const DrawConstants* drawConstants = nullptr;   // when !ring and changed
+        bool drawChanged = false;
+        const uint32_t* bools = nullptr;                // 40 words, when changed
+        bool boolsChanged = false;
+
+        // The geometry: from the index ring, or a plain draw of indexCount.
         bool indexed = false;
         bool indices32 = false;
+        uint32_t indexCount = 0;
+        uint32_t indexRingOffset = 0;   // bytes
         int32_t baseVertex = 0;
+        uint32_t triangles = 0;         // for the counters
+
+        // Housekeeping.
+        bool bindingsLost = false;      // a cache dropped objects: forget what is bound first
+        bool logged = false;            // the frame log wants the target after the draw
+    };
+
+    // A resolve, ready to run: a copy of a target into the surface the
+    // title will sample, and the clears that come with it.
+    struct ResolveCommand
+    {
+        bool copy = false;
+        ID3D11ShaderResourceView* source = nullptr;
+        uint32_t sourceWidth = 0, sourceHeight = 0, sourceSamples = 1;
+        bool fromDepth = false;
+        ID3D11RenderTargetView* destination = nullptr;
+        ID3D11ShaderResourceView* destinationResource = nullptr;
+        float x0 = 0, y0 = 0;           // the source rectangle, host pixels
+        uint32_t width = 0, height = 0; // and its size, the destination's
+
+        bool colorClear = false;
+        ID3D11RenderTargetView* clearTarget = nullptr;
+        float clearColor[4] = {};
+        int32_t clearRect[4] = {};
+        bool depthClear = false;
+        ID3D11DepthStencilView* clearDepth = nullptr;
+        float clearDepthValue = 1.0f;
+        uint8_t clearStencilValue = 0;
+
+        bool bindingsLost = false;
     };
 }

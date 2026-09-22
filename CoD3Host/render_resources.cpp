@@ -980,6 +980,14 @@ uint32_t RenderResources::IndexAppend(const void* data, uint32_t bytes)
     return g_indexRing.Append(data, bytes, 4);
 }
 
+uint8_t* RenderResources::IndexMap(uint32_t bytes, uint32_t& offset)
+{
+    g_indexBytes.fetch_add(bytes, std::memory_order_relaxed);
+    return g_indexRing.Map(bytes, 4, offset);
+}
+
+void RenderResources::IndexUnmap() { g_indexRing.Unmap(); }
+
 ID3D11Buffer* RenderResources::IndexRing() { return g_indexRing.buffer.Get(); }
 
 bool RenderResources::ConstantReserve(uint32_t bytes)

@@ -72,3 +72,20 @@ void RenderState::ReadVertexFetch(uint32_t slot, uint32_t& word0, uint32_t& word
     word0 = Reg(FetchConstants + slot * 2);
     word1 = Reg(FetchConstants + slot * 2 + 1);
 }
+
+void RenderState::ReadResolve(ResolveSnapshot& out)
+{
+    out.control = Reg(CopyControl);
+    out.destBase = Reg(CopyDestBase);
+    out.destInfo = Reg(CopyDestInfo);
+    out.pitch = Reg(SurfaceInfo) & 0x3FFF;
+    out.scissorTopLeft = Reg(ScissorTopLeft);
+    out.scissorBottomRight = Reg(ScissorBottomRight);
+    out.colorInfo[0] = Reg(ColorInfo0);
+    out.colorInfo[1] = Reg(ColorInfo1);
+    out.colorInfo[2] = Reg(ColorInfo2);
+    out.colorInfo[3] = Reg(ColorInfo3);
+    out.depthInfo = Reg(DepthInfo);
+    out.colorClearValue = Reg(CopyColorClear);
+    out.depthClearValue = Reg(CopyDepthClear);
+}

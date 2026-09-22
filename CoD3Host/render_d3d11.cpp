@@ -1,22 +1,24 @@
 // The Direct3D 11 renderer: the device, the draw, the resolve and the
 // present. See render.h for where it sits.
 //
-// A draw is: the registers read into a Snapshot, the state turned into
-// handles from the caches, and the handles compared with what the context
-// already has, so that a run of draws that share their programs, targets
-// and textures costs a few compares and a DrawIndexed each. Nothing here
-// allocates, locks or creates a Direct3D object on a draw that has been
-// seen before.
+// This is the executor: it runs the commands the PC render layer
+// (render_commands.cpp) makes, and knows nothing of the console. A
+// DrawCommand names what to bind by handle and view; each is compared with
+// what the context already has and set only when it differs, so that a
+// run of draws sharing their programs, targets and textures costs a few
+// compares and a DrawIndexed each. Nothing here allocates, locks or
+// creates a Direct3D object on a draw.
 
 #include "render.h"
 #include "render_state.h"
+#include "render_commands.h"
+#include "render_internal.h"
 #include "render_pipeline.h"
 #include "render_shaders.h"
 #include "render_resources.h"
 #include "render_stats.h"
 #include "overlay.h"
 #include "settings.h"
-#include "gpu.h"
 #include "kernel.h"
 
 #include <algorithm>
@@ -91,11 +93,9 @@ namespace
         ID3D11ShaderResourceView* vertexBuffers[96] = {};
         bool indices32 = false;
         bool indexBufferSet = false;
-        uint32_t floatAt[2] = { 0xFFFFFFFFu, 0xFFFFFFFFu };   // the float files' ring offsets
-        uint32_t floatCount[2] = { 0, 0 };                     // and how many float4s went up there
-        Handle floatProgram[2] = { 0, 0 };                     // packed for this program
+        uint32_t floatAt[2] = { 0xFFFFFFFFu, 0xFFFFFFFFu };   // the constant ring offsets bound
+        uint32_t floatCount[2] = { 0, 0 };
         uint32_t drawAt = 0xFFFFFFFFu;
-        uint32_t boundFloatAt[2] = { 0xFFFFFFFFu, 0xFFFFFFFFu }, boundFloatCount[2] = { 0, 0 }, boundDrawAt = 0xFFFFFFFFu;
         bool constantsBound = false;
     };
     Bound g_bound;
@@ -105,18 +105,8 @@ namespace
         g_bound = Bound();
     }
 
-    // The programs' constants: the same layout the translated HLSL declares.
-    struct DrawConstants
-    {
-        float viewportScale[4];
-        float viewportOffset[4];
-        float targetSize[4];
-        uint32_t flags[4];
-        float textureSize[32][4];
-        uint32_t textureAdjustment[32][4];
-    };
-    DrawConstants g_constants{};
-    DrawConstants g_lastConstants{};
+    // The constant buffers: the booleans, and the float files and the
+    // draw block for a device without constant buffer offsetting.
     ComPtr<ID3D11Buffer> g_boolConstants;
     ComPtr<ID3D11Buffer> g_floatConstants[2];   // when the ring is not available
     ComPtr<ID3D11Buffer> g_drawConstants;
@@ -385,7 +375,7 @@ namespace
             desc.ByteWidth = 4096;
             g_device->CreateBuffer(&desc, nullptr, &g_floatConstants[0]);
             g_device->CreateBuffer(&desc, nullptr, &g_floatConstants[1]);
-            desc.ByteWidth = (sizeof(DrawConstants) + 15) & ~15u;
+            desc.ByteWidth = (sizeof(RenderState::DrawConstants) + 15) & ~15u;
             g_device->CreateBuffer(&desc, nullptr, &g_drawConstants);
         }
         RenderShaders::Precompile();
@@ -617,23 +607,6 @@ namespace
 
     // --- the draw ------------------------------------------------------------------------------------
 
-    enum SkipReason { SkipBackendOff, SkipPrimitive, SkipProgram, SkipProgramBuilding, SkipProgramOnRequest, SkipPitch, SkipTarget, SkipScissor, SkipBuffer, SkipCount };
-    const char* const SkipNames[SkipCount] = { "render backend off", "primitive type", "program", "program building", "program skipped on request", "no surface pitch", "no target", "empty scissor", "vertex buffer" };
-    uint64_t g_skips[SkipCount] = {};
-
-    void Skip(SkipReason reason)
-    {
-        g_skips[reason]++;
-        RenderStats::Frame().skipped++;
-    }
-
-    // Scratch for a draw's indices, kept between draws: no allocation once
-    // it has grown to the largest draw.
-    std::vector<uint32_t> g_indices32;
-    std::vector<uint16_t> g_indices16;
-
-    inline uint32_t BSwap16(uint16_t v) { return uint16_t((v >> 8) | (v << 8)); }
-
     struct Timed
     {
         uint64_t& into;
@@ -669,183 +642,36 @@ namespace
                 if (g_bound.textures[stage][slot] == view) BindTexture(stage, slot, nullptr);
     }
 
-    void DrawLocked(uint32_t initiator, uint32_t indexBase)
+    // The command on the context: each thing it names compared with what
+    // is bound and set only when it differs, then the one draw call.
+    void ExecuteDraw(const RenderState::DrawCommand& command)
     {
-        RenderState::Snapshot state;
-        RenderState::Read(initiator, indexBase, state);
-        if (state.indexCount == 0) return;
-        if (state.modeControl == 0) { Skip(SkipBackendOff); return; }
-        // EDRAM mode 5 is drawn as colour and depth like mode 4: Xenia calls
-        // it "depth only", but this title draws its ground, tents and jeeps
-        // in it with programs that fetch the shadow maps.
-
-        D3D11_PRIMITIVE_TOPOLOGY topology;
-        bool rectangles = false, convertQuads = false, convertFan = false;
-        switch (state.primitive)
-        {
-        case RenderState::Points:
-        {
-            // The host draws a point as one pixel; a wider one is noted.
-            topology = D3D11_PRIMITIVE_TOPOLOGY_POINTLIST;
-            static int announced = 0;
-            if (((state.pointSize & 0xFFFF) > 8 || (state.pointSize >> 16) > 8) && announced++ < 4)
-                printf("render: a point list of %u with a point size of %u by %u eighths of a pixel, drawn as pixels\n", state.indexCount, state.pointSize & 0xFFFF, state.pointSize >> 16);
-            break;
-        }
-        case RenderState::Lines: topology = D3D11_PRIMITIVE_TOPOLOGY_LINELIST; break;
-        case RenderState::LineStrip: topology = D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP; break;
-        case RenderState::Triangles: topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST; break;
-        case RenderState::TriangleFan: topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST; convertFan = true; break;
-        case RenderState::TriangleStrip: topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP; break;
-        case RenderState::Rectangles: topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST; rectangles = true; break;
-        case RenderState::Quads: topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST; convertQuads = true; break;
-        default: Skip(SkipPrimitive); return;
-        }
-
-        // The programs: the stage's current ones, ready or not.
-        const Handle vsHandle = RenderShaders::Current(false), psHandle = RenderShaders::Current(true);
-        const RenderShaders::Program* vs = RenderShaders::Get(vsHandle);
-        const RenderShaders::Program* ps = RenderShaders::Get(psHandle);
-        if (vs == nullptr || ps == nullptr) { Skip(SkipProgram); return; }
-        const RenderShaders::State vsState = vs->state.load(std::memory_order_acquire);
-        const RenderShaders::State psState = ps->state.load(std::memory_order_acquire);
-        if (vsState != RenderShaders::State::Ready || psState != RenderShaders::State::Ready)
-        {
-            // A program that failed is said the first time a draw wants it:
-            // that is what a missing thing on screen comes from.
-            for (const RenderShaders::Program* program : { vs, ps })
-            {
-                if (program->state.load(std::memory_order_acquire) != RenderShaders::State::Failed || program->announced) continue;
-                const_cast<RenderShaders::Program*>(program)->announced = true;
-                printf("render: a draw wants %s program %016llx, which could not be built: %s\n",
-                    program->pixel ? "pixel" : "vertex", (unsigned long long)program->hash, program->problem.empty() ? "the compile failed" : program->problem.c_str());
-                fflush(stdout);
-            }
-            Skip(vsState == RenderShaders::State::Failed || psState == RenderShaders::State::Failed ? SkipProgram : SkipProgramBuilding);
-            return;
-        }
-        if (vs->skipped) { Skip(SkipProgramOnRequest); return; }
-        if (state.pitch == 0) { Skip(SkipPitch); return; }
-
-        // The rows the scissor reaches, so the surfaces are tall enough
-        // before they are looked up.
-        {
-            const uint32_t tl = state.scissorTopLeft, br = state.scissorBottomRight;
-            const int32_t offsetY = (tl & 0x80000000u) ? 0 : (int32_t(state.windowOffset << 1) >> 17);
-            const int32_t bottom = int32_t((br >> 16) & 0x7FFF) + offsetY;
-            if (bottom > 0 && RenderResources::EnsureRows(state.pitch, uint32_t(bottom))) ForgetBindings();
-        }
-
-        // Targets: only the ones the pixel program writes, each once: the
-        // title leaves the other target registers pointing at the same
-        // tiles, and the host refuses one surface bound twice.
-        ID3D11RenderTargetView* views[4] = {};
-        ID3D11Texture2D* colorTexture = nullptr;
-        uint32_t targetCount = 0;
-        for (uint32_t i = 0; i < 4; i++)
-        {
-            if (((ps->colourTargets >> i) & 1) == 0) continue;
-            if (((state.colorMask >> (i * 4)) & 0xF) == 0) continue;
-            const RenderResources::ColorTarget* target = RenderResources::ColorTargetOf(RenderResources::ColorTargetFor(state.colorInfo[i], state.pitch));
-            if (target == nullptr) continue;
-            bool duplicate = false;
-            for (uint32_t j = 0; j < i; j++) if (views[j] == target->view) duplicate = true;
-            if (duplicate) continue;
-            views[i] = target->view;
-            if (i == 0) colorTexture = target->texture;
-            targetCount = i + 1;
-        }
-        ID3D11DepthStencilView* depthView = nullptr;
-        ID3D11Texture2D* depthTexture = nullptr;
-        if ((state.depthControl & 3) != 0)
-        {
-            if (const RenderResources::DepthTarget* depth = RenderResources::DepthTargetOf(RenderResources::DepthTargetFor(state.depthInfo, state.pitch)))
-            {
-                depthView = depth->view;
-                depthTexture = depth->texture;
-            }
-        }
-        if (targetCount == 0 && depthView == nullptr)
-        {
-            // The first few, with their state: what a draw with nowhere to
-            // draw is asking for.
-            static int announced = 0;
-            if (announced++ < 6)
-            {
-                printf("render: draw with no target: primitive %u, %u indices, mode %u, colour mask %08X, depth control %08X, targets written %X, colour info %08X, depth info %08X, vs %016llx ps %016llx\n",
-                    state.primitive, state.indexCount, state.modeControl, state.colorMask, state.depthControl, ps->colourTargets, state.colorInfo[0], state.depthInfo,
-                    (unsigned long long)vs->hash, (unsigned long long)ps->hash);
-                fflush(stdout);
-            }
-            Skip(SkipTarget);
-            return;
-        }
-
-        // The target's host size, and the scissor in it. Bit 31 of the
-        // scissor says the window offset does not apply.
-        uint32_t targetWidth, targetHeight;
-        float scaleX, scaleY;
-        RenderResources::TargetSize(state.pitch, 4, targetWidth, targetHeight, scaleX, scaleY);
-        D3D11_RECT scissor;
-        {
-            const uint32_t tl = state.scissorTopLeft, br = state.scissorBottomRight;
-            const int32_t offsetX = (tl & 0x80000000u) ? 0 : (int32_t(state.windowOffset << 17) >> 17);
-            const int32_t offsetY = (tl & 0x80000000u) ? 0 : (int32_t(state.windowOffset << 1) >> 17);
-            scissor.left = std::max(0L, LONG(std::lround((int(tl & 0x7FFF) + offsetX) * scaleX)));
-            scissor.top = std::max(0L, LONG(std::lround((int((tl >> 16) & 0x7FFF) + offsetY) * scaleY)));
-            scissor.right = std::min(LONG(targetWidth), LONG(std::lround((int(br & 0x7FFF) + offsetX) * scaleX)));
-            scissor.bottom = std::min(LONG(targetHeight), LONG(std::lround((int((br >> 16) & 0x7FFF) + offsetY) * scaleY)));
-            if (scissor.right <= scissor.left || scissor.bottom <= scissor.top) { Skip(SkipScissor); return; }
-        }
-
-        // The pipeline states, by handle.
-        const Handle rasterizer = RenderPipeline::Rasterizer(state.suScModeControl, true, rectangles);
-        const Handle blend = RenderPipeline::Blend(state.blendControl, state.colorMask);
-        const Handle depthState = RenderPipeline::Depth(depthView ? state.depthControl : 0, state.stencilRefMask);
-
-        // The draw's constants.
-        DrawConstants& constants = g_constants;
-        constants.viewportScale[0] = state.viewport[0]; constants.viewportOffset[0] = state.viewport[1];
-        constants.viewportScale[1] = state.viewport[2]; constants.viewportOffset[1] = state.viewport[3];
-        constants.viewportScale[2] = state.viewport[4]; constants.viewportOffset[2] = state.viewport[5];
-        constants.targetSize[0] = float(state.pitch);
-        constants.targetSize[1] = float(targetHeight) / scaleY;
-        constants.targetSize[2] = 1.0f / float(state.pitch);
-        constants.targetSize[3] = scaleY / float(targetHeight);
-        constants.flags[0] = state.vteControl;
-        constants.flags[1] = ((state.colorControl >> 3) & 1) ? (state.colorControl & 7) : 7;   // the alpha test, or always
-        constants.flags[2] = state.alphaReference;
-        constants.flags[3] = uint32_t(ps->hash);
+        RenderStats::Enter(RenderStats::SectionBind);
+        if (command.bindingsLost) ForgetBindings();
 
         // The targets are set before the textures so a surface about to be
         // drawn into is not still bound as one.
         {
-            bool same = targetCount == g_bound.targetCount && depthView == g_bound.depthView;
-            for (uint32_t i = 0; same && i < 4; i++) same = views[i] == g_bound.targets[i];
+            bool same = command.targetCount == g_bound.targetCount && command.depthView == g_bound.depthView;
+            for (uint32_t i = 0; same && i < 4; i++) same = command.targets[i] == g_bound.targets[i];
             if (!same)
             {
-                for (uint32_t i = 0; i < 4; i++)
-                {
-                    if (views[i] == nullptr) continue;
-                    const RenderResources::ColorTarget* target = RenderResources::ColorTargetOf(RenderResources::ColorTargetFor(state.colorInfo[i], state.pitch));
-                    if (target != nullptr) UnbindResource(target->resource);
-                }
-                if (depthView != nullptr)
-                    if (const RenderResources::DepthTarget* depth = RenderResources::DepthTargetOf(RenderResources::DepthTargetFor(state.depthInfo, state.pitch)))
-                        UnbindResource(depth->resource);
-                g_context->OMSetRenderTargets(4, views, depthView);
-                memcpy(g_bound.targets, views, sizeof(views));
-                g_bound.depthView = depthView;
-                g_bound.targetCount = targetCount;
+                for (uint32_t i = 0; i < 4; i++) if (command.targets[i] != nullptr) UnbindResource(command.targetResources[i]);
+                if (command.depthView != nullptr) UnbindResource(command.depthResource);
+                g_context->OMSetRenderTargets(4, command.targets, command.depthView);
+                memcpy(g_bound.targets, command.targets, sizeof(g_bound.targets));
+                g_bound.depthView = command.depthView;
+                g_bound.targetCount = command.targetCount;
                 RenderStats::Frame().targetSwitches++;
             }
-            if (g_bound.viewportWidth != targetWidth || g_bound.viewportHeight != targetHeight)
+            if (g_bound.viewportWidth != command.targetWidth || g_bound.viewportHeight != command.targetHeight)
             {
-                D3D11_VIEWPORT viewport{ 0.0f, 0.0f, float(targetWidth), float(targetHeight), 0.0f, 1.0f };
+                const D3D11_VIEWPORT viewport{ 0.0f, 0.0f, float(command.targetWidth), float(command.targetHeight), 0.0f, 1.0f };
                 g_context->RSSetViewports(1, &viewport);
-                g_bound.viewportWidth = targetWidth;
-                g_bound.viewportHeight = targetHeight;
+                g_bound.viewportWidth = command.targetWidth;
+                g_bound.viewportHeight = command.targetHeight;
             }
+            const D3D11_RECT scissor{ command.scissor[0], command.scissor[1], command.scissor[2], command.scissor[3] };
             if (memcmp(&scissor, &g_bound.scissor, sizeof(scissor)) != 0)
             {
                 g_context->RSSetScissorRects(1, &scissor);
@@ -853,511 +679,164 @@ namespace
             }
         }
 
-        // Textures and samplers the programs sample: the pixel program's,
-        // and the vertex program's (the terrain's height map).
-        for (int stage = 0; stage < 2; stage++)
+        // The textures, samplers and vertex buffers, by slot.
+        for (uint32_t i = 0; i < command.textureCount; i++)
         {
-            const RenderShaders::Program* program = stage == 0 ? ps : vs;
-            for (const XenosHlsl::TextureFetch& fetch : program->textureFetches)
-            {
-                uint32_t words[6];
-                RenderState::ReadTextureFetch(fetch.slot, words);
-                uint32_t width = 1, height = 1;
-                bool resolved = false;
-                const Handle texture = RenderResources::TextureFor(words, width, height, resolved);
-                ID3D11ShaderResourceView* view;
-                if (resolved) view = RenderResources::ResolvedAt(words[1] & 0xFFFFF000u)->resource;
-                else view = RenderResources::TextureView(texture, fetch.dimension);
-                BindTexture(stage, fetch.slot, view);
-                BindSampler(stage, fetch.sampler, RenderPipeline::SamplerObject(RenderPipeline::Sampler(words)));
-                constants.textureSize[fetch.slot][0] = float(width);
-                constants.textureSize[fetch.slot][1] = float(height);
-                constants.textureSize[fetch.slot][2] = 1.0f / float(width);
-                constants.textureSize[fetch.slot][3] = 1.0f / float(height);
-                // A surface the resolve made is sampled by the title with red
-                // and blue swapped: the resolve wrote the console's memory in
-                // one byte order and the fetch reads it in another, and the
-                // swizzle in the fetch constant undoes that. The surfaces
-                // here never go through memory, so the swap is left out.
-                uint32_t swizzle = (words[3] >> 1) & 0xFFF;
-                if (resolved && swizzle == 0x60A && (words[1] & 0x3F) == 6) swizzle = 0x688;
-                constants.textureAdjustment[fetch.slot][0] = swizzle;
-                constants.textureAdjustment[fetch.slot][1] = (words[0] >> 2) & 0xFF;
-            }
+            const RenderState::DrawCommand::Texture& texture = command.textures[i];
+            BindTexture(texture.stage, texture.slot, texture.view);
+            BindSampler(texture.stage, texture.samplerSlot, texture.sampler);
+        }
+        for (uint32_t i = 0; i < command.bufferCount; i++)
+        {
+            const RenderState::DrawCommand::Buffer& buffer = command.buffers[i];
+            if (g_bound.vertexBuffers[buffer.slot] == buffer.view) continue;
+            g_bound.vertexBuffers[buffer.slot] = buffer.view;
+            g_context->VSSetShaderResources(32 + buffer.slot, 1, &buffer.view);
         }
 
-        // The vertex buffers the vertex program fetches.
-        for (const XenosHlsl::VertexFetch& fetch : vs->vertexFetches)
+        // The constants: the booleans when they changed, the float files
+        // and the draw block where the ring has them, bound again whenever
+        // an offset moved (the binding carries it); or, without the ring,
+        // uploaded in place and bound once.
+        if (command.boolsChanged) g_context->UpdateSubresource(g_boolConstants.Get(), 0, nullptr, command.bools, 0, 0);
+        if (command.ring)
         {
-            uint32_t word0, word1;
-            RenderState::ReadVertexFetch(fetch.slot, word0, word1);
-            // The programs turn every word round on the way in, which is the
-            // console's usual byte order for a buffer; another would need a
-            // conversion on upload, and is noted if it ever comes.
-            if ((word1 & 3) != 2)
+            if (!g_bound.constantsBound || g_bound.floatAt[0] != command.floatAt[0] || g_bound.floatAt[1] != command.floatAt[1] ||
+                g_bound.drawAt != command.drawAt || g_bound.floatCount[0] != command.floatCount[0] || g_bound.floatCount[1] != command.floatCount[1])
             {
-                static int announced = 0;
-                if (announced++ < 4) printf("render: a vertex buffer in byte order %u, drawn as order 2\n", word1 & 3);
-            }
-            const Handle buffer = RenderResources::VertexBufferFor(word0 & ~3u, ((word1 >> 2) & 0xFFFFFF) * 4, 2);
-            ID3D11ShaderResourceView* view = RenderResources::VertexBufferView(buffer);
-            if (view == nullptr) { Skip(SkipBuffer); return; }
-            if (g_bound.vertexBuffers[fetch.slot] != view)
-            {
-                g_bound.vertexBuffers[fetch.slot] = view;
-                g_context->VSSetShaderResources(32 + fetch.slot, 1, &view);
+                ID3D11Buffer* ringBuffer = RenderResources::ConstantRing();
+                ID3D11Buffer* bools = g_boolConstants.Get();
+                for (int stage = 0; stage < 2; stage++)
+                {
+                    ID3D11Buffer* buffers[3] = { ringBuffer, bools, ringBuffer };
+                    const UINT firsts[3] = { command.floatAt[stage] / 16, 0, command.drawAt / 16 };
+                    const UINT counts[3] = { command.floatCount[stage], 16, command.drawBytes / 16 };
+                    if (stage == 0) g_context1->VSSetConstantBuffers1(0, 3, buffers, firsts, counts);
+                    else g_context1->PSSetConstantBuffers1(0, 3, buffers, firsts, counts);
+                }
+                g_bound.floatAt[0] = command.floatAt[0]; g_bound.floatAt[1] = command.floatAt[1];
+                g_bound.floatCount[0] = command.floatCount[0]; g_bound.floatCount[1] = command.floatCount[1];
+                g_bound.drawAt = command.drawAt;
+                g_bound.constantsBound = true;
             }
         }
-
-        // Constants: the float files, the booleans, and the draw's own.
-        // A file goes up when something the program reads was written
-        // since it last went up, and only as much of it as the program
-        // reads: the title writes a few constants before most draws, and
-        // the whole four kilobytes a draw was most of what a draw cost.
-        // The blocks go through the ring in one map, bound at offsets.
+        else
         {
-            const bool ring = RenderResources::ConstantOffsetsAvailable();
-            const std::atomic<uint32_t>* file = Gpu::RegisterFile();
-            // What has been written and not yet uploaded, in float4s.
-            static uint32_t pendingFirst[2] = { 0, 0 }, pendingEnd[2] = { 256, 256 };
-            for (uint32_t range = 0; range < 2; range++)
+            for (int stage = 0; stage < 2; stage++)
+                if (command.floatChanged[stage]) g_context->UpdateSubresource(g_floatConstants[stage].Get(), 0, nullptr, command.floatFile[stage], 0, 0);
+            if (command.drawChanged) g_context->UpdateSubresource(g_drawConstants.Get(), 0, nullptr, command.drawConstants, 0, 0);
+            if (!g_bound.constantsBound)
             {
-                uint32_t spanFirst, spanEnd;
-                if (!Gpu::TakeConstantSpan(range, spanFirst, spanEnd)) continue;
-                pendingFirst[range] = std::min(pendingFirst[range], spanFirst / 4);
-                pendingEnd[range] = std::max(pendingEnd[range], (spanEnd + 3) / 4);
-            }
-            {
-                uint32_t spanFirst, spanEnd;
-                if (Gpu::TakeConstantSpan(2, spanFirst, spanEnd) || !g_bound.constantsBound)
-                {
-                    uint32_t words[40];
-                    for (uint32_t i = 0; i < 40; i++) words[i] = file[0x4900 + i].load(std::memory_order_relaxed);
-                    g_context->UpdateSubresource(g_boolConstants.Get(), 0, nullptr, words, 0, 0);
-                }
-            }
-            const bool drawChanged = memcmp(&g_lastConstants, &constants, sizeof(constants)) != 0;
-            if (ring)
-            {
-                constexpr uint32_t DrawBytes = (sizeof(constants) + 255) & ~255u;
-                uint32_t need[2], bytes = 0;
-                bool upload[2];
-                const RenderShaders::Program* programs[2] = { vs, ps };
-                for (uint32_t stage = 0; stage < 2; stage++)
-                {
-                    const std::vector<uint16_t>& map = programs[stage]->constantMap;
-                    const uint32_t count = map.empty() ? 256 : uint32_t(map.size());
-                    need[stage] = std::min(256u, std::max(16u, (count + 15) & ~15u));
-                    // The file's span the program reads, for the dirty check.
-                    const uint32_t readFirst = map.empty() ? 0 : map.front(), readEnd = map.empty() ? 256 : map.back() + 1u;
-                    const bool dirty = pendingFirst[stage] < readEnd && pendingEnd[stage] > readFirst;
-                    upload[stage] = g_bound.floatAt[stage] == 0xFFFFFFFFu || g_bound.floatProgram[stage] != (stage == 0 ? vsHandle : psHandle) || dirty;
-                    if (upload[stage]) bytes += need[stage] * 16;
-                }
-                bool drawUpload = drawChanged || g_bound.drawAt == 0xFFFFFFFFu;
-                if (drawUpload) bytes += DrawBytes;
-                if (bytes != 0)
-                {
-                    if (RenderResources::ConstantReserve(need[0] * 16 + need[1] * 16 + DrawBytes))
-                    {
-                        // A wrap: everything remembered is in the old buffer.
-                        g_bound.floatAt[0] = g_bound.floatAt[1] = g_bound.drawAt = 0xFFFFFFFFu;
-                        upload[0] = upload[1] = drawUpload = true;
-                        bytes = need[0] * 16 + need[1] * 16 + DrawBytes;
-                    }
-                    uint32_t base;
-                    uint8_t* to = RenderResources::ConstantMap(bytes, base);
-                    if (to == nullptr) { Skip(SkipBuffer); return; }
-                    uint32_t at = 0;
-                    for (uint32_t stage = 0; stage < 2; stage++)
-                    {
-                        if (!upload[stage]) continue;
-                        const uint32_t first = stage == 0 ? 0x4000 : 0x4400;
-                        uint32_t* words = reinterpret_cast<uint32_t*>(to + at);
-                        const std::vector<uint16_t>& map = programs[stage]->constantMap;
-                        if (map.empty())
-                            for (uint32_t i = 0; i < 1024; i++) words[i] = file[first + i].load(std::memory_order_relaxed);
-                        else
-                            for (size_t i = 0; i < map.size(); i++)
-                            {
-                                const std::atomic<uint32_t>* from = file + first + map[i] * 4u;
-                                words[i * 4 + 0] = from[0].load(std::memory_order_relaxed);
-                                words[i * 4 + 1] = from[1].load(std::memory_order_relaxed);
-                                words[i * 4 + 2] = from[2].load(std::memory_order_relaxed);
-                                words[i * 4 + 3] = from[3].load(std::memory_order_relaxed);
-                            }
-                        g_bound.floatAt[stage] = base + at;
-                        g_bound.floatCount[stage] = need[stage];
-                        g_bound.floatProgram[stage] = stage == 0 ? vsHandle : psHandle;
-                        at += need[stage] * 16;
-                        // Nothing is pending after an upload: a change of
-                        // program uploads anyway, and the same program only
-                        // needs what is written from here on.
-                        pendingFirst[stage] = 256; pendingEnd[stage] = 0;
-                    }
-                    if (drawUpload)
-                    {
-                        memcpy(to + at, &constants, sizeof(constants));
-                        g_lastConstants = constants;
-                        g_bound.drawAt = base + at;
-                        at += DrawBytes;
-                    }
-                    RenderResources::ConstantUnmap();
-                    RenderStats::Frame().streamBytes += at;
-                }
-                // Bound again whenever an offset moved: the binding carries it.
-                if (!g_bound.constantsBound || g_bound.boundFloatAt[0] != g_bound.floatAt[0] || g_bound.boundFloatAt[1] != g_bound.floatAt[1] ||
-                    g_bound.boundDrawAt != g_bound.drawAt || g_bound.boundFloatCount[0] != g_bound.floatCount[0] || g_bound.boundFloatCount[1] != g_bound.floatCount[1])
-                {
-                    ID3D11Buffer* ringBuffer = RenderResources::ConstantRing();
-                    ID3D11Buffer* bools = g_boolConstants.Get();
-                    for (int stage = 0; stage < 2; stage++)
-                    {
-                        ID3D11Buffer* buffers[3] = { ringBuffer, bools, ringBuffer };
-                        const UINT firsts[3] = { g_bound.floatAt[stage] / 16, 0, g_bound.drawAt / 16 };
-                        const UINT counts[3] = { g_bound.floatCount[stage], 16, DrawBytes / 16 };
-                        if (stage == 0) g_context1->VSSetConstantBuffers1(0, 3, buffers, firsts, counts);
-                        else g_context1->PSSetConstantBuffers1(0, 3, buffers, firsts, counts);
-                    }
-                    g_bound.boundFloatAt[0] = g_bound.floatAt[0]; g_bound.boundFloatAt[1] = g_bound.floatAt[1];
-                    g_bound.boundFloatCount[0] = g_bound.floatCount[0]; g_bound.boundFloatCount[1] = g_bound.floatCount[1];
-                    g_bound.boundDrawAt = g_bound.drawAt;
-                    g_bound.constantsBound = true;
-                }
-            }
-            else
-            {
-                // No offsets on this device: the whole files, in place.
-                uint32_t words[1024];
-                for (uint32_t stage = 0; stage < 2; stage++)
-                {
-                    if (pendingFirst[stage] >= 256 && g_bound.constantsBound) continue;
-                    const uint32_t first = stage == 0 ? 0x4000 : 0x4400;
-                    for (uint32_t i = 0; i < 1024; i++) words[i] = file[first + i].load(std::memory_order_relaxed);
-                    g_context->UpdateSubresource(g_floatConstants[stage].Get(), 0, nullptr, words, 0, 0);
-                    pendingFirst[stage] = 256; pendingEnd[stage] = 0;
-                    RenderStats::Frame().streamBytes += 4096;
-                }
-                if (drawChanged || !g_bound.constantsBound)
-                {
-                    g_lastConstants = constants;
-                    g_context->UpdateSubresource(g_drawConstants.Get(), 0, nullptr, &constants, 0, 0);
-                }
-                if (!g_bound.constantsBound)
-                {
-                    ID3D11Buffer* buffers[3] = { g_floatConstants[0].Get(), g_boolConstants.Get(), g_drawConstants.Get() };
-                    g_context->VSSetConstantBuffers(0, 3, buffers);
-                    ID3D11Buffer* pixelBuffers[3] = { g_floatConstants[1].Get(), g_boolConstants.Get(), g_drawConstants.Get() };
-                    g_context->PSSetConstantBuffers(0, 3, pixelBuffers);
-                    g_bound.constantsBound = true;
-                }
+                ID3D11Buffer* buffers[3] = { g_floatConstants[0].Get(), g_boolConstants.Get(), g_drawConstants.Get() };
+                g_context->VSSetConstantBuffers(0, 3, buffers);
+                ID3D11Buffer* pixelBuffers[3] = { g_floatConstants[1].Get(), g_boolConstants.Get(), g_drawConstants.Get() };
+                g_context->PSSetConstantBuffers(0, 3, pixelBuffers);
+                g_bound.constantsBound = true;
             }
         }
 
         // The programs and the states, when they changed.
-        if (g_bound.vertexShader != vsHandle)
+        if (g_bound.vertexShader != command.vertexShader)
         {
-            g_context->VSSetShader(static_cast<ID3D11VertexShader*>(vs->shader), nullptr, 0);
-            g_bound.vertexShader = vsHandle;
+            g_context->VSSetShader(command.vs, nullptr, 0);
+            g_bound.vertexShader = command.vertexShader;
             RenderStats::Frame().shaderSwitches++;
         }
         {
-            // Only the opaque draws go flat: a blended one in a flat colour
-            // with an alpha of one would cover the frame.
-            const bool flat = g_flatPixelShader && state.blendControl[0] == 0x00010001;
-            if (g_bound.pixelShader != psHandle || g_bound.flat != flat)
+            const bool flat = g_flatPixelShader && command.opaque;
+            if (g_bound.pixelShader != command.pixelShader || g_bound.flat != flat)
             {
-                g_context->PSSetShader(flat ? g_flatPixelShader.Get() : static_cast<ID3D11PixelShader*>(ps->shader), nullptr, 0);
-                g_bound.pixelShader = psHandle;
+                g_context->PSSetShader(flat ? g_flatPixelShader.Get() : command.ps, nullptr, 0);
+                g_bound.pixelShader = command.pixelShader;
                 g_bound.flat = flat;
                 RenderStats::Frame().shaderSwitches++;
             }
         }
-        if (g_bound.rectangles != rectangles)
+        if (g_bound.rectangles != command.rectangles)
         {
             if (!BuiltInPrograms()) return;
-            g_context->GSSetShader(rectangles ? g_rectangleShader.Get() : nullptr, nullptr, 0);
-            g_bound.rectangles = rectangles;
+            g_context->GSSetShader(command.rectangles ? g_rectangleShader.Get() : nullptr, nullptr, 0);
+            g_bound.rectangles = command.rectangles;
         }
-        if (g_bound.rasterizer != rasterizer)
+        if (g_bound.rasterizer != command.rasterizer)
         {
-            g_context->RSSetState(RenderPipeline::RasterizerObject(rasterizer));
-            g_bound.rasterizer = rasterizer;
+            g_context->RSSetState(RenderPipeline::RasterizerObject(command.rasterizer));
+            g_bound.rasterizer = command.rasterizer;
             RenderStats::Frame().pipelineSwitches++;
         }
-        if (g_bound.blend != blend || memcmp(g_bound.blendFactor, state.blendFactor, sizeof(state.blendFactor)) != 0)
+        if (g_bound.blend != command.blend || memcmp(g_bound.blendFactor, command.blendFactor, sizeof(command.blendFactor)) != 0)
         {
-            g_context->OMSetBlendState(RenderPipeline::BlendObject(blend), state.blendFactor, 0xFFFFFFFF);
-            g_bound.blend = blend;
-            memcpy(g_bound.blendFactor, state.blendFactor, sizeof(state.blendFactor));
+            g_context->OMSetBlendState(RenderPipeline::BlendObject(command.blend), command.blendFactor, 0xFFFFFFFF);
+            g_bound.blend = command.blend;
+            memcpy(g_bound.blendFactor, command.blendFactor, sizeof(command.blendFactor));
             RenderStats::Frame().pipelineSwitches++;
         }
+        if (g_bound.depth != command.depth || g_bound.stencilReference != command.stencilReference)
         {
-            const uint32_t reference = state.stencilRefMask & 0xFF;
-            if (g_bound.depth != depthState || g_bound.stencilReference != reference)
-            {
-                g_context->OMSetDepthStencilState(RenderPipeline::DepthObject(depthState), reference);
-                g_bound.depth = depthState;
-                g_bound.stencilReference = reference;
-                RenderStats::Frame().pipelineSwitches++;
-            }
+            g_context->OMSetDepthStencilState(RenderPipeline::DepthObject(command.depth), command.stencilReference);
+            g_bound.depth = command.depth;
+            g_bound.stencilReference = command.stencilReference;
+            RenderStats::Frame().pipelineSwitches++;
         }
+        const D3D11_PRIMITIVE_TOPOLOGY topology = D3D11_PRIMITIVE_TOPOLOGY(command.topology);
         if (g_bound.topology != topology)
         {
             g_context->IASetPrimitiveTopology(topology);
             g_bound.topology = topology;
         }
-
-        // Indices: the title's, byte swapped, or none. Quads and fans become
-        // triangle lists. The index that ends a strip and starts the next,
-        // when the title has turned it on (PA_SU_SC_MODE_CNTL bit 21), is the
-        // host's own cut index when it is all ones, and is rewritten to it
-        // when it is not.
-        uint32_t indexCount = state.indexCount;
-        bool indexed = false, indices32 = false;
-        uint32_t ringOffset = 0;
-        const bool strips = topology == D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP || topology == D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP;
-        const bool resetEnabled = strips && (state.suScModeControl & (1u << 21)) != 0;
-        if (state.sourceSelect == 0)
+        if (command.indexed && (!g_bound.indexBufferSet || g_bound.indices32 != command.indices32))
         {
-            indexed = true;
-            const uint8_t* data = Guest::Base + Guest::PhysicalAlias(state.indexBase);
-            if (state.wideIndices)
-            {
-                indices32 = true;
-                g_indices32.resize(indexCount);
-                const uint32_t* from = reinterpret_cast<const uint32_t*>(data);
-                for (uint32_t i = 0; i < indexCount; i++) g_indices32[i] = _byteswap_ulong(from[i]);
-                if (resetEnabled)
-                {
-                    const uint32_t reset = state.resetIndex & 0xFFFFFFu;
-                    for (uint32_t& index : g_indices32) if ((index & 0xFFFFFFu) == reset) index = 0xFFFFFFFFu;
-                }
-            }
-            else
-            {
-                const uint16_t* from = reinterpret_cast<const uint16_t*>(data);
-                const uint32_t reset = state.resetIndex & 0xFFFFu;
-                if (resetEnabled && reset != 0xFFFFu)
-                {
-                    // Widened, so the cut index can be the host's.
-                    indices32 = true;
-                    g_indices32.resize(indexCount);
-                    for (uint32_t i = 0; i < indexCount; i++)
-                    {
-                        const uint32_t index = BSwap16(from[i]);
-                        g_indices32[i] = index == reset ? 0xFFFFFFFFu : index;
-                    }
-                }
-                else
-                {
-                    g_indices16.resize(indexCount);
-                    for (uint32_t i = 0; i < indexCount; i++) g_indices16[i] = uint16_t(BSwap16(from[i]));
-                }
-            }
-        }
-        if (convertQuads || convertFan)
-        {
-            // Plain draws get their vertex ids as indices first.
-            if (!indexed)
-            {
-                indexed = true;
-                indices32 = true;
-                g_indices32.resize(indexCount);
-                for (uint32_t i = 0; i < indexCount; i++) g_indices32[i] = i;
-            }
-            else if (!indices32)
-            {
-                indices32 = true;
-                g_indices32.resize(indexCount);
-                for (uint32_t i = 0; i < indexCount; i++) g_indices32[i] = g_indices16[i];
-            }
-            static std::vector<uint32_t> list;
-            list.clear();
-            if (convertQuads)
-                for (uint32_t i = 0; i + 3 < indexCount; i += 4)
-                {
-                    const uint32_t q[6] = { g_indices32[i], g_indices32[i + 1], g_indices32[i + 2], g_indices32[i], g_indices32[i + 2], g_indices32[i + 3] };
-                    list.insert(list.end(), q, q + 6);
-                }
-            else
-                for (uint32_t i = 1; i + 1 < indexCount; i++)
-                {
-                    const uint32_t t[3] = { g_indices32[0], g_indices32[i], g_indices32[i + 1] };
-                    list.insert(list.end(), t, t + 3);
-                }
-            g_indices32.swap(list);
-            indexCount = uint32_t(g_indices32.size());
-            if (indexCount == 0) return;
-        }
-        if (indexed)
-        {
-            const uint32_t bytes = indices32 ? indexCount * 4 : indexCount * 2;
-            ringOffset = RenderResources::IndexAppend(indices32 ? static_cast<const void*>(g_indices32.data()) : static_cast<const void*>(g_indices16.data()), bytes);
-            if (ringOffset == 0xFFFFFFFFu) { Skip(SkipBuffer); return; }
-            RenderStats::Frame().streamBytes += bytes;
-            if (!g_bound.indexBufferSet || g_bound.indices32 != indices32)
-            {
-                g_context->IASetIndexBuffer(RenderResources::IndexRing(), indices32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT, 0);
-                g_bound.indexBufferSet = true;
-                g_bound.indices32 = indices32;
-            }
+            g_context->IASetIndexBuffer(RenderResources::IndexRing(), command.indices32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT, 0);
+            g_bound.indexBufferSet = true;
+            g_bound.indices32 = command.indices32;
         }
 
+        RenderStats::Enter(RenderStats::SectionDraw);
         RenderStats::Counters& counters = RenderStats::Frame();
         counters.draws++;
+        counters.triangles += command.triangles;
         g_drawsTotal++;
-        switch (topology)
-        {
-        case D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST: counters.triangles += rectangles ? indexCount / 3 * 2 : indexCount / 3; break;
-        case D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP: counters.triangles += indexCount >= 2 ? indexCount - 2 : 0; break;
-        default: break;
-        }
-
-        const bool logged = FrameLogged();
-        if (logged)
-        {
-            printf("frame %llu (dump %d): draw %u of %u indices (%s), vte %03X viewport %g %g %g %g z %g %g, target %u %ux%u, scissor %ld,%ld-%ld,%ld, "
-                   "depth %08X blend %08X mask %X, mode %u, cull %08X, alpha %08X, vs %016llx ps %016llx\n",
-                (unsigned long long)g_swaps.load(std::memory_order_relaxed), g_dumpNumber, state.primitive, state.indexCount, indexed ? "indexed" : "plain",
-                state.vteControl, state.viewport[0], state.viewport[1], state.viewport[2], state.viewport[3], state.viewport[4], state.viewport[5],
-                targetCount, targetWidth, targetHeight, scissor.left, scissor.top, scissor.right, scissor.bottom,
-                state.depthControl, state.blendControl[0], state.colorMask, state.modeControl, state.suScModeControl, state.colorControl,
-                (unsigned long long)vs->hash, (unsigned long long)ps->hash);
-            for (int stage = 0; stage < 2; stage++)
-            {
-                const RenderShaders::Program* program = stage == 0 ? ps : vs;
-                for (const XenosHlsl::TextureFetch& fetch : program->textureFetches)
-                {
-                    uint32_t w[6];
-                    RenderState::ReadTextureFetch(fetch.slot, w);
-                    uint32_t tw, th; bool tr;
-                    const bool white = RenderResources::TextureFor(w, tw, th, tr) == 1 && !tr;
-                    printf("   %stexture %u (read as %uD)%s%s: format %u %ux%u at %08X%s swizzle %03X signs %02X, words %08X %08X %08X %08X %08X %08X\n", stage == 0 ? "" : "vs ", fetch.slot, fetch.dimension == 3 ? 6 : fetch.dimension + 1, white ? " WHITE: " : "", white ? RenderResources::WhiteReason() : "", w[1] & 0x3F,
-                        (w[2] & 0x1FFF) + 1, ((w[2] >> 13) & 0x1FFF) + 1, w[1] & 0xFFFFF000u, RenderResources::ResolvedAt(w[1] & 0xFFFFF000u) ? " (resolved)" : "",
-                        (w[3] >> 1) & 0xFFF, (w[0] >> 2) & 0xFF, w[0], w[1], w[2], w[3], w[4], w[5]);
-                }
-            }
-            for (const XenosHlsl::VertexFetch& fetch : vs->vertexFetches)
-            {
-                uint32_t word0, word1;
-                RenderState::ReadVertexFetch(fetch.slot, word0, word1);
-                printf("   vertex slot %u at %08X, %u dwords, endian %u, stride %u\n", fetch.slot, word0 & ~3u, (word1 >> 2) & 0xFFFFFF, word1 & 3, fetch.stride);
-            }
-            fflush(stdout);
-        }
-
         // VGT_INDX_OFFSET is added to every vertex index, which is how the
         // terrain draws its patches out of one buffer with one set of
         // indices; the host adds it as the base vertex.
-        if (indexed) g_context->DrawIndexed(indexCount, ringOffset / (indices32 ? 4 : 2), state.indexOffset);
-        else g_context->Draw(indexCount, UINT(state.indexOffset));
+        if (command.indexed) g_context->DrawIndexed(command.indexCount, command.indexRingOffset / (command.indices32 ? 4 : 2), command.baseVertex);
+        else g_context->Draw(command.indexCount, UINT(command.baseVertex));
 
-        if (logged && colorTexture != nullptr) DumpTargetAfterDraw(colorTexture, depthTexture);
+        if (command.logged && command.colorTexture != nullptr) DumpTargetAfterDraw(command.colorTexture, command.depthTexture);
     }
 
     // --- the resolve ----------------------------------------------------------------------------------
 
-    void ResolveLocked()
+    void ExecuteResolve(const RenderState::ResolveCommand& command)
     {
-        const std::atomic<uint32_t>* file = Gpu::RegisterFile();
-        auto reg = [&](uint32_t index) { return file[index].load(std::memory_order_relaxed); };
-        const uint32_t control = reg(RenderState::CopyControl);
-        const uint32_t destBase = reg(RenderState::CopyDestBase);
-        const uint32_t pitch = reg(RenderState::SurfaceInfo) & 0x3FFF;
-        const uint32_t tl = reg(RenderState::ScissorTopLeft), br = reg(RenderState::ScissorBottomRight);
-        if (pitch == 0) return;
-
-        const uint32_t x0 = tl & 0x7FFF, y0 = (tl >> 16) & 0x7FFF;
-        const uint32_t x1 = br & 0x7FFF, y1 = (br >> 16) & 0x7FFF;
-        if (x1 <= x0 || y1 <= y0 || x1 - x0 > 4096 || y1 - y0 > 4096) return;
-        const uint32_t width = x1 - x0, height = y1 - y0;
-
-        const uint32_t sourceSelect = control & 7;
-        const uint32_t command = (control >> 20) & 3;
-        const bool colorClear = ((control >> 8) & 1) != 0;
-        const bool depthClear = ((control >> 9) & 1) != 0;
-        RenderStats::Frame().resolves++;
-        if (RenderResources::EnsureRows(pitch, y1)) ForgetBindings();
-
-        uint32_t targetWidth, targetHeight;
-        float scaleX, scaleY;
-        RenderResources::TargetSize(pitch, 4, targetWidth, targetHeight, scaleX, scaleY);
-        const float hostX0 = x0 * scaleX, hostY0 = y0 * scaleY;
-        const uint32_t hostWidth = std::max(1u, uint32_t(std::lround(width * scaleX)));
-        const uint32_t hostHeight = std::max(1u, uint32_t(std::lround(height * scaleY)));
-
-        if (FrameLogged())
-            printf("frame: resolve control %08X to %08X, %u,%u-%u,%u, pitch %u, clears %d%d, colour %08X depth %08X\n",
-                control, destBase, x0, y0, x1, y1, pitch, colorClear ? 1 : 0, depthClear ? 1 : 0, reg(RenderState::ColorInfo0), reg(RenderState::DepthInfo));
-
-        if (command != 3 && destBase != 0)
+        if (command.bindingsLost) ForgetBindings();
+        if (command.copy)
         {
-            const bool fromDepth = sourceSelect == 4;
-            ID3D11ShaderResourceView* source = nullptr;
-            uint32_t sourceWidth = 0, sourceHeight = 0, sourceSamples = 1;
-            DXGI_FORMAT format = DXGI_FORMAT_R8G8B8A8_UNORM;
-            if (fromDepth)
-            {
-                const RenderResources::DepthTarget* depth = RenderResources::DepthTargetOf(RenderResources::DepthTargetFor(reg(RenderState::DepthInfo), pitch));
-                if (depth == nullptr) return;
-                source = depth->resource;
-                sourceWidth = depth->width;
-                sourceHeight = depth->height;
-                sourceSamples = depth->samples;
-                format = DXGI_FORMAT_R32_FLOAT;
-            }
-            else
-            {
-                const uint32_t info = reg(sourceSelect == 0 ? RenderState::ColorInfo0 : RenderState::ColorInfo1 + (sourceSelect - 1));
-                const RenderResources::ColorTarget* color = RenderResources::ColorTargetOf(RenderResources::ColorTargetFor(info, pitch));
-                if (color == nullptr) return;
-                source = color->resource;
-                sourceWidth = color->width;
-                sourceHeight = color->height;
-                sourceSamples = color->samples;
-                format = color->format;
-            }
-            RenderResources::Resolved* out = RenderResources::ResolvedFor(destBase, hostWidth, hostHeight, format, fromDepth);
-            if (out == nullptr) return;
-            out->guestWidth = width;
-            out->guestHeight = height;
             // The source may be bound as a texture from the draws before,
             // and the destination too: both go.
-            UnbindResource(out->resource);
-            const D3D11_VIEWPORT viewport{ 0.0f, 0.0f, float(hostWidth), float(hostHeight), 0.0f, 1.0f };
+            UnbindResource(command.destinationResource);
+            const D3D11_VIEWPORT viewport{ 0.0f, 0.0f, float(command.width), float(command.height), 0.0f, 1.0f };
             ID3D11PixelShader* copy = g_copyPixelShader.Get();
-            if (sourceSamples > 1)
+            if (command.sourceSamples > 1)
             {
-                const int slot = sourceSamples >= 8 ? 3 : sourceSamples >= 4 ? 2 : 1;
-                copy = fromDepth ? g_copyDepthMS[slot].Get() : g_copyColourMS[slot].Get();
+                const int slot = command.sourceSamples >= 8 ? 3 : command.sourceSamples >= 4 ? 2 : 1;
+                copy = command.fromDepth ? g_copyDepthMS[slot].Get() : g_copyColourMS[slot].Get();
             }
             if (copy != nullptr)
-                DrawQuad(source, sourceWidth, sourceHeight, hostX0, hostY0, float(hostWidth), float(hostHeight), out->view, viewport, copy, g_pointSampler.Get());
+                DrawQuad(command.source, command.sourceWidth, command.sourceHeight, command.x0, command.y0, float(command.width), float(command.height),
+                         command.destination, viewport, copy, g_pointSampler.Get());
         }
-
-        if (colorClear)
+        if (command.colorClear)
         {
-            if (const RenderResources::ColorTarget* color = RenderResources::ColorTargetOf(RenderResources::ColorTargetFor(reg(RenderState::ColorInfo0), pitch)))
+            if (g_context1)
             {
-                const uint32_t value = reg(RenderState::CopyColorClear);
-                const float rgba[4] = { ((value >> 16) & 0xFF) / 255.0f, ((value >> 8) & 0xFF) / 255.0f, (value & 0xFF) / 255.0f, (value >> 24) / 255.0f };
-                if (g_context1)
-                {
-                    const D3D11_RECT rect{ LONG(std::lround(hostX0)), LONG(std::lround(hostY0)), LONG(std::lround(x1 * scaleX)), LONG(std::lround(y1 * scaleY)) };
-                    g_context1->ClearView(color->view, rgba, &rect, 1);
-                }
-                else g_context->ClearRenderTargetView(color->view, rgba);
+                const D3D11_RECT rect{ command.clearRect[0], command.clearRect[1], command.clearRect[2], command.clearRect[3] };
+                g_context1->ClearView(command.clearTarget, command.clearColor, &rect, 1);
             }
+            else g_context->ClearRenderTargetView(command.clearTarget, command.clearColor);
         }
-        if (depthClear)
-        {
-            if (const RenderResources::DepthTarget* depth = RenderResources::DepthTargetOf(RenderResources::DepthTargetFor(reg(RenderState::DepthInfo), pitch)))
-            {
-                const uint32_t value = reg(RenderState::CopyDepthClear);
-                g_context->ClearDepthStencilView(depth->view, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, float(value >> 8) / 16777215.0f, UINT8(value & 0xFF));
-            }
-        }
+        if (command.depthClear)
+            g_context->ClearDepthStencilView(command.clearDepth, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, command.clearDepthValue, command.clearStencilValue);
     }
 
     // --- the present ------------------------------------------------------------------------------------
@@ -1529,7 +1008,9 @@ void Render::Draw(uint32_t initiator, uint32_t indexBase, uint32_t indexWord)
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     if (!Start()) return;
     Timed timed(RenderStats::Frame().drawNanoseconds);
-    DrawLocked(initiator, indexBase);
+    RenderState::DrawCommand command;
+    if (RenderCommands::PrepareDraw(initiator, indexBase, command)) ExecuteDraw(command);
+    RenderStats::Leave();
 }
 
 void Render::Resolve()
@@ -1537,7 +1018,8 @@ void Render::Resolve()
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     if (!Start()) return;
     Timed timed(RenderStats::Frame().resolveNanoseconds);
-    ResolveLocked();
+    RenderState::ResolveCommand command;
+    if (RenderCommands::PrepareResolve(command)) ExecuteResolve(command);
 }
 
 void Render::ShaderLoaded(bool pixel, uint32_t guestAddress, uint32_t sizeDwords)
@@ -1611,13 +1093,10 @@ void Render::Report()
         r.indexBytes / 1048576.0, r.constantBytes / 1048576.0);
     printf("        %u blend, %u depth, %u rasteriser states, %u samplers; scale %.3f\n", p.blendStates, p.depthStates, p.rasterizerStates, p.samplers, RenderResources::Scale());
     RenderShaders::Report();
-    bool any = false;
-    for (int i = 0; i < SkipCount; i++) if (g_skips[i] != 0) any = true;
-    if (any)
-    {
-        printf("        skipped:");
-        for (int i = 0; i < SkipCount; i++) if (g_skips[i] != 0) printf(" %s x%llu;", SkipNames[i], (unsigned long long)g_skips[i]);
-        printf("\n");
-    }
+    RenderCommands::ReportSkips();
     fflush(stdout);
 }
+
+bool RenderInternal::FrameLogged() { return ::FrameLogged(); }
+uint64_t RenderInternal::Swaps() { return g_swaps.load(std::memory_order_relaxed); }
+int RenderInternal::DumpNumber() { return g_dumpNumber; }
