@@ -53,6 +53,18 @@ What it took, beyond what the sections below describe, in the order found:
   by dumping every third frame of an eighty second run and scoring each for
   flat area (`scripts/flatframes.py`). `COD3_FENCELIE=1` brings it back for
   comparison.
+- **A pixel program is given its pixel's position** when `SQ_PROGRAM_CNTL`
+  bit 18 asks, in the register `SQ_CONTEXT_MISC` bits 8-15 names. The soft
+  particles read the depth under themselves there; without it they read the
+  top left corner of the depth, and the smoke of a level blinked on and off
+  as the tree in that corner swayed (Saint-Lô's first view: visible a quarter
+  of the time, in bursts). In a fight it was worse: the dust and smoke came
+  out with no fade at all and swallowed the picture. Thirty per cent of 250
+  frames of a Chambois fight were swallowed that way, the darkest wholly
+  black; none are now.
+- **The polygon offset is carried over** (`PA_SU_POLY_OFFSET_*`, the front
+  pair or the back pair by bits 11 and 12 of the mode control): the slope's
+  scale in sixteenths, the offset in the depth's range.
 - **The console multiplies the Direct3D 9 way:** zero times anything is zero,
   infinity and NaN included, and the translation does the same (`mulL`).
 - **The mission title card** ("THE BLOODIEST BATTLE OF THE WAR / SAINT LO,

@@ -402,11 +402,15 @@ namespace
                 // once a second, to see whether the file that reaches it is
                 // the file the title wrote.
                 static const char* const dumpConst = getenv("COD3_DUMPCONST");
-                if (dumpConst != nullptr && programs[stage]->hash == strtoull(dumpConst, nullptr, 16))
+                char hashText[24] = {};
+                if (dumpConst != nullptr) snprintf(hashText, sizeof(hashText), "%016llx", (unsigned long long)programs[stage]->hash);
+                // Several hashes may be named, with commas; in a logged
+                // frame every upload is printed, not one a second.
+                if (dumpConst != nullptr && strstr(dumpConst, hashText) != nullptr)
                 {
                     static uint64_t last = 0;
                     const uint64_t now = GetTickCount64() / 1000;
-                    if (now != last)
+                    if (now != last || RenderInternal::FrameLogged())
                     {
                         last = now;
                         const float* values = reinterpret_cast<const float*>(words);
@@ -634,7 +638,7 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
     if (!Targets(state, vs, ps, out, scaleY)) return false;
 
     RenderStats::Enter(RenderStats::SectionPipeline);
-    out.rasterizer = RenderPipeline::Rasterizer(state.suScModeControl, true, out.rectangles);
+    out.rasterizer = RenderPipeline::Rasterizer(state.suScModeControl, true, out.rectangles, state.polyOffset);
     out.blend = RenderPipeline::Blend(state.blendControl, state.colorMask);
     out.depth = RenderPipeline::Depth(out.depthView ? state.depthControl : 0, state.stencilRefMask);
     memcpy(out.blendFactor, state.blendFactor, sizeof(out.blendFactor));
@@ -664,6 +668,20 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
     constants.flags[1] = ((state.colorControl >> 3) & 1) ? (state.colorControl & 7) : 7;   // the alpha test, or always
     constants.flags[2] = state.alphaReference;
     constants.flags[3] = uint32_t(ps->hash);
+    // The pixel's own position, which the console writes into a register
+    // of the pixel program when the program control asks (bit 18), the
+    // register named by the context's bits 8 to 15. The soft particles
+    // read the depth under them there; without it they read the corner
+    // of the depth, and the smoke came and went with the tree's leaves.
+    {
+        uint32_t hostWidth, hostHeight;
+        float scaleX, scaleYAgain;
+        RenderResources::TargetSize(state.pitch, 4, hostWidth, hostHeight, scaleX, scaleYAgain);
+        constants.pixelGen[0] = scaleX > 0.0f ? 1.0f / scaleX : 1.0f;
+        constants.pixelGen[1] = scaleYAgain > 0.0f ? 1.0f / scaleYAgain : 1.0f;
+        constants.pixelGen[2] = float((state.contextMisc >> 8) & 0xFF);
+        constants.pixelGen[3] = ((state.programControl >> 18) & 1) ? 1.0f : 0.0f;
+    }
 
     RenderStats::Enter(RenderStats::SectionTextures);
     Textures(vs, ps, out, constants);

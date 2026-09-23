@@ -47,7 +47,8 @@ namespace RenderState
         StencilRefMask = 0x210D,
         AlphaReference = 0x210E,
         ViewportXScale = 0x210F,       // then offset x, scale y, offset y, scale z, offset z
-        ProgramControl = 0x2180,
+        ProgramControl = 0x2180,       // bit 18: the pixel parameters are generated
+        ContextMisc = 0x2181,          // bits 8-15: the pixel program register they go to
         DepthControl = 0x2200,
         BlendControl0 = 0x2201,
         ColorControl = 0x2202,         // the alpha test
@@ -57,6 +58,7 @@ namespace RenderState
         ModeControl = 0x2208,          // the render backend's mode: 4 draws, 6 copies
         BlendControl1 = 0x2209, BlendControl2 = 0x220A, BlendControl3 = 0x220B,
         PointSize = 0x2280,
+        PolyOffsetFrontScale = 0x2380, // then front offset, back scale, back offset: floats
         CopyControl = 0x2318,          // the resolve
         CopyDestBase = 0x2319, CopyDestPitch = 0x231A, CopyDestInfo = 0x231B,
         CopyDepthClear = 0x231D, CopyColorClear = 0x231E,
@@ -92,6 +94,7 @@ namespace RenderState
 
         // The rasteriser.
         uint32_t suScModeControl = 0;
+        float polyOffset[4] = {};      // front scale, front offset, back scale, back offset
         uint32_t scissorTopLeft = 0, scissorBottomRight = 0, windowOffset = 0;
         int32_t indexOffset = 0;
         uint32_t resetIndex = 0;
@@ -105,6 +108,7 @@ namespace RenderState
         uint32_t vteControl = 0;
         uint32_t colorControl = 0;
         uint32_t alphaReference = 0;
+        uint32_t programControl = 0, contextMisc = 0;
         float viewport[6] = {};        // x scale, x offset, y scale, y offset, z scale, z offset
 
         // The programs.
@@ -148,6 +152,7 @@ namespace RenderState
         uint32_t flags[4];
         float textureSize[32][4];
         uint32_t textureAdjustment[32][4];
+        float pixelGen[4];             // guest pixels per host pixel x and y, the register, on or off
     };
 
     // One draw, ready to run. Handles are indices into the caches; the

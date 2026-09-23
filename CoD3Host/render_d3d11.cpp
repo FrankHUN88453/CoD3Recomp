@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <climits>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -292,7 +293,7 @@ namespace
         ID3D11RenderTargetView* targets[1] = { target };
         g_context->OMSetRenderTargets(1, targets, nullptr);
         g_context->RSSetViewports(1, &viewport);
-        g_context->RSSetState(RenderPipeline::RasterizerObject(RenderPipeline::Rasterizer(0, false, true)));
+        { const float none[4] = {}; g_context->RSSetState(RenderPipeline::RasterizerObject(RenderPipeline::Rasterizer(0, false, true, none))); }
         g_context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
         g_context->OMSetDepthStencilState(nullptr, 0);
         g_context->VSSetShader(g_quadVertexShader.Get(), nullptr, 0);
@@ -442,7 +443,10 @@ namespace
         const int64_t wanted = g_frameWanted.load(std::memory_order_relaxed);
         if (wanted < 0) return false;
         const int64_t swap = int64_t(g_swaps.load(std::memory_order_relaxed));
-        return swap >= wanted && swap < wanted + 2;
+        // COD3_D3DFRAME_COUNT=N logs N frames instead of two, for a fault
+        // that comes and goes from one frame to the next.
+        static const int64_t count = []() { const char* t = getenv("COD3_D3DFRAME_COUNT"); const long v = t ? strtol(t, nullptr, 10) : 2; return int64_t(v > 0 ? v : 2); }();
+        return swap >= wanted && swap < wanted + count;
     }
 
     void FrameSwapped()
@@ -587,15 +591,17 @@ namespace
     void DumpTargetAfterDraw(ID3D11Texture2D* texture, ID3D11Texture2D* depth)
     {
         static const char* const prefix = getenv("COD3_D3DDRAWDUMP");
-        if (prefix == nullptr || texture == nullptr || !FrameLogged()) return;
+        static const bool withDepth = getenv("COD3_D3DDRAWDUMPZ") != nullptr;
+        if (prefix == nullptr || (texture == nullptr && !(withDepth && depth != nullptr)) || !FrameLogged()) return;
         static const uint32_t from = []() { const char* t = getenv("COD3_D3DDRAWDUMPFROM"); return t ? uint32_t(strtoul(t, nullptr, 10)) : 0u; }();
         int& number = g_dumpNumber;
         if (number < int(from)) { number++; return; }
         if (number >= int(from) + 2000) return;
+        // A draw that writes only depth: the depth alone.
+        if (texture == nullptr) { DumpDepth(prefix, number++, depth); return; }
         uint32_t w = 0, h = 0;
         const std::vector<uint8_t> pixels = ReadBack(texture, w, h, 4);
         if (pixels.empty()) return;
-        static const bool withDepth = getenv("COD3_D3DDRAWDUMPZ") != nullptr;
         if (withDepth) DumpDepth(prefix, number, depth);
         char name[512];
         snprintf(name, sizeof(name), "%s-%04d.bmp", prefix, number++);
@@ -614,8 +620,10 @@ namespace
         // consecutive frames (EVERY=1) can be kept from late in a level
         // without writing every frame before it.
         static const int from = []() { const char* t = getenv("COD3_FRAMEDUMP_FROM"); return t ? int(strtol(t, nullptr, 10)) : 0; }();
+        // COD3_FRAMEDUMP_UNTIL=N: nothing from the Nth present on.
+        static const int until = []() { const char* t = getenv("COD3_FRAMEDUMP_UNTIL"); return t ? int(strtol(t, nullptr, 10)) : INT_MAX; }();
         static int presents = 0;
-        if (presents++ < from) return;
+        if (presents++ < from || presents > until) return;
         static int counter = 0;
         if ((counter++ % every) != 0) return;
         uint32_t w = 0, h = 0;
@@ -824,7 +832,17 @@ namespace
         if (command.indexed) g_context->DrawIndexed(command.indexCount, command.indexRingOffset / (command.indices32 ? 4 : 2), command.baseVertex);
         else g_context->Draw(command.indexCount, UINT(command.baseVertex));
 
-        if (command.logged && command.colorTexture != nullptr) DumpTargetAfterDraw(command.colorTexture, command.depthTexture);
+        // COD3_D3DDRAWDUMPPS=hex: only after the draws whose pixel program's
+        // hash starts so, for watching one kind of draw over many frames.
+        static const char* const dumpPixel = getenv("COD3_D3DDRAWDUMPPS");
+        bool dumpThis = command.logged && (command.colorTexture != nullptr || command.depthTexture != nullptr);
+        if (dumpThis && dumpPixel != nullptr)
+        {
+            char name[24];
+            snprintf(name, sizeof(name), "%016llx", (unsigned long long)RenderShaders::HashOf(command.pixelShader));
+            dumpThis = strncmp(name, dumpPixel, strlen(dumpPixel)) == 0;
+        }
+        if (dumpThis) DumpTargetAfterDraw(command.colorTexture, command.depthTexture);
     }
 
     // --- the resolve ----------------------------------------------------------------------------------

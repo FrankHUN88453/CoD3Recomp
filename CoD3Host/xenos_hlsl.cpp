@@ -1000,11 +1000,13 @@ uint64_t XenosHlsl::Version()
     // A number that changes when the translation would, or when one of the
     // environment knobs that shape the HLSL is set: the disk cache keyed by
     // it then starts afresh rather than serving the other translation.
-    std::string text = "xenos_hlsl 2026-09-22 bswap packed flat3d fetch offsets alu pairs read first";
+    std::string text = "xenos_hlsl 2026-09-22 bswap packed flat3d fetch offsets alu pairs read first pixel params";
     if (const char* lanes = getenv("COD3_SCALARLANES")) { text += " lanes="; text += lanes; }
     if (const char* show = getenv("COD3_D3DSHOW")) { text += " show="; text += show; }
+    if (const char* sign = getenv("COD3_D3DSHOWSIGN")) { text += " sign="; text += sign; }
     if (getenv("COD3_NOFETCHOFFSET")) text += " no offsets";
     if (getenv("COD3_OLDALUPAIR")) text += " write first";
+    if (getenv("COD3_NOPIXELGEN")) text += " no pixel params";
     uint64_t hash = 14695981039346656037ull;
     for (unsigned char c : text) { hash ^= c; hash *= 1099511628211ull; }
     return hash;
@@ -1029,6 +1031,7 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
             "    uint4 flags;             // the viewport control word, alpha test function, alpha reference bits, unused\n"
             "    float4 textureSize[32];  // width, height, 1/width, 1/height\n"
             "    uint4 textureAdjustment[32];   // swizzle, sign modes, unused, unused\n"
+            "    float4 pixelGen;         // guest pixels per host pixel x and y, the register, on or off\n"
             "};\n";
     // The vertex buffers are bound as they lie in the console's memory, big
     // endian, and every word fetched is turned round here: a buffer upload
@@ -1095,7 +1098,7 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
     {
         hlsl += "struct Input { float4 position : SV_Position;";
         for (uint32_t i = 0; i < 16; i++) hlsl += Format(" float4 o%u : TEXCOORD%u;", i, i);
-        hlsl += " };\n";
+        hlsl += " bool front : SV_IsFrontFace; };\n";
         hlsl += "struct Output { float4 c0 : SV_Target0; float4 c1 : SV_Target1; float4 c2 : SV_Target2; float4 c3 : SV_Target3;";
         if (out.writesDepth) hlsl += " float depth : SV_Depth;";
         hlsl += " };\n";
@@ -1103,6 +1106,19 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
         hlsl += "    float4 r[32];\n";
         for (uint32_t i = 0; i < 32; i++)
             hlsl += i < 16 ? Format("    r[%u] = input.o%u;\n", i, i) : Format("    r[%u] = float4(0.0, 0.0, 0.0, 0.0);\n", i);
+        // The pixel parameters, when the draw asks for them: x and y the
+        // pixel's position in the title's pixels (whole host pixels scaled
+        // back, so a doubled resolution samples finer), back facing in x's
+        // sign bit; z and w the point sprite's coordinates, nought here.
+        // COD3_NOPIXELGEN=1 leaves them out again, for a comparison.
+        static const bool noPixelGen = getenv("COD3_NOPIXELGEN") != nullptr;
+        if (!noPixelGen)
+        hlsl += "    if (pixelGen.w != 0.0) {\n"
+                "        float2 at = floor(input.position.xy) * pixelGen.xy;\n"
+                "        float4 generated = float4(asfloat(asuint(at.x) | (input.front ? 0u : 0x80000000u)), at.y, 0.0, 0.0);\n"
+                "        uint slot = uint(pixelGen.z);\n"
+                "        [unroll] for (uint i = 0; i < 32; i++) if (i == slot) r[i] = generated;\n"
+                "    }\n";
         hlsl += "    float4 oC0 = float4(0.0, 0.0, 0.0, 0.0), oC1 = oC0, oC2 = oC0, oC3 = oC0, oDepth4 = oC0, oUnused = oC0;\n";
     }
     else
@@ -1153,7 +1169,14 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
         // only that one program is changed and the rest of the picture
         // stays as it was.
         const char* const what = translator.showWhat.empty() ? nullptr : translator.showWhat.c_str();
-        if (what != nullptr && translator.ShowAt() >= 0) hlsl += "    oC0 = float4(abs(shown.xyz), 1.0);\n";
+        // COD3_D3DSHOWSIGN=1: x alone with its sign, red above nought and
+        // green below, blue where it is not a number.
+        // COD3_D3DSHOWSIGN=y (or z, w) takes that lane instead of x.
+        static const char* const showSign = getenv("COD3_D3DSHOWSIGN");
+        const char lane = showSign != nullptr && (showSign[0] == 'y' || showSign[0] == 'z' || showSign[0] == 'w') ? showSign[0] : 'x';
+        if (what != nullptr && translator.ShowAt() >= 0 && showSign != nullptr)
+            hlsl += Format("    oC0 = float4(saturate(shown.%c), saturate(-shown.%c), isnan(shown.%c) ? 1.0 : 0.0, 1.0);\n", lane, lane, lane);
+        else if (what != nullptr && translator.ShowAt() >= 0) hlsl += "    oC0 = float4(abs(shown.xyz), 1.0);\n";
         else if (what != nullptr && what[0] == 'o') hlsl += Format("    oC0 = float4(abs(input.%s.xyz), 1.0);\n", what);
         else if (what != nullptr && what[0] == 'r') hlsl += Format("    oC0 = float4(abs(r[%u].xyz), 1.0);\n", unsigned(strtoul(what + 1, nullptr, 10)) & 31u);
         hlsl += "    output.c0 = oC0; output.c1 = oC1; output.c2 = oC2; output.c3 = oC3;\n";

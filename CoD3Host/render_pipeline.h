@@ -40,7 +40,11 @@ namespace RenderPipeline
     // Depth stencil state from the depth control and the stencil masks.
     Handle Depth(uint32_t depthControl, uint32_t stencilRefMask);
     // Rasteriser state from the cull and facing bits, with the scissor.
-    Handle Rasterizer(uint32_t suScModeControl, bool scissor, bool cullNone);
+    // The polygon offset is the front one when bit 11 of the mode control
+    // enables it, else the back one when bit 12 does (Direct3D has one for
+    // both faces): its scale in sixteenths of a unit of slope, its offset
+    // in units of the smallest depth step.
+    Handle Rasterizer(uint32_t suScModeControl, bool scissor, bool cullNone, const float polyOffset[4]);
     // Sampler from the fetch constant's clamp, filter and anisotropy fields.
     Handle Sampler(const uint32_t fetch[6]);
 

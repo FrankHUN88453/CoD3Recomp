@@ -40,6 +40,7 @@ void RenderState::Read(uint32_t initiator, uint32_t indexBase, Snapshot& out)
     out.stencilRefMask = Reg(StencilRefMask);
 
     out.suScModeControl = Reg(SuScModeControl);
+    for (uint32_t i = 0; i < 4; i++) out.polyOffset[i] = RegFloat(PolyOffsetFrontScale + i);
     out.scissorTopLeft = Reg(ScissorTopLeft);
     out.scissorBottomRight = Reg(ScissorBottomRight);
     out.windowOffset = Reg(WindowOffset);
@@ -56,6 +57,8 @@ void RenderState::Read(uint32_t initiator, uint32_t indexBase, Snapshot& out)
     out.vteControl = Reg(VteControl);
     out.colorControl = Reg(ColorControl);
     out.alphaReference = Reg(AlphaReference);
+    out.programControl = Reg(ProgramControl);
+    out.contextMisc = Reg(ContextMisc);
     for (uint32_t i = 0; i < 6; i++) out.viewport[i] = RegFloat(ViewportXScale + i);
 
     out.vertexProgram = Render::CurrentProgramHash(false);

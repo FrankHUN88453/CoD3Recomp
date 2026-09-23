@@ -1,6 +1,8 @@
 #include "render_pipeline.h"
 #include "render_table.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -51,7 +53,7 @@ namespace
 
     StateTable<5, ID3D11BlendState> g_blend;
     StateTable<2, ID3D11DepthStencilState> g_depth;
-    StateTable<1, ID3D11RasterizerState> g_rasterizer;
+    StateTable<3, ID3D11RasterizerState> g_rasterizer;
     StateTable<2, ID3D11SamplerState> g_sampler;
 
     RenderPipeline::Filter g_filter = RenderPipeline::Filter::Anisotropic;
@@ -172,7 +174,7 @@ namespace
 
     // --- rasteriser ------------------------------------------------------------------
 
-    ComPtr<ID3D11RasterizerState> MakeRasterizer(uint32_t key)
+    ComPtr<ID3D11RasterizerState> MakeRasterizer(uint32_t key, float scale, float offset)
     {
         D3D11_RASTERIZER_DESC desc{};
         desc.FillMode = D3D11_FILL_SOLID;
@@ -186,6 +188,16 @@ namespace
         desc.DepthClipEnable = FALSE;
         desc.ScissorEnable = (key & 8) ? TRUE : FALSE;
         desc.MultisampleEnable = TRUE;   // for the multisampled targets; nothing to a single sampled one
+        // The console's polygon offset: the slope's scale in sixteenths (as
+        // Xenia takes it), the offset in the depth's own units, which this
+        // title gives as a fraction of the range (0.0001 for its decals):
+        // steps of a 24 bit depth, whole, and at least one when asked for.
+        // Without it the shadow maps shadowed their own surfaces in
+        // blotches: the soldiers' uniforms.
+        const float steps = offset * 16777216.0f;
+        desc.DepthBias = steps == 0.0f ? 0 : int(steps > 0.0f ? std::max(1.0f, std::round(steps)) : std::min(-1.0f, std::round(steps)));
+        desc.SlopeScaledDepthBias = scale * (1.0f / 16.0f);
+        desc.DepthBiasClamp = 0.0f;
         ComPtr<ID3D11RasterizerState> state;
         g_device->CreateRasterizerState(&desc, &state);
         return state;
@@ -296,11 +308,25 @@ RenderState::Handle RenderPipeline::Depth(uint32_t depthControl, uint32_t stenci
     return g_depth.Insert(key, MakeDepth(depthControl, stencilRefMask));
 }
 
-RenderState::Handle RenderPipeline::Rasterizer(uint32_t suScModeControl, bool scissor, bool cullNone)
+RenderState::Handle RenderPipeline::Rasterizer(uint32_t suScModeControl, bool scissor, bool cullNone, const float polyOffset[4])
 {
-    const uint32_t key[1] = { (suScModeControl & 7) | (scissor ? 8u : 0u) | (cullNone ? 16u : 0u) };
+    float scale = 0.0f, offset = 0.0f;
+    static const bool noOffset = getenv("COD3_NOPOLYOFFSET") != nullptr;   // for a comparison
+    if (!noOffset && ((suScModeControl >> 11) & 1)) { scale = polyOffset[0]; offset = polyOffset[1]; }
+    else if (!noOffset && ((suScModeControl >> 12) & 1)) { scale = polyOffset[2]; offset = polyOffset[3]; }
+    uint32_t scaleBits, offsetBits;
+    memcpy(&scaleBits, &scale, 4);
+    memcpy(&offsetBits, &offset, 4);
+    const uint32_t key[3] = { (suScModeControl & 7) | (scissor ? 8u : 0u) | (cullNone ? 16u : 0u), scaleBits, offsetBits };
     if (const uint32_t handle = g_rasterizer.Find(key)) return handle;
-    return g_rasterizer.Insert(key, MakeRasterizer(key[0]));
+    // Each new offset once, to see what the title asks for.
+    static int announced = 0;
+    if ((scale != 0.0f || offset != 0.0f) && announced++ < 12)
+    {
+        printf("render: polygon offset scale %g offset %g (mode control %08X)\n", scale, offset, suScModeControl);
+        fflush(stdout);
+    }
+    return g_rasterizer.Insert(key, MakeRasterizer(key[0], scale, offset));
 }
 
 RenderState::Handle RenderPipeline::Sampler(const uint32_t fetch[6])

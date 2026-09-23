@@ -102,6 +102,30 @@ four fetches are the same texel, the filtering collapses and a surface
 comes out wholly lit or wholly dark. `COD3_NOFETCHOFFSET=1` leaves them
 out again, for a comparison.
 
+A pixel program can be handed its own pixel's position: when bit 18 of
+`SQ_PROGRAM_CNTL` is set, the console writes it into the register that
+bits 8 to 15 of `SQ_CONTEXT_MISC` name (x and y in pixels, whole numbers,
+back facing in x's sign bit, a point sprite's coordinates in z and w).
+The title's soft particles use it to read the depth under themselves and
+fade where they meet the scene. Without it that register was nought, every
+particle read the depth of the frame's top left corner, and where that
+corner is a tree swaying in the wind all the smoke of a level came and
+went with its leaves. The draw block carries the flag, the register and
+the host to guest pixel scale, and the translation writes the position
+into that register when the flag is on. What it cost before: the smoke
+and dust of a fight, drawn as soft particles, came out with no fade at
+all and swallowed the picture whole. Over 250 frames of a Chambois fight
+thirty per cent of them were swallowed (the darkest wholly black); with
+the position handed over, none. `COD3_NOPIXELGEN=1` leaves it out again.
+
+The polygon offset is the console's, in `PA_SU_POLY_OFFSET_*`: the front
+pair when bit 11 of the mode control enables it, the back pair when bit
+12 does, since Direct3D has one offset for both faces. The slope's scale
+is in sixteenths and the offset in the depth's own range (this title asks
+for 8 and 0.0001), which the rasteriser state takes as a slope scaled
+bias and a whole number of depth steps. `COD3_NOPOLYOFFSET=1` leaves it
+out.
+
 **render_pipeline**: blend, depth stencil, rasteriser and sampler states
 by integer handle. The key is the register words that define the state
 (five words for blend, two for depth, one for the rasteriser, one for a
@@ -242,7 +266,8 @@ and there is no `r_shadow` or `r_glow` in its console. From
 the environment, over the menu: `COD3_SCALE`, `COD3_TEXTURE_FILTER=native|
 bilinear|trilinear|anisotropic`, `COD3_ANISO=1..16`, `COD3_VSYNC=0|1`,
 `COD3_AA=0|fxaa|msaa2|msaa4|msaa8|msaa4fxaa`, `COD3_TEXQUALITY=0|1|2`, `COD3_AIMBLUR=0|1`,
-`COD3_FULLSCREEN=0|1`, `COD3_NOMIPS=1`,
+`COD3_FULLSCREEN=0|1`, `COD3_NOMIPS=1`, `COD3_NOPIXELGEN=1`,
+`COD3_NOPOLYOFFSET=1`,
 `COD3_NOSHADERCACHE=1`, `COD3_NOPRECOMPILE=1`. For a scripted run,
 `COD3_CMD="second:command;..."` puts console commands on the title's
 buffer at those seconds, `COD3_STRINGS="prefix,..."` lists the
@@ -256,8 +281,15 @@ program's Nth interpolator out as its colour, `rN` a register, and
 `rN@M` the register as it stood after the Mth instruction; a program's
 hash before a colon (`COD3_D3DSHOW=e65dc0f6c6f3ceee:r6@72`) changes that
 one program alone, so the rest of the picture stays to place it by.
-`COD3_DUMPCONST=hash` prints the constants a program reads, once a
-second, with the boolean and loop constants beside them. In the frame log a texture that reads white says why
+`COD3_D3DSHOWSIGN=x|y|z|w` shows one lane of `rN@M` with its sign, red
+above nought, green below and blue where it is not a number.
+`COD3_DUMPCONST=hash[,hash...]` prints the constants a program reads, once a
+second (every upload in a logged frame), with the boolean and loop
+constants beside them. `COD3_D3DFRAME_COUNT=N` logs N frames rather than
+two, `COD3_D3DDRAWDUMPPS=hash` limits the per draw dumps to one pixel
+program's draws (a depth only draw dumps its depth with `COD3_D3DDRAWDUMPZ`),
+and `COD3_FRAMEDUMP_UNTIL=N` ends the frame dumps at the Nth present, so a
+fault that comes and goes can be caught frame by frame. In the frame log a texture that reads white says why
 (`WHITE: no texture in the fetch constant`, `format not uploaded`, `upload
 failed`), and the first draw that wants a program that could not be built
 says which and why; the captured programs that fail to translate are only
