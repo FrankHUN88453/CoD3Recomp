@@ -610,6 +610,12 @@ namespace
         if (path == nullptr) return;
         static const int every = []() { const char* t = getenv("COD3_FRAMEDUMP_EVERY"); const int v = t ? int(strtol(t, nullptr, 10)) : 120; return v > 0 ? v : 120; }();
         static const int keep = []() { const char* t = getenv("COD3_FRAMEDUMP_KEEP"); const int v = t ? int(strtol(t, nullptr, 10)) : 40; return v > 0 ? v : 40; }();
+        // COD3_FRAMEDUMP_FROM=N: nothing before the Nth present, so a run of
+        // consecutive frames (EVERY=1) can be kept from late in a level
+        // without writing every frame before it.
+        static const int from = []() { const char* t = getenv("COD3_FRAMEDUMP_FROM"); return t ? int(strtol(t, nullptr, 10)) : 0; }();
+        static int presents = 0;
+        if (presents++ < from) return;
         static int counter = 0;
         if ((counter++ % every) != 0) return;
         uint32_t w = 0, h = 0;
