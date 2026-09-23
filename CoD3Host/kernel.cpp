@@ -1,3 +1,4 @@
+#include "log.h"
 #include "kernel.h"
 #include <unordered_map>
 #include "scheduler.h"
@@ -988,6 +989,7 @@ void Kernel::Exit(int code)
         fflush(stdout);
         (void)getchar();
     }
+    Log::Finish();
     ExitProcess(static_cast<UINT>(code));
 }
 

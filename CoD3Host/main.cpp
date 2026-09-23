@@ -1,3 +1,4 @@
+#include "log.h"
 #include "installer.h"
 #include "kernel.h"
 #include "settings.h"
@@ -160,6 +161,7 @@ namespace
 
 int main(int argc, char** argv)
 {
+    Log::Start();
     // Every exit goes through Kernel::Exit, which waits for a key when this
     // program owns the console. Started from Explorer that is the difference
     // between a readable window and one that vanishes instantly.

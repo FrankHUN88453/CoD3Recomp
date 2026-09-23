@@ -19,6 +19,7 @@ enable_language(RC)
 set(CMAKE_RC_FLAGS "${CMAKE_RC_FLAGS} /I\"${CMAKE_CURRENT_SOURCE_DIR}/resources\"")
 
 add_executable(CoD3 WIN32
+    "log.cpp"
     "main.cpp"
     "installer.cpp"
     "xdvdfs.cpp"

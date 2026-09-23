@@ -68,7 +68,11 @@ vertical sync, a frame counter and the renderer's statistics, the mouse
 sensitivity and whether the mouse is read raw, the title's aim assist,
 the pad, and the keys. It is drawn
 in the colours of the title's own menus. It keeps its values in `CoD3Recomp.ini` beside the
-executable. `CoD3.cfg` beside the executable holds console commands run at
+executable. Everything the game prints goes to `CoD3.log` beside the
+executable as well as to its console, and the run before is kept as
+`CoD3.previous.log`: after a freeze or a crash, that file says where every
+thread stood (`COD3_LOG=0` turns it off, `COD3_LOG=path` puts it
+elsewhere). `CoD3.cfg` beside the executable holds console commands run at
 start (`seta com_maxfps 60` by default). The same settings can be forced
 from the environment for a run: `COD3_SCALE`, `COD3_TEXTURE_FILTER`,
 `COD3_RESSCALE`, `COD3_ANISO`, `COD3_AA`, `COD3_TEXQUALITY`, `COD3_AIMBLUR`, `COD3_VSYNC`, `COD3_FULLSCREEN`;
