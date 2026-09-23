@@ -175,15 +175,22 @@ causes were found, two fixed:
   and again. It now leaves such a page to the demand commit (zeros).
   Three restarts of Chambois in one run went through after this, where
   the second had hung every time.
-- **Still open: the wait for the GPU in the indirect buffer pool**
-  (sub_822F16A0). The title waits for the GPU's fence to pass a point in
-  its pool, the command processor has run everything and the fence it
-  wants is never written; the watchdog's report names it ("wants the GPU
-  past ... on lap ..."). It comes in the middle of a level too, not only
-  at a load.
-- **Still open: after a restart the level can come back wrong**, the
-  soldiers in their bind pose with black textures, or without the
-  player's weapon and HUD. At the teardown the title walks memory it has
+- **Fixed: the wait for the GPU in the indirect buffer pool**
+  (sub_822F16A0), which came in the middle of a level too, about one run
+  of Chambois in six within a hundred seconds, and in Saint-Lô: "The GPU
+  is hung and can't be recovered". The kernel's spin locks did nothing,
+  a leftover from before threads ran concurrently, and the driver's count
+  of pending counted submissions (device+0x2A74, under the lock at
+  +0x2A78) lost an update now and then: left at one, or at minus one,
+  every later submission went to a list nothing would flush, and the next
+  wait for the GPU never ended. The spin locks are real now, a compare and
+  swap on the guest's lock word; twelve runs of Chambois since, none
+  hung, at sixty frames a second.
+- **Still open: after a restart the level comes back wrong**: soldiers
+  black, distant ones in their bind pose, and after a while the main
+  thread stuck on memory nothing handed out; after the console's `spmap`
+  mid-level, without the player's weapon and HUD at all. The teardown
+  reads pointers that are text by then (0x434F49E1, "CO I"). At the teardown the title walks memory it has
   just freed, and this heap hands the lowest free address out first,
   which is that memory; `COD3_QUARANTINE=ms` keeps freed memory back that
   long and does remove those reads, but the restart still came back

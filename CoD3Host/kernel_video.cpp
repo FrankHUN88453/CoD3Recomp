@@ -217,12 +217,21 @@ namespace
             // runs on is not a guest thread and its processor number is
             // whatever it was given at creation, so it is set here, per
             // interrupt, to each CPU in the mask in turn.
+            //
+            // COD3_IRQSLOT=1 runs the handler holding that CPU's hardware
+            // thread, as the console never runs an interrupt beside the thread
+            // it interrupts. It was tried against the hung GPU waits, before
+            // the spin locks were made real, and made them more frequent, so
+            // it stays off.
+            static const bool holdSlot = []() { const char* t = getenv("COD3_IRQSLOT"); return t != nullptr && t[0] == '1'; }();
             if (cpuMask == 0) cpuMask = 1;
             for (uint32_t cpu = 0; cpu < 6; cpu++)
             {
                 if (((cpuMask >> cpu) & 1) == 0) continue;
                 Guest::SetProcessor(*t_commandContext, int(cpu));
+                if (holdSlot) Scheduler::Attach(int(cpu));
                 RunInterruptHandler(routine, cpu);
+                if (holdSlot) Scheduler::Detach();
             }
         });
 
@@ -619,7 +628,7 @@ namespace
                 Render::Report();
                 Kernel::ReportHeaps();
                 PoolTrace::Report();
-                Timeline::Report();
+                if (!Timeline::OnStallOnly()) Timeline::Report();
                 Kernel::ReportImports();
                 Kernel::ReportApcs();
                 Scheduler::Report();
@@ -1071,7 +1080,7 @@ PPC_FUNC(__imp__VdInitializeScalerCommandBuffer)
 // a wait that never ends says exactly which fence the GPU never wrote.
 namespace
 {
-    struct PoolWait { uint32_t device, end, lap; int64_t since; };
+    struct PoolWait { uint32_t device, end, lap, guestThread; int64_t since; };
     std::mutex g_poolWaitMutex;
     std::map<uint32_t, PoolWait> g_poolWaits;
 }
@@ -1082,7 +1091,12 @@ PPC_FUNC(sub_822F16A0)
     const uint32_t osId = GetCurrentThreadId();
     {
         std::lock_guard<std::mutex> lock(g_poolWaitMutex);
-        g_poolWaits[osId] = { ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, NowMilliseconds() };
+        // The waiter's own thread id as the title keeps it (r13+0x100, then
+        // +0x14C): the wait's timeout is held off while the device names
+        // this thread as the one with submissions pending.
+        const uint32_t threadObject = ctx.r13.u32 ? Guest::Read32(base, ctx.r13.u32 + 0x100) : 0;
+        const uint32_t guestThread = threadObject ? Guest::Read32(base, threadObject + 0x14C) : 0;
+        g_poolWaits[osId] = { ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, guestThread, NowMilliseconds() };
     }
     const int64_t started = NowMilliseconds();
     Timeline::Mark("gpu wait", ctx.r4.u32, ctx.r5.u32);
@@ -1108,6 +1122,13 @@ void Kernel::ReportPoolWaits()
                "0x%08X (lap %u), %llu ms so far\n",
             entry.first, wait.end, wait.lap, wait.lap & 3, word, word & 3,
             (unsigned long long)(NowMilliseconds() - wait.since));
+        // What holds the title's own five second timeout off: the device's
+        // owner of pending submissions and their count, against the waiter.
+        printf("    the waiter is guest thread %08X; the device's owner %08X, pending %u/%u, flags %02X%02X, counter %u, the GPU's counter word %u\n",
+            wait.guestThread, Guest::Read32(Guest::Base, wait.device + 10760),
+            Guest::Read32(Guest::Base, wait.device + 10864), Guest::Read32(Guest::Base, wait.device + 10868),
+            Guest::Read8(Guest::Base, wait.device + 10808), Guest::Read8(Guest::Base, wait.device + 10809),
+            Guest::Read32(Guest::Base, wait.device + 10780), block ? Guest::Read32(Guest::Base, block) : 0);
     }
 }
 

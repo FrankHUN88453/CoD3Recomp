@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 #include <Windows.h>
 
@@ -17,7 +18,7 @@ namespace
         const char* what;
         uint32_t a, b;
     };
-    constexpr uint32_t Capacity = 6000;
+    constexpr uint32_t Capacity = 60000;   // the last few seconds: the kernel's waits and sets are many
     Entry g_entries[Capacity];
     std::atomic<uint32_t> g_count{ 0 };
     std::atomic<bool> g_printed{ false };
@@ -28,6 +29,12 @@ namespace
         return std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
     }
+}
+
+bool Timeline::OnStallOnly()
+{
+    static const bool stall = []() { const char* text = getenv("COD3_TIMELINE"); return text != nullptr && strcmp(text, "stall") == 0; }();
+    return stall;
 }
 
 bool Timeline::Enabled()
@@ -67,11 +74,38 @@ void Timeline::Report()
 {
     if (!Enabled() || g_printed.exchange(true)) return;
     const uint32_t count = g_count.load();
-    const uint32_t shown = count < Capacity ? count : Capacity;
-    printf("timeline: the last %u moments, microseconds from the first recorded, os thread, what, values\n", shown);
-    for (uint32_t i = 0; i < shown; i++)
+    const uint32_t held = count < Capacity ? count : Capacity;
+    if (!OnStallOnly())
     {
-        const Entry& e = g_entries[(count - shown + i) % Capacity];
+        printf("timeline: the last %u moments, microseconds from the first recorded, os thread, what, values\n", held);
+        for (uint32_t i = 0; i < held; i++)
+        {
+            const Entry& e = g_entries[(count - held + i) % Capacity];
+            printf("t %10.1f  os %-6u %-14s %08X %08X\n", (e.nanoseconds - g_start) / 1000.0, e.thread, e.what, e.a, e.b);
+        }
+        fflush(stdout);
+        return;
+    }
+    // At a stall, the GPU pipeline alone: the kernel's waits and sets are
+    // most of what is recorded (the sound thread's alone fill thousands of
+    // entries a second) and would push the handful that matter out of any
+    // window. The last three thousand of the rest.
+    auto kernelMoment = [](const char* what) {
+        return strcmp(what, "ke wait") == 0 || strcmp(what, "ke waited") == 0 ||
+               strcmp(what, "set event") == 0 || strcmp(what, "unblocked") == 0;
+    };
+    uint32_t wanted = 0, first = held;
+    for (uint32_t i = held; i > 0; i--)
+    {
+        if (kernelMoment(g_entries[(count - held + i - 1) % Capacity].what)) continue;
+        first = i - 1;
+        if (++wanted == 3000) break;
+    }
+    printf("timeline: the last %u moments of the GPU pipeline (of %u kept), microseconds, os thread, what, values\n", wanted, held);
+    for (uint32_t i = first; i < held; i++)
+    {
+        const Entry& e = g_entries[(count - held + i) % Capacity];
+        if (kernelMoment(e.what)) continue;
         printf("t %10.1f  os %-6u %-14s %08X %08X\n", (e.nanoseconds - g_start) / 1000.0, e.thread, e.what, e.a, e.b);
     }
     fflush(stdout);

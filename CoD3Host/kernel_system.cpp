@@ -17,6 +17,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <Windows.h>
@@ -226,13 +227,58 @@ PPC_FUNC(__imp__NtYieldExecution)
 }
 
 // --- Interrupt level and spin locks ---------------------------------------
-// Nothing runs concurrently yet, so these only have to be consistent with each
-// other. They become real work the moment ExCreateThread does something.
+//
+// The spin locks did nothing, from the days when nothing ran concurrently,
+// and the title's threads run concurrently now. What the title guards with
+// them was not guarded at all: the graphics driver's count of pending
+// command buffer submissions (device+0x2A74, under the lock at +0x2A78) was
+// updated from two threads at once, and one update in some thousands was
+// lost. Left at one or at minus one instead of zero, it sent every later
+// submission to a list that nothing would ever flush, and the next wait for
+// the GPU never ended ("The GPU is hung and can't be recovered").
+//
+// The console's spin lock is a word in the title's memory: zero when free,
+// the owner's thread pointer while held, taken with a reservation and a
+// conditional store. The same here, with a compare and swap on the guest's
+// word, so code of the title's that looks at the word sees what it would on
+// the console. A thread that has to wait stands aside at its hardware thread
+// now and then: the holder may share it, and cannot run while the waiter
+// holds it.
+namespace
+{
+    void AcquireGuestSpinLock(const PPCContext& ctx, uint8_t* base, uint32_t lock)
+    {
+        if (lock == 0) return;
+        uint32_t* word = reinterpret_cast<uint32_t*>(base + lock);
+        const uint32_t owner = __builtin_bswap32(ctx.r13.u32 != 0 ? ctx.r13.u32 : 1u);
+        for (uint32_t spins = 0;; spins++)
+        {
+            uint32_t expected = 0;
+            if (__atomic_load_n(word, __ATOMIC_RELAXED) == 0 &&
+                __atomic_compare_exchange_n(word, &expected, owner, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+                return;
+            if ((spins & 63) == 63)
+            {
+                Scheduler::Checkpoint();
+                std::this_thread::yield();
+            }
+            else YieldProcessor();
+        }
+    }
+
+    void ReleaseGuestSpinLock(uint8_t* base, uint32_t lock)
+    {
+        if (lock == 0) return;
+        __atomic_store_n(reinterpret_cast<uint32_t*>(base + lock), 0u, __ATOMIC_RELEASE);
+    }
+}
 
 PPC_FUNC(__imp__KeEnterCriticalRegion) {}
 PPC_FUNC(__imp__KeLeaveCriticalRegion) {}
-PPC_FUNC(__imp__KeAcquireSpinLockAtRaisedIrql) {}
-PPC_FUNC(__imp__KeReleaseSpinLockFromRaisedIrql) {}
+// VOID KeAcquireSpinLockAtRaisedIrql(spinlock*)
+PPC_FUNC(__imp__KeAcquireSpinLockAtRaisedIrql) { AcquireGuestSpinLock(ctx, base, ctx.r3.u32); }
+// VOID KeReleaseSpinLockFromRaisedIrql(spinlock*)
+PPC_FUNC(__imp__KeReleaseSpinLockFromRaisedIrql) { ReleaseGuestSpinLock(base, ctx.r3.u32); }
 PPC_FUNC(__imp__KeLockL2) { ctx.r3.u32 = 0; }
 PPC_FUNC(__imp__KeUnlockL2) {}
 PPC_FUNC(__imp__KiApcNormalRoutineNop) { ctx.r3.u32 = 0; }
@@ -243,11 +289,12 @@ PPC_FUNC(__imp__KeRaiseIrqlToDpcLevel) { ctx.r3.u32 = 0; }
 // VOID KfLowerIrql(KIRQL irql)
 PPC_FUNC(__imp__KfLowerIrql) {}
 
-// KIRQL KfAcquireSpinLock(spinlock*)
-PPC_FUNC(__imp__KfAcquireSpinLock) { ctx.r3.u32 = 0; }
+// KIRQL KfAcquireSpinLock(spinlock*): the lock, and the old interrupt level,
+// which is always the lowest here.
+PPC_FUNC(__imp__KfAcquireSpinLock) { AcquireGuestSpinLock(ctx, base, ctx.r3.u32); ctx.r3.u32 = 0; }
 
 // VOID KfReleaseSpinLock(spinlock*, KIRQL)
-PPC_FUNC(__imp__KfReleaseSpinLock) {}
+PPC_FUNC(__imp__KfReleaseSpinLock) { ReleaseGuestSpinLock(base, ctx.r3.u32); }
 
 // --- Critical sections -----------------------------------------------------
 
@@ -571,10 +618,10 @@ PPC_FUNC(__imp__RtlNtStatusToDosError)
 PPC_FUNC(__imp__DbgPrint)
 {
     Kernel::CountImport("DbgPrint");
-    // The varargs are in guest registers and on the guest stack, and nothing
-    // here knows the conversions the format string asks for. Printing the
-    // format itself still says what the title is reporting.
-    const std::string format = GuestString(base, ctx.r3.u32);
+    // Formatted as the guest's printf would: the driver's report of a hung
+    // GPU is lines of a register's name and its value, and with the format
+    // alone it said nothing but the addresses of the names.
+    const std::string format = Kernel::FormatGuestCall(ctx, base, ctx.r3.u32, 4);
 
     // At most a few hundred lines a second. The driver's report of a hung
     // GPU walks a list of indirect buffers and prints each one, and when the

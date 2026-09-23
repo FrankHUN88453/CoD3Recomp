@@ -155,8 +155,10 @@ PPC_FUNC(sub_822F1B78)
     const uint32_t sizeAt = ctx.r5.u32;
     const uint32_t wanted = Guest::Read32(base, sizeAt);
     Line("alloc", device, base, flags, wanted);
+    Timeline::Mark("pool alloc", flags, wanted);
     __imp__sub_822F1B78(ctx, base);
     Line("allocated", device, base, ctx.r3.u32, Guest::Read32(base, sizeAt));
+    Timeline::Mark("pool got", ctx.r3.u32, Guest::Read32(base, sizeAt));
 }
 
 // sub_822F22C0(device, end, ib, dwords, count, list): an indirect buffer
@@ -168,6 +170,7 @@ PPC_FUNC(sub_822F22C0)
     const uint32_t dwords = ctx.r6.u32;
     const uint32_t count = ctx.r7.u32;
     Line("submit", device, base, ctx.r5.u32, (count << 28) | dwords);
+    Timeline::Mark("submit", ctx.r5.u32, (count << 28) | dwords);
     if (count != 0 && Enabled() && dwords <= 64 &&
         Kernel::Stats().filesOpened.load(std::memory_order_relaxed) >= 40)
     {
@@ -202,4 +205,22 @@ PPC_FUNC(sub_82302E88)
     __imp__sub_82302E88(ctx, base);
     Line("recorded", device, base, ctx.r3.u32, 0);
     Timeline::Mark("recorded", ctx.r3.u32);
+}
+
+// sub_822FDB70(device): what the title does when its wait for the GPU has
+// seen no progress for five seconds (sub_822EC168 calls it and gives the
+// wait up). Said every time: whether the title's own timeout comes at all
+// is the question when a pool wait never ends.
+extern "C" PPC_FUNC(__imp__sub_822FDB70);
+PPC_FUNC(sub_822FDB70)
+{
+    static std::atomic<int> announced{ 0 };
+    if (announced.fetch_add(1) < 8)
+    {
+        printf("pool: the title's own GPU timeout fired on os thread %lu, from %08X\n", GetCurrentThreadId(), uint32_t(ctx.lr));
+        fflush(stdout);
+    }
+    Timeline::Mark("gpu timeout", uint32_t(ctx.lr));
+    __imp__sub_822FDB70(ctx, base);
+    Timeline::Mark("gpu timeout done", ctx.r3.u32);
 }

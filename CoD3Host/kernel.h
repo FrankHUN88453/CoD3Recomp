@@ -166,6 +166,9 @@ namespace Kernel
 
     // Text the title formatted for itself, which is the closest thing it has
     // to telling this runtime what it is doing.
+    // A guest printf's text: the format at formatAddress, and its arguments
+    // from register firstRegister (3 to 10) on, then the stack.
+    std::string FormatGuestCall(const PPCContext& ctx, const uint8_t* base, uint32_t formatAddress, uint32_t firstRegister);
     void ReportGuestText(const std::string& text);
 
     // The last few kernel calls each thread made, in order. A thread that has

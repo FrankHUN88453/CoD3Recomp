@@ -9,6 +9,7 @@
 
 #include "kernel.h"
 #include "sampler.h"
+#include "timeline.h"
 
 #include <atomic>
 #include <chrono>
@@ -187,6 +188,7 @@ namespace
                 Kernel::ReportLocks();
                 Sampler::SampleNow();
                 DumpAllThreads();
+                Timeline::Report();
                 fflush(stdout);
             }
 

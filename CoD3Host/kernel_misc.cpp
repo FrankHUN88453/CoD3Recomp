@@ -143,6 +143,12 @@ namespace
     }
 }
 
+std::string Kernel::FormatGuestCall(const PPCContext& ctx, const uint8_t* base, uint32_t formatAddress, uint32_t firstRegister)
+{
+    GuestArguments arguments{ ctx, base, firstRegister };
+    return FormatGuest(base, GuestString(base, formatAddress), arguments);
+}
+
 // --- C runtime -------------------------------------------------------------
 
 // int sprintf(char* buffer, const char* format, ...)
