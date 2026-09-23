@@ -156,7 +156,15 @@ The legal notice, the logos, the attract loop and the mission briefings
 play, with A (Space) to skip; `COD3_NOFILMS=1` leaves them out, which the
 scripted runs do.
 
-Still open: volume textures are white; 5.1 is folded to stereo.
+Still open: 5.1 is folded to stereo. (The volume textures that read white
+are not: every fetch the title makes "as a volume" names a flat texture,
+and reads it; see docs/renderer.md.)
+
+The draws the renderer's report counts as "no target", some thousands a
+second in a level, are single points with the colour mask at nothing and
+depth off: they write nothing on the console either, and leaving them
+out loses nothing. No draw of a level needs one of the captured programs
+that do not translate.
 
 The sections that follow are the history of getting here, oldest first.
 
