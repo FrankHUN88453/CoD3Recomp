@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <map>
+#include <vector>
 #include <mutex>
 
 #include <Windows.h>
@@ -54,15 +55,55 @@ namespace
         return regions;
     }
 
+    // What happened to the heaps' regions, oldest first: each allocation
+    // (fresh or out of a freed range) and each free, with the caller. When
+    // the title reads memory it freed, the report says whose the memory was
+    // and when it changed hands. The last few thousand only.
+    struct Event { uint32_t address, size, from; char kind; };
+    std::vector<Event>& History()
+    {
+        static std::vector<Event> events;
+        return events;
+    }
+    void Note(char kind, uint32_t address, uint32_t size, uint32_t from)
+    {
+        std::vector<Event>& events = History();
+        if (events.size() >= 16384) events.erase(events.begin(), events.begin() + 4096);
+        events.push_back({ address, size, from, kind });
+    }
+
     uint32_t g_virtualNext = Guest::VirtualHeapBase;
     uint32_t g_physicalNext = Guest::PhysicalHeapBase;
 
     // What has been freed and not given out again, by address, the
-    // neighbours joined: one list for each heap.
+    // neighbours joined: one list for each heap. Beside it, when each range
+    // was freed (for a joined range, its latest part).
     std::map<uint32_t, uint32_t>& FreeList(bool physical)
     {
         static std::map<uint32_t, uint32_t> lists[2];
         return lists[physical ? 1 : 0];
+    }
+    std::map<uint32_t, uint64_t>& FreedAt(bool physical)
+    {
+        static std::map<uint32_t, uint64_t> times[2];
+        return times[physical ? 1 : 0];
+    }
+
+    // COD3_QUARANTINE=ms: a freed range is not handed out again for that
+    // long while anything else will do (the memory never handed out, then a
+    // range freed long enough ago); only then a range freed lately, the one
+    // freed longest ago first. The title walks some of what it frees at a
+    // level's teardown after freeing it (a list whose nodes it has just
+    // given back, a table of names in a block already returned), and with
+    // the lowest free address handed out first that is exactly the memory
+    // just freed: the walk finds the next load's data in it and follows it
+    // anywhere. With the quarantine those reads find the old contents, as
+    // they would on the console. Off by default: the mission restart still
+    // comes back wrong with it, and it changes where everything is placed.
+    uint64_t QuarantineMs()
+    {
+        static const uint64_t ms = []() { const char* t = getenv("COD3_QUARANTINE"); return t ? uint64_t(strtoull(t, nullptr, 10)) : 0ull; }();
+        return ms;
     }
 
     // A freed region back on the list, joined with the ones either side.
@@ -75,57 +116,110 @@ namespace
         DWORD was = 0;
         VirtualProtect(Guest::Ptr(address), size, PAGE_NOACCESS, &was);
         std::map<uint32_t, uint32_t>& list = FreeList(physical);
+        std::map<uint32_t, uint64_t>& times = FreedAt(physical);
+        const uint64_t now = GetTickCount64();
         auto next = list.lower_bound(address);
-        if (next != list.end() && next->first == address + size) { size += next->second; next = list.erase(next); }
+        if (next != list.end() && next->first == address + size)
+        {
+            size += next->second;
+            times.erase(next->first);
+            next = list.erase(next);
+        }
         if (next != list.begin())
         {
             auto previous = std::prev(next);
-            if (previous->first + previous->second == address) { previous->second += size; return; }
+            if (previous->first + previous->second == address)
+            {
+                previous->second += size;
+                times[previous->first] = now;
+                return;
+            }
         }
         list[address] = size;
+        times[address] = now;
     }
 
-    // First fit from the free list, the bump pointer after it. A region taken
-    // out of a free range leaves the rest of the range on the list.
+    // A region out of the free range at 'it', the rest of the range left on
+    // the list with the time it had.
+    uint32_t TakeFrom(std::map<uint32_t, uint32_t>::iterator it, uint32_t start, uint32_t size, bool physical)
+    {
+        std::map<uint32_t, uint32_t>& list = FreeList(physical);
+        std::map<uint32_t, uint64_t>& times = FreedAt(physical);
+        const uint32_t rangeStart = it->first, rangeSize = it->second;
+        const uint64_t freed = times[rangeStart];
+        list.erase(it);
+        times.erase(rangeStart);
+        if (start > rangeStart) { list[rangeStart] = start - rangeStart; times[rangeStart] = freed; }
+        if (start + size < rangeStart + rangeSize)
+        {
+            list[start + size] = rangeStart + rangeSize - (start + size);
+            times[start + size] = freed;
+        }
+        Regions()[start] = { size, physical };
+        DWORD was = 0;
+        VirtualProtect(Guest::Ptr(start), size, PAGE_READWRITE, &was);
+        Kernel::Stats().bytesAllocated.fetch_add(size, std::memory_order_relaxed);
+        // The first few reuses, for telling a reuse problem from another.
+        static int announced = 0;
+        if (announced++ < 8)
+        {
+            printf("memory: %s 0x%08X, %u KB, given out again from a free range of %u KB freed %llu ms before\n",
+                physical ? "physical" : "virtual", start, size >> 10, rangeSize >> 10, (unsigned long long)(GetTickCount64() - freed));
+            fflush(stdout);
+        }
+        return start;
+    }
+
+    // Where a region comes from, in order: a range freed long enough ago
+    // (first fit), the memory never handed out yet, and only then a range
+    // freed lately, the one freed longest ago first.
     uint32_t Take(uint32_t size, uint32_t alignment, bool physical)
     {
         // COD3_NOREUSE=1: the bump pointer alone, for telling a reuse
         // problem from another.
         static const bool noReuse = getenv("COD3_NOREUSE") != nullptr;
         std::map<uint32_t, uint32_t>& list = FreeList(physical);
-        for (auto it = list.begin(); it != list.end() && !noReuse; ++it)
-        {
+        std::map<uint32_t, uint64_t>& times = FreedAt(physical);
+        const uint64_t now = GetTickCount64();
+        auto fits = [&](std::map<uint32_t, uint32_t>::iterator it, uint32_t& start) {
             const uint32_t rangeStart = it->first, rangeSize = it->second;
-            const uint32_t start = Align(rangeStart, alignment);
-            if (start < rangeStart || start + size < start || start + size > rangeStart + rangeSize) continue;
-            list.erase(it);
-            if (start > rangeStart) list[rangeStart] = start - rangeStart;
-            if (start + size < rangeStart + rangeSize) list[start + size] = rangeStart + rangeSize - (start + size);
-            Regions()[start] = { size, physical };
-            DWORD was = 0;
-            VirtualProtect(Guest::Ptr(start), size, PAGE_READWRITE, &was);
-            Kernel::Stats().bytesAllocated.fetch_add(size, std::memory_order_relaxed);
-            // The first few reuses, for telling a reuse problem from another.
-            static int announced = 0;
-            if (announced++ < 8)
+            start = Align(rangeStart, alignment);
+            return !(start < rangeStart || start + size < start || start + size > rangeStart + rangeSize);
+        };
+        if (!noReuse)
+        {
+            for (auto it = list.begin(); it != list.end(); ++it)
             {
-                printf("memory: %s 0x%08X, %u KB, given out again from a free range of %u KB\n",
-                    physical ? "physical" : "virtual", start, size >> 10, rangeSize >> 10);
-                fflush(stdout);
+                uint32_t start;
+                if (now - times[it->first] >= QuarantineMs() && fits(it, start)) return TakeFrom(it, start, size, physical);
             }
-            return start;
         }
 
         uint32_t& next = physical ? g_physicalNext : g_virtualNext;
         const uint32_t limit = physical ? Guest::PhysicalHeapLimit : Guest::VirtualHeapLimit;
         const uint32_t address = Align(next, alignment);
-        if (address < next || address + size < address || address + size > limit)
-            return 0;
+        if (!(address < next || address + size < address || address + size > limit))
+        {
+            next = address + size;
+            Regions()[address] = { size, physical };
+            Kernel::Stats().bytesAllocated.fetch_add(size, std::memory_order_relaxed);
+            return address;
+        }
 
-        next = address + size;
-        Regions()[address] = { size, physical };
-        Kernel::Stats().bytesAllocated.fetch_add(size, std::memory_order_relaxed);
-        return address;
+        if (noReuse) return 0;
+        auto oldest = list.end();
+        uint32_t oldestStart = 0;
+        for (auto it = list.begin(); it != list.end(); ++it)
+        {
+            uint32_t start;
+            if (fits(it, start) && (oldest == list.end() || times[it->first] < times[oldest->first]))
+            {
+                oldest = it;
+                oldestStart = start;
+            }
+        }
+        if (oldest == list.end()) return 0;
+        return TakeFrom(oldest, oldestStart, size, physical);
     }
 
     // Whether an address lies in a region handed out and not freed. The
@@ -299,7 +393,9 @@ PPC_FUNC(__imp__MmAllocatePhysicalMemoryEx)
     if (alignment == 0 || (alignment & (alignment - 1)) != 0)
         alignment = LargePage;
 
+    const uint32_t reusedBefore = uint32_t(FreeList(true).size());
     const uint32_t address = Take(size, alignment, true);
+    if (address != 0) Note(address < g_physicalNext - size || reusedBefore != FreeList(true).size() ? 'r' : 'a', address, size, uint32_t(ctx.lr));
     if (address == 0)
     {
         fprintf(stderr, "MmAllocatePhysicalMemoryEx: out of physical space for %u bytes\n", size);
@@ -337,6 +433,7 @@ PPC_FUNC(__imp__MmFreePhysicalMemory)
         const uint32_t size = found->second.size;
         const bool physical = found->second.physical;
         Regions().erase(found);
+        Note('f', address, size, uint32_t(ctx.lr));
         Release(address, size, physical);
         Render::MemoryFreed(address, size);
     }
@@ -348,11 +445,27 @@ bool Kernel::FreedMemoryTouched(uint32_t address)
     const bool inHeap = (address >= Guest::PhysicalHeapBase && address < Guest::PhysicalHeapLimit) ||
                         (address >= Guest::VirtualHeapBase && address < Guest::VirtualHeapLimit);
     if (!inHeap || InLiveRegion(address)) return false;
+    // The first few: whose the memory was, from the history.
+    static int told = 0;
+    if (told < 4)
+    {
+        told++;
+        printf("memory: 0x%08X, what the regions holding it went through, oldest first:", address);
+        for (const Event& event : History())
+            if (address >= event.address && address - event.address < event.size)
+                printf(" %s 0x%08X+%uK by %08X;", event.kind == 'f' ? "freed" : event.kind == 'r' ? "given again" : "given",
+                    event.address, event.size >> 10, event.from);
+        printf("\n");
+    }
     // Let the access through, at the page: the run goes on, as it did when
-    // freed memory kept its contents.
+    // freed memory kept its contents. A page that was never committed has
+    // no protection to change, and saying it had been let through then sent
+    // the access straight back to fault again, for ever: the hangs at a
+    // level's teardown and reload were threads stopped on one load. Such a
+    // page is left to the demand commit, which hands it out as zeros, as
+    // the console hands out a fresh page.
     DWORD was = 0;
-    VirtualProtect(Guest::Ptr(address & ~0xFFFu), 0x1000, PAGE_READWRITE, &was);
-    return true;
+    return VirtualProtect(Guest::Ptr(address & ~0xFFFu), 0x1000, PAGE_READWRITE, &was) != FALSE;
 }
 
 void Kernel::ReportHeaps()

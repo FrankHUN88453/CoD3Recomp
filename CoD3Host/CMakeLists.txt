@@ -65,6 +65,7 @@ add_executable(CoD3 WIN32
     "audio_out.cpp"
     "xma.cpp"
     "parallel.cpp"
+    "title_fixes.cpp"
     "watchdog.cpp"
     "modules.cpp"
     "coroutines.cpp"

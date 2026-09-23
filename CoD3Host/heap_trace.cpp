@@ -12,6 +12,7 @@
 // functions are reached through weak aliases, which these definitions
 // replace.
 
+#include "heap_trace.h"
 #include "kernel.h"
 
 #include <atomic>
@@ -189,40 +190,34 @@ const uint32_t mstate = MallocState(base);
     }
 }
 
-// sub_823F04B0(object): the destructor whose last free makes the unsorted
-// list a cycle at a level's teardown. Every object it destroys is noted,
-// so the same one destroyed twice says the double free is a destructor
-// that runs twice rather than the heap's own doing.
-extern "C" PPC_FUNC(__imp__sub_823F04B0);
-PPC_FUNC(sub_823F04B0)
+// sub_823F04B0(object): the destructor that ran twice over the same
+// objects at a level's teardown and freed their fields twice (the fix is
+// in title_fixes.cpp). Every object it destroys is noted, so one destroyed
+// twice still shows here if another path ever does the same.
+void HeapTrace::Destroying(const PPCContext& ctx, uint8_t* base)
 {
+    if (!Wanted()) return;
     const uint32_t object = ctx.r3.u32;
-    if (Wanted())
+    static std::mutex mutex;
+    static std::unordered_set<uint32_t> destroyed;
+    static int announced = 0;
+    bool again = false;
     {
-        static std::mutex mutex;
-        static std::unordered_set<uint32_t> destroyed;
-        static int announced = 0;
-        bool again = false;
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            again = !destroyed.insert(object).second;
-        }
-        if (announced < 20)
-        {
-            announced++;
-            // The object's vtable and its first slot: the deleting
-            // destructor the caller reaches through it. When that slot is
-            // this very function, the destructor runs twice over the same
-            // object and frees its fields twice.
-            const uint32_t vtable = (object >= 0x10000 && object < 0xC0000000u) ? Guest::Read32(base, object) : 0;
-            const uint32_t slot0 = (vtable >= 0x10000 && vtable < 0xC0000000u) ? Guest::Read32(base, vtable) : 0;
-            printf("heap: destroying 0x%08X%s, vtable %08X slot0 %08X", object, again ? " AGAIN" : "", vtable, slot0);
-            PrintChain(ctx, base);
-            printf("\n");
-            fflush(stdout);
-        }
+        std::lock_guard<std::mutex> lock(mutex);
+        again = !destroyed.insert(object).second;
     }
-    __imp__sub_823F04B0(ctx, base);
+    if (announced < 20)
+    {
+        announced++;
+        // The object's vtable and its first slot: the deleting destructor
+        // the caller reaches through it.
+        const uint32_t vtable = (object >= 0x10000 && object < 0xC0000000u) ? Guest::Read32(base, object) : 0;
+        const uint32_t slot0 = (vtable >= 0x10000 && vtable < 0xC0000000u) ? Guest::Read32(base, vtable) : 0;
+        printf("heap: destroying 0x%08X%s, vtable %08X slot0 %08X", object, again ? " AGAIN" : "", vtable, slot0);
+        PrintChain(ctx, base);
+        printf("\n");
+        fflush(stdout);
+    }
 }
 
 extern "C" PPC_FUNC(__imp__sub_820CC1D0);

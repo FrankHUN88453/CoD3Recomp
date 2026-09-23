@@ -156,6 +156,45 @@ The legal notice, the logos, the attract loop and the mission briefings
 play, with A (Space) to skip; `COD3_NOFILMS=1` leaves them out, which the
 scripted runs do.
 
+### A level's teardown: what is fixed and what is not
+
+Loading a level from inside another (the next mission, a restart after
+"MISSION FAILED", the console's `spmap`) hung one time in two. Three
+causes were found, two fixed:
+
+- **A destructor that ran twice** (the title's own fault). sub_823F0828
+  destroys a list of objects by calling their destructor, sub_823F04B0,
+  and then deleting them through the vtable, whose deleting destructor
+  calls sub_823F04B0 again: six blocks freed twice, a dlmalloc bin turned
+  into a cycle, and the next malloc (sub_820CCF00) never returned. The
+  second run is left out now (`title_fixes.cpp`).
+- **The fault handler sent a thread round for ever.** The title reads
+  memory it has freed at a teardown, and memory nothing ever handed it;
+  the handler let such a read through by opening the page, and claimed it
+  had when the page was not committed at all, so the load faulted again,
+  and again. It now leaves such a page to the demand commit (zeros).
+  Three restarts of Chambois in one run went through after this, where
+  the second had hung every time.
+- **Still open: the wait for the GPU in the indirect buffer pool**
+  (sub_822F16A0). The title waits for the GPU's fence to pass a point in
+  its pool, the command processor has run everything and the fence it
+  wants is never written; the watchdog's report names it ("wants the GPU
+  past ... on lap ..."). It comes in the middle of a level too, not only
+  at a load.
+- **Still open: after a restart the level can come back wrong**, the
+  soldiers in their bind pose with black textures, or without the
+  player's weapon and HUD. At the teardown the title walks memory it has
+  just freed, and this heap hands the lowest free address out first,
+  which is that memory; `COD3_QUARANTINE=ms` keeps freed memory back that
+  long and does remove those reads, but the restart still came back
+  without the player's weapon once with it, so it stays off.
+
+`COD3_HEAPCHECK=1` names every object sub_823F04B0 destroys and every
+free of a block the heap does not hold; a read of freed memory, or of heap
+memory never handed out, is printed with its reader and what the region
+went through; `COD3_ONESLOT=1` runs every guest thread on one hardware
+thread (the teardown hangs came with it too, so they are not a race).
+
 Still open: 5.1 is folded to stereo. (The volume textures that read white
 are not: every fetch the title makes "as a volume" names a flat texture,
 and reads it; see docs/renderer.md.)

@@ -351,6 +351,28 @@ namespace
             }
             return EXCEPTION_CONTINUE_EXECUTION;
         }
+        // In one of the heaps, outside everything they handed out, and never
+        // committed: a pointer the title kept from somewhere, said with its
+        // reader (the dozen commits below are used up by a level's load).
+        {
+            const uint32_t guest = uint32_t(offset);
+            const bool inHeap = (guest >= Guest::PhysicalHeapBase && guest < Guest::PhysicalHeapLimit) ||
+                                (guest >= Guest::VirtualHeapBase && guest < Guest::VirtualHeapLimit);
+            static std::atomic<int> strays{ 0 };
+            if (inHeap && strays.fetch_add(1) < 16)
+            {
+                uint32_t functions[10] = {};
+                const int count = Sampler::WalkGuestStack(info->ContextRecord, functions, 10);
+                printf("memory: %s of heap memory never handed out, at 0x%08X;", AccessKind(record->ExceptionInformation[0]), guest);
+                if (count > 0)
+                {
+                    printf(" from");
+                    for (int i = 0; i < count; i++) printf(" sub_%08X", functions[i]);
+                }
+                printf("\n");
+                fflush(stdout);
+            }
+        }
 
         // The first page of the address space is not memory on this console,
         // and an access there is a null pointer being followed. Committing it

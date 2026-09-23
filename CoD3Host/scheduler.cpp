@@ -24,6 +24,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <thread>
 #include <Windows.h>
@@ -126,6 +127,11 @@ namespace
 void Scheduler::Attach(int hardwareThread)
 {
     if (hardwareThread < 0 || hardwareThread >= HardwareThreads) return;
+    // COD3_ONESLOT=1: every guest thread on the first hardware thread, so
+    // no two ever run guest code at once. Slow, and only for telling a race
+    // between threads from a fault of one thread alone.
+    static const bool oneSlot = getenv("COD3_ONESLOT") != nullptr;
+    if (oneSlot) hardwareThread = 0;
     t_slot = hardwareThread;
     Take();
 }
@@ -182,6 +188,8 @@ void Scheduler::Report()
 void Scheduler::Reassign(unsigned long osThreadId, int hardwareThread)
 {
     if (hardwareThread < 0 || hardwareThread >= HardwareThreads) return;
+    static const bool oneSlot = getenv("COD3_ONESLOT") != nullptr;
+    if (oneSlot) hardwareThread = 0;
 
     std::lock_guard<std::mutex> lock(g_pendingMutex);
     g_pending[osThreadId] = hardwareThread;
