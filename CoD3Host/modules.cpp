@@ -252,9 +252,26 @@ uint32_t Modules::Load(PPCContext& ctx, uint8_t* base, const std::string& guestP
     return module->handle;
 }
 
-void Modules::Unload(uint32_t handle)
+void Modules::Unload(PPCContext& ctx, uint8_t* base, uint32_t handle)
 {
-    std::lock_guard<std::mutex> lock(g_mutex);
+    std::unique_lock<std::mutex> lock(g_mutex);
+    if (g_loaded == nullptr || g_loaded->handle != handle) return;
+
+    // The DLL's main with DLL_PROCESS_DETACH, before it goes, as the loader
+    // calls it: its static objects are destroyed there, and they took their
+    // places in the title's own lists and tables when the attach built them.
+    const uint32_t entry = g_loaded->entry;
+    const std::string name = g_loaded->name;
+    lock.unlock();
+    if (PPCFunc* routine = Lookup(entry))
+    {
+        ctx.r3.u32 = handle;
+        ctx.r4.u32 = 0;   // DLL_PROCESS_DETACH
+        ctx.r5.u32 = 0;
+        routine(ctx, base);
+        printf("modules: %s entry point returned 0x%08X for the detach\n", name.c_str(), ctx.r3.u32);
+    }
+    lock.lock();
     if (g_loaded == nullptr || g_loaded->handle != handle) return;
     printf("modules: %s unloaded\n", g_loaded->name.c_str());
     fflush(stdout);

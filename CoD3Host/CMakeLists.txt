@@ -39,6 +39,7 @@ add_executable(CoD3 WIN32
     "title_trace.cpp"
     "heap_trace.cpp"
     "pool_trace.cpp"
+    "table_trace.cpp"
     "timeline.cpp"
     "render_d3d11.cpp"
     "render_state.cpp"

@@ -368,7 +368,7 @@ PPC_FUNC(__imp__XexLoadImage)
 PPC_FUNC(__imp__XexUnloadImage)
 {
     Kernel::CountImport("XexUnloadImage");
-    Modules::Unload(ctx.r3.u32);
+    Modules::Unload(ctx, base, ctx.r3.u32);
     ctx.r3.u32 = X_STATUS_SUCCESS;
 }
 

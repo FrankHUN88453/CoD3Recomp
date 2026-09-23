@@ -24,9 +24,10 @@ namespace Modules
     // reason in the log.
     uint32_t Load(PPCContext& ctx, uint8_t* base, const std::string& guestPath);
 
-    // XexUnloadImage: the handle's module is forgotten. Its memory stays
-    // until the next module lands on it.
-    void Unload(uint32_t handle);
+    // XexUnloadImage: the module's entry point runs with DLL_PROCESS_DETACH
+    // on the calling thread, as the loader runs it, and then the module is
+    // forgotten. Its memory stays until the next module lands on it.
+    void Unload(PPCContext& ctx, uint8_t* base, uint32_t handle);
 
     // XexGetProcedureAddress: the address of an export by ordinal, or nought.
     uint32_t Export(uint32_t handle, uint32_t ordinal);

@@ -659,7 +659,23 @@ PPC_FUNC(__imp__DbgPrint)
 PPC_FUNC(__imp__DbgBreakPoint)
 {
     Kernel::CountImport("DbgBreakPoint");
-    printf("\nguest: DbgBreakPoint at 0x%08X\n", uint32_t(ctx.lr));
+    // The chain of callers too: the break is the title's own assertion,
+    // reached through one wrapper from everywhere, and which one failed is
+    // two or three frames up. The prologues save the return address eight
+    // bytes below each back chain pointer.
+    printf("\nguest: DbgBreakPoint at 0x%08X, from", uint32_t(ctx.lr));
+    uint32_t frame = ctx.r1.u32;
+    for (int depth = 0; depth < 12; depth++)
+    {
+        if (frame < 0x10000 || frame >= 0xC0000000u) break;
+        const uint32_t caller = Guest::Read32(base, frame);
+        if (caller <= frame || caller - frame > 0x100000 || (caller & 7) != 0 || caller >= 0xC0000000u) break;
+        const uint32_t address = Guest::Read32(base, caller - 8);
+        if (address < 0x82000000u || address >= 0x8A000000u) break;
+        printf(" %08X", address);
+        frame = caller;
+    }
+    printf("\n");
     fflush(stdout);
 }
 

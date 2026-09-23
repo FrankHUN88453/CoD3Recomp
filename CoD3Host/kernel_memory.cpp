@@ -406,6 +406,13 @@ PPC_FUNC(__imp__MmAllocatePhysicalMemoryEx)
     if (VirtualAlloc(Guest::Ptr(address), size, MEM_COMMIT, PAGE_READWRITE) != nullptr)
         memset(Guest::Ptr(address), 0, size);
 
+    // COD3_TRACEPHYS=1: every physical region handed out and freed, with
+    // the caller, to compare a level's layout at its first load and at a
+    // reload.
+    static const bool tracePhysical = getenv("COD3_TRACEPHYS") != nullptr;
+    if (tracePhysical)
+        printf("phys: give 0x%08X..0x%08X (%u KB) align %u from %08X\n", address, address + size, size >> 10, alignment, uint32_t(ctx.lr));
+
     ctx.r3.u32 = address;
 }
 
@@ -428,6 +435,9 @@ PPC_FUNC(__imp__MmFreePhysicalMemory)
             fflush(stdout);
         }
     }
+    static const bool tracePhysical = getenv("COD3_TRACEPHYS") != nullptr;
+    if (tracePhysical)
+        printf("phys: free 0x%08X (%u KB) from %08X\n", address, found != Regions().end() ? found->second.size >> 10 : 0u, uint32_t(ctx.lr));
     if (found != Regions().end())
     {
         const uint32_t size = found->second.size;
