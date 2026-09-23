@@ -230,7 +230,9 @@ namespace
     // that many seconds from the start. Names are start back a b x y up
     // down left right ls rs; a plus joins several ("10:down+a"), and the
     // seconds can have a decimal. "40:lt/6" and "40:rt/6" hold the left
-    // or right trigger for that many seconds (aiming, firing).
+    // or right trigger for that many seconds (aiming, firing), and
+    // "40:ly+/5" or "40:rx-50/2" hold a stick (lx ly rx ry, + or -, an
+    // optional per cent): walking and looking round without a hand on it.
     //
     // A press lasts two of the title's own reads of the pad and no longer.
     // It used to last a quarter of a second, and a menu that opened while
@@ -240,7 +242,10 @@ namespace
     // fast the screens came.
     struct ScriptedPress { double at; uint16_t buttons; int readsLeft; bool begun; };
     std::vector<ScriptedPress> g_script;
-    struct ScriptedHold { double at, until; bool left; };
+    // A held trigger or stick: which (0 and 1 the left and right trigger,
+    // 2 to 5 the left stick's x and y and the right stick's x and y) and how
+    // far, as a fraction of full, negative for left and down.
+    struct ScriptedHold { double at, until; int control; float amount; };
     std::vector<ScriptedHold> g_holds;
     bool g_scriptParsed = false;
     std::chrono::steady_clock::time_point g_scriptStart;
@@ -278,7 +283,23 @@ namespace
                     std::string rest = item.substr(colon + 1);
                     if (rest.compare(0, 3, "lt/") == 0 || rest.compare(0, 3, "rt/") == 0)
                     {
-                        g_holds.push_back({ press.at, press.at + atof(rest.c_str() + 3), rest[0] == 'l' });
+                        g_holds.push_back({ press.at, press.at + atof(rest.c_str() + 3), rest[0] == 'l' ? 0 : 1, 1.0f });
+                        continue;
+                    }
+                    // A stick: "rx+/3" holds the right stick fully right for
+                    // three seconds, "ly+60/2" the left stick six tenths up
+                    // for two (walking forward). lx ly rx ry, + or -, an
+                    // optional per cent, then the seconds.
+                    if (rest.size() >= 4 && (rest[0] == 'l' || rest[0] == 'r') && (rest[1] == 'x' || rest[1] == 'y') &&
+                        (rest[2] == '+' || rest[2] == '-'))
+                    {
+                        const size_t slash = rest.find('/');
+                        if (slash == std::string::npos) continue;
+                        const std::string percent = rest.substr(3, slash - 3);
+                        float amount = percent.empty() ? 1.0f : float(atof(percent.c_str())) / 100.0f;
+                        if (rest[2] == '-') amount = -amount;
+                        const int control = 2 + (rest[0] == 'r' ? 2 : 0) + (rest[1] == 'y' ? 1 : 0);
+                        g_holds.push_back({ press.at, press.at + atof(rest.c_str() + slash + 1), control, amount });
                         continue;
                     }
                     size_t from = 0;
@@ -313,13 +334,25 @@ namespace
         return buttons;
     }
 
-    // The triggers a script holds now.
-    void ScriptedTriggers(uint8_t& left, uint8_t& right)
+    // The triggers and sticks a script holds now.
+    void ScriptedHolds(Input::Pad& pad)
     {
         if (g_holds.empty()) return;
         const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - g_scriptStart).count();
         for (const ScriptedHold& hold : g_holds)
-            if (seconds >= hold.at && seconds < hold.until) (hold.left ? left : right) = 255;
+        {
+            if (seconds < hold.at || seconds >= hold.until) continue;
+            const int16_t stick = int16_t(std::clamp(hold.amount, -1.0f, 1.0f) * 32767.0f);
+            switch (hold.control)
+            {
+            case 0: pad.leftTrigger = 255; break;
+            case 1: pad.rightTrigger = 255; break;
+            case 2: pad.thumbLX = stick; break;
+            case 3: pad.thumbLY = stick; break;
+            case 4: pad.thumbRX = stick; break;
+            case 5: pad.thumbRY = stick; break;
+            }
+        }
     }
 
     // The title has read the pad: the presses it saw count down.
@@ -498,7 +531,7 @@ namespace
         const uint16_t fromScript = ScriptedButtons();
         uint16_t fromPad = 0;
         pad.buttons |= fromScript;
-        ScriptedTriggers(pad.leftTrigger, pad.rightTrigger);
+        ScriptedHolds(pad);
         // COD3_NOPAD=1 ignores a physical pad the same way, for the same
         // reason: one lying on the desk with a button pressed walked the
         // title's menus in place of the script.
