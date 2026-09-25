@@ -574,7 +574,11 @@ namespace
                 else if (opcode == 17) Line(Format("fetched = float4(0.0, 0.0, 0.0, 0.0);", dstReg & 0x1F));
                 else if (opcode == 18)
                 {
-                    if (pixel) Line(Format("fetched = float4(ddx(%s.x), ddx(%s.y), ddy(%s.x), ddy(%s.y));",
+                    // getGradients: (d/dx, d/dy) of the first component, then of
+                    // the second. The characters' programs take a tangent frame
+                    // from these, and with both x derivatives first the frame
+                    // lost its y half: the uniforms went black in patches.
+                    if (pixel) Line(Format("fetched = float4(ddx(%s.x), ddy(%s.x), ddx(%s.y), ddy(%s.y));",
                         coordinate.c_str(), coordinate.c_str(), coordinate.c_str(), coordinate.c_str()));
                     else Line("fetched = float4(0.0, 0.0, 0.0, 0.0);");
                 }
@@ -1000,7 +1004,7 @@ uint64_t XenosHlsl::Version()
     // A number that changes when the translation would, or when one of the
     // environment knobs that shape the HLSL is set: the disk cache keyed by
     // it then starts afresh rather than serving the other translation.
-    std::string text = "xenos_hlsl 2026-09-22 bswap packed flat3d fetch offsets alu pairs read first pixel params";
+    std::string text = "xenos_hlsl 2026-09-26 bswap packed flat3d fetch offsets alu pairs read first pixel params gradients dx dy";
     if (const char* lanes = getenv("COD3_SCALARLANES")) { text += " lanes="; text += lanes; }
     if (const char* show = getenv("COD3_D3DSHOW")) { text += " show="; text += show; }
     if (const char* sign = getenv("COD3_D3DSHOWSIGN")) { text += " sign="; text += sign; }

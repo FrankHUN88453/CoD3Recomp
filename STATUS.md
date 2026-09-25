@@ -218,10 +218,21 @@ causes were found, two fixed:
   that does not leave: memset was the only real one. What was worked out
   of the animation trees, the asset banks and the zones on the way is in
   [docs/animation.md](docs/animation.md).
-- **Still open: the Polish soldiers' uniforms are black**, at the first
-  load as much as after a restart (the head, helmet and pack are right).
-  After the console's `spmap` mid-level the player has no weapon and no
-  HUD. The table of weapons (0x82A2A2E0) is not the cause, but it is not
+- **Fixed: the soldiers' uniforms were black in patches**, at the first
+  load as much as after a restart. It was the renderer, not the level:
+  the characters' pixel programs (27f44a32 for the body, 45 programs in
+  all, the hands and weapons among them) build their tangent frame from
+  screen derivatives with `getGradients`, whose result is d/dx and d/dy
+  of the first component, then of the second. The translator put both
+  d/dx first, so the frame lost its y half, the lighting (checked with
+  `COD3_D3DSHOW=27f44a3227169b05:r2@127 COD3_D3DSHOWSIGN=x`) fell to
+  nothing in blotches that looked like camouflage, and the albedo
+  (a plain khaki) and the specular term were right all along. The
+  order is Xenia's (x and z d/dx, y and w d/dy), and the program itself
+  asks for `.x` and `.y` of the gradients of `r0.ww`, which only makes
+  sense that way.
+- **Still open:** after the console's `spmap` mid-level the player has no
+  weapon and no HUD. The table of weapons (0x82A2A2E0) is not the cause, but it is not
   rebuilt at a reload as an earlier note said either: the title fills it
   once a session (a flag at 0x82AB1BCC that nothing clears) and keeps
   the old entries, whose names happened to still be readable. At the
