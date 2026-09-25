@@ -230,7 +230,7 @@ if markdown:
               'table is and how it was read is in [scripts.md](scripts.md). "calls" counts the '
               'level\'s calls through each offset; "reads" are the argument registers the function '
               'reads before writing them.\n\n' % level)
-    open(markdown, 'w', encoding='utf-8').write(header + result + '\n')
+    open(markdown, 'w', encoding='utf-8', newline='\n').write(header + result + '\n')
     print('%d entries written to %s' % (len(rows), markdown))
 else:
     print(result)
