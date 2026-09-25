@@ -198,15 +198,36 @@ causes were found, two fixed:
   wait for the GPU never ended. The spin locks are real now, a compare and
   swap on the guest's lock word; twelve runs of Chambois since, none
   hung, at sixty frames a second.
-- **Still open: after a restart the level comes back wrong**: soldiers
-  black, distant ones in their bind pose, and after a while the main
-  thread stuck on memory nothing handed out; after the console's `spmap`
-  mid-level, without the player's weapon and HUD at all. The teardown
-  reads pointers that are text by then (0x434F49E1, "CO I"). At the teardown the title walks memory it has
-  just freed, and this heap hands the lowest free address out first,
-  which is that memory; `COD3_QUARANTINE=ms` keeps freed memory back that
-  long and does remove those reads, but the restart still came back
-  without the player's weapon once with it, so it stays off.
+- **Fixed: soldiers in their bind pose after a restart.** The title's
+  memset (sub_8234EBA0, and the same routine in every level DLL) ends on
+  `stb / bdzlr / stb / bdzlr / stb / blr` for the last one to three bytes,
+  and the analyser ended the function at the first `bdzlr`: every memset
+  whose length ran two or three bytes past a word left its last one or
+  two bytes as they were. An animation tree of 25 animations is 74 bytes,
+  so its last slot kept an old byte and named a record of the animation
+  info pool (0x82A59DB0) it had never taken. At a restart the title gives
+  back every record the trees hold (sub_824F7F90, from the `map_restart`
+  and death-restart handlers), that record went onto the free list a
+  second time, the list closed into a loop of a few records, and from
+  then on every soldier got the same ones: one animation ending took
+  another soldier's away, and a tree with nothing playing leaves its
+  model in the bind pose. memset is the host's now (`native_crt.cpp`);
+  three restarts of Chambois in a row came back with every soldier
+  moving, and the pool stays whole (`COD3_TRACEANIMHEAP=1` checks it).
+  `scripts/cut_tails.py` lists the functions that end on an instruction
+  that does not leave: memset was the only real one.
+- **Still open: the Polish soldiers' uniforms are black**, at the first
+  load as much as after a restart (the head, helmet and pack are right).
+  After the console's `spmap` mid-level the player has no weapon and no
+  HUD. The table of weapons (0x82A2A2E0) is not the cause, but it is not
+  rebuilt at a reload as an earlier note said either: the title fills it
+  once a session (a flag at 0x82AB1BCC that nothing clears) and keeps
+  the old entries, whose names happened to still be readable. At the
+  teardown the title walks memory it has just freed, and this heap hands
+  the lowest free address out first, which is that memory;
+  `COD3_QUARANTINE=ms` keeps freed memory back that long and does remove
+  those reads, but the reload still came back without the weapon once
+  with it, so it stays off.
 
 `COD3_HEAPCHECK=1` names every object sub_823F04B0 destroys and every
 free of a block the heap does not hold; a read of freed memory, or of heap
