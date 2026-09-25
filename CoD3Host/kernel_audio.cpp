@@ -196,6 +196,7 @@ namespace
         size_t fifoRead = 0;
         uint32_t packetInBuffer = 0;     // the next packet of the current input buffer
         uint32_t blocksThisEnable = 0;   // written since the last enable
+        uint32_t output = 0;             // the output ring the last initialize gave
     };
     std::map<uint32_t, Context> g_xma;   // by context address
 
@@ -234,8 +235,22 @@ namespace
                 if (OutputValid(base, context) == 0) return;   // the ring is the title's until it says otherwise
                 uint32_t write = WriteOffset(base, context);
                 const uint32_t read = ReadOffset(base, context);
+                if (OutputPtr(base, context) != state.output)
+                {
+                    static std::atomic<int> told{ 0 };
+                    if (told.fetch_add(1) < 20)
+                    {
+                        printf("xma: context 0x%08X would write to 0x%08X, but was initialised with 0x%08X\n",
+                            context, OutputPtr(base, context), state.output);
+                        fflush(stdout);
+                    }
+                }
                 uint8_t* block = Guest::Ptr(Guest::PhysicalAlias(OutputPtr(base, context))) + write * 256;
-                for (uint32_t i = 0; i < 128; i++)
+                // COD3_XMANOWRITE=1: the ring is moved along as ever but the
+                // samples are not put into the title's memory, for telling a
+                // fault the decoded samples cause from one they do not.
+                static const bool noWrite = getenv("COD3_XMANOWRITE") != nullptr;
+                for (uint32_t i = 0; i < 128 && !noWrite; i++)
                 {
                     const uint16_t sample = uint16_t(state.fifo[state.fifoRead + i]);
                     block[i * 2] = uint8_t(sample >> 8);
@@ -354,10 +369,15 @@ PPC_FUNC(__imp__XMAReleaseContext)
     Kernel::CountImport("XMAReleaseContext");
     std::lock_guard<std::mutex> lock(g_audioMutex);
     auto found = g_xma.find(ctx.r3.u32);
-    if (found != g_xma.end())
+    const bool known = found != g_xma.end();
+    if (known)
     {
         Xma::Destroy(found->second.stream);
         g_xma.erase(found);
+    }
+    {
+        static std::atomic<int> told{ 0 };
+        if (told.fetch_add(1) < 40) { printf("xma: context 0x%08X released%s\n", ctx.r3.u32, known ? "" : " (not known)"); fflush(stdout); }
     }
     ctx.r3.u32 = X_ERROR_SUCCESS;
 }
@@ -415,6 +435,7 @@ PPC_FUNC(__imp__XMAInitializeContext)
     Guest::Write32(base, context + 20, input0);
     Guest::Write32(base, context + 24, input1);
     Guest::Write32(base, context + 28, output);
+    state.output = output;
     Guest::Write32(base, context + 32, work);
     Guest::Write32(base, context + 36, 0);
 

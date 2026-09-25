@@ -52,4 +52,9 @@ namespace Coroutines
 
     // Whether this host thread is currently running a script thread.
     bool Inside();
+
+    // The game module is shut down (a level's end, a restart after a
+    // death): the threads begun from here on are of a new generation, and
+    // a resume of a thread whose fiber is of an older one is reported.
+    void NewGeneration();
 }

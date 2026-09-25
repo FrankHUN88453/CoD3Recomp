@@ -353,6 +353,21 @@ int Run(int argc, char** argv)
         return 0;
     }
 
+    // COD3_IMAGEDUMP=path writes the loaded image, 0x82000000 on for sixteen
+    // megabytes, to a file and exits: the strings and tables of the title
+    // searched offline, with their guest addresses at their offsets.
+    if (const char* imageDump = getenv("COD3_IMAGEDUMP"))
+    {
+        if (FILE* out = fopen(imageDump, "wb"))
+        {
+            fwrite(Guest::Base + 0x82000000u, 1, 16u << 20, out);
+            fclose(out);
+            printf("image: sixteen megabytes from 0x82000000 written to %s\n", imageDump);
+        }
+        fflush(stdout);
+        return 0;
+    }
+
     printf("\nEntering guest code at _xstart\n");
     fflush(stdout);
 

@@ -3,6 +3,8 @@
 // when the level's first reader walks it. COD3_TRACETABLE=1.
 
 #include "kernel.h"
+#include "anim_heap_trace.h"
+#include "coroutines.h"
 
 #include <atomic>
 #include <cstdio>
@@ -104,4 +106,36 @@ PPC_FUNC(sub_824E03F0)
         fflush(stdout);
     }
     __imp__sub_824E03F0(ctx, base);
+}
+
+// The game module's init, sub_8256D978(level time, seed, restart, ...): which
+// way a level's start and its restart after a death go through it.
+extern "C" PPC_FUNC(__imp__sub_8256D978);
+PPC_FUNC(sub_8256D978)
+{
+    if (Wanted())
+    {
+        printf("table: game init r3 %08X r4 %08X r5 %08X r6 %08X from %08X, count %d\n", ctx.r3.u32, ctx.r4.u32, ctx.r5.u32,
+            ctx.r6.u32, uint32_t(ctx.lr), int32_t(Guest::Read32(base, CountAddress)));
+        fflush(stdout);
+    }
+    AnimHeapTrace::LevelStart(base);
+    __imp__sub_8256D978(ctx, base);
+}
+
+// The dispatcher in front of it, sub_8256E920(message, ...): every message
+// the engine sends the game module around a level's end and start.
+extern "C" PPC_FUNC(__imp__sub_8256E920);
+PPC_FUNC(sub_8256E920)
+{
+    static uint32_t counts[32] = {};
+    const uint32_t message = ctx.r3.u32;
+    // The game module's shutdown ends a generation of script threads.
+    if (message == 1) Coroutines::NewGeneration();
+    if (Wanted() && message < 32 && message != 2 && counts[message]++ < 6)
+    {
+        printf("table: game message %u (%08X %08X %08X) from %08X\n", message, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, uint32_t(ctx.lr));
+        fflush(stdout);
+    }
+    __imp__sub_8256E920(ctx, base);
 }

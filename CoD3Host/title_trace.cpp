@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <string>
 
 #include <Windows.h>
@@ -233,4 +234,117 @@ PPC_FUNC(sub_824CFBE8)
         }
     }
     __imp__sub_824CFBE8(ctx, base);
+}
+
+// A print the release build formats and throws away, sub_82539518(format,
+// ...): fourteen of the title's own warnings go through it, "Could not find
+// animation tree '%s'" among them. Printed here as "title says:", always:
+// they are rare and each one is a fault of the run.
+extern "C" PPC_FUNC(__imp__sub_82539518);
+PPC_FUNC(sub_82539518)
+{
+    static int said = 0;
+    if (said++ < 200)
+    {
+        std::string text = Kernel::FormatGuestCall(ctx, base, ctx.r3.u32, 4);
+        while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
+        printf("title says: %s (from %08X)\n", text.c_str(), uint32_t(ctx.lr));
+        fflush(stdout);
+    }
+    __imp__sub_82539518(ctx, base);
+}
+
+// The AI's animation tree, sub_8253C490(): "generic_human" looked up in the
+// loaded assets. What it found, each time, with COD3_TRACETITLE.
+extern "C" PPC_FUNC(__imp__sub_8253C490);
+PPC_FUNC(sub_8253C490)
+{
+    const uint32_t from = uint32_t(ctx.lr);
+    __imp__sub_8253C490(ctx, base);
+    static int told = 0;
+    if (Wanted() && told++ < 40) { printf("title: animation tree generic_human is %08X (from %08X)\n", ctx.r3.u32, from); fflush(stdout); }
+}
+
+// Three more of the title's own reports the release build keeps quiet,
+// printed as "title says:" always, since each one is a fault of the run:
+// sub_821279C0(format, ...) formats and hands the text to a printer the
+// build left empty; sub_820FBDB8(log, level, format, ...) keeps the last
+// eight messages in a ring ("apsMemory : pool(size=%d, count=%d) is
+// empty" among them); sub_820CB568() is the break after a failed check
+// ("stream_alloc: out of memory!" and fifty others), which does nothing
+// unless a debug flag is set: the call site says which check failed.
+extern "C" PPC_FUNC(__imp__sub_821279C0);
+PPC_FUNC(sub_821279C0)
+{
+    static int said = 0;
+    if (said++ < 300)
+    {
+        std::string text = Kernel::FormatGuestCall(ctx, base, ctx.r3.u32, 4);
+        while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
+        printf("title says: %s (from %08X)\n", text.c_str(), uint32_t(ctx.lr));
+        fflush(stdout);
+    }
+    __imp__sub_821279C0(ctx, base);
+}
+
+extern "C" PPC_FUNC(__imp__sub_820FBDB8);
+PPC_FUNC(sub_820FBDB8)
+{
+    static int said = 0;
+    if (said++ < 300)
+    {
+        std::string text = Kernel::FormatGuestCall(ctx, base, ctx.r5.u32, 6);
+        while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
+        printf("title says (level %u): %s (from %08X)\n", ctx.r4.u32, text.c_str(), uint32_t(ctx.lr));
+        fflush(stdout);
+    }
+    __imp__sub_820FBDB8(ctx, base);
+}
+
+extern "C" PPC_FUNC(__imp__sub_820CB568);
+PPC_FUNC(sub_820CB568)
+{
+    static std::map<uint32_t, uint32_t> seen;
+    const uint32_t from = uint32_t(ctx.lr);
+    if (++seen[from] <= 3)
+    {
+        printf("title: a check failed before the break at %08X (time %u there)\n", from, seen[from]);
+        fflush(stdout);
+    }
+    __imp__sub_820CB568(ctx, base);
+}
+
+// sub_82144CA8 is a bare return the release build left where the animation
+// library prints its complaints ("Couldn't find skeleton \"%s\" while loading
+// animfile \"%s\".", "Duplicate anim %s found.", "Attempt to load already
+// loaded AnimFile %s"). The same return also fills empty slots in virtual
+// tables, so only a first argument that is a string in the read-only data
+// is taken for a format. They are many (a line per shader registered, the
+// streamer's decompression), so only with COD3_TRACETITLE=1.
+extern "C" PPC_FUNC(__imp__sub_82144CA8);
+PPC_FUNC(sub_82144CA8)
+{
+    const uint32_t format = ctx.r3.u32;
+    if (Wanted() && format >= 0x82000000u && format < 0x82090000u)
+    {
+        bool text = true;
+        int length = 0;
+        for (; length < 200; length++)
+        {
+            const uint8_t c = base[format + length];
+            if (c == 0) break;
+            if ((c < 32 || c >= 127) && c != '\n') { text = false; break; }
+        }
+        // The streamer's per-chunk decompression line is not a complaint.
+        const bool chatter = memcmp(base + format, "LZO ", 4) == 0;
+        static int said = 0;
+        if (text && length >= 4 && !chatter && said++ < 2000)
+        {
+            std::string message = Kernel::FormatGuestCall(ctx, base, format, 4);
+            while (!message.empty() && (message.back() == '\n' || message.back() == '\r')) message.pop_back();
+            printf("title says: %s (from %08X)\n", message.c_str(), uint32_t(ctx.lr));
+            fflush(stdout);
+        }
+    }
+    __imp__sub_82144CA8(ctx, base);
 }

@@ -2,6 +2,7 @@
 #include "kernel.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <map>
 
 #include <Windows.h>
@@ -18,6 +19,7 @@ namespace
         PPCFunc* entry = nullptr;
         bool running = false;            // inside its entry function
         bool finished = false;
+        uint32_t generation = 0;         // the game module's lifetime it began in
 
         // The longjmp the thread asked for when it yielded.
         bool jumpPending = false;
@@ -35,6 +37,29 @@ namespace
     constexpr size_t FiberCommit = 64u << 10;
 
     int g_announced = 0;
+
+    // The game module's lifetimes, and what the threads did in the current one.
+    uint32_t g_generation = 0;
+    uint32_t g_begun = 0, g_resumed = 0, g_destroyed = 0, g_staleResumes = 0;
+
+    // COD3_TRACECOROUTINES=1: every ten seconds, how many threads began,
+    // resumed and were destroyed in them, and how many are suspended.
+    uint32_t g_windowBegun = 0, g_windowResumed = 0, g_windowDestroyed = 0;
+    void Window()
+    {
+        static const bool wanted = getenv("COD3_TRACECOROUTINES") != nullptr;
+        if (!wanted) return;
+        static uint64_t since = GetTickCount64();
+        const uint64_t now = GetTickCount64();
+        if (now - since < 10000) return;
+        since = now;
+        uint32_t suspended = 0;
+        if (t_table != nullptr) for (const auto& entry : *t_table) if (entry.second->running) suspended++;
+        printf("coroutines: in ten seconds %u begun, %u resumed, %u destroyed; %u suspended now, generation %u\n",
+            g_windowBegun, g_windowResumed, g_windowDestroyed, suspended, g_generation);
+        fflush(stdout);
+        g_windowBegun = g_windowResumed = g_windowDestroyed = 0;
+    }
 
     void CALLBACK Start(void* argument)
     {
@@ -114,6 +139,10 @@ void Coroutines::Begin(PPCContext& ctx, uint8_t* base, uint32_t key, PPCFunc* en
     coroutine.running = false;
     coroutine.finished = false;
     coroutine.jumpPending = false;
+    coroutine.generation = g_generation;
+    g_begun++;
+    g_windowBegun++;
+    Window();
     coroutine.fiber = CreateFiberEx(FiberCommit, FiberReserve, FIBER_FLAG_FLOAT_SWITCH,
                                     Start, &coroutine);
     if (g_announced++ < 12)
@@ -149,6 +178,15 @@ void Coroutines::Resume(PPCContext& ctx, uint8_t* base, uint32_t key)
     }
     coroutine->ctx = &ctx;
     coroutine->base = base;
+    g_resumed++;
+    g_windowResumed++;
+    Window();
+    if (coroutine->generation != g_generation && g_staleResumes++ < 20)
+    {
+        printf("coroutines: thread 0x%08X resumed on a fiber begun in generation %u, now %u: its host frames are from before the restart\n",
+            key, coroutine->generation, g_generation);
+        fflush(stdout);
+    }
     if (g_announced < 60)
     {
         g_announced++;
@@ -185,6 +223,8 @@ void Coroutines::Destroy(uint32_t key)
     if (found == t_table->end()) return;
     Coroutine* coroutine = found->second;
     t_table->erase(found);
+    g_destroyed++;
+    g_windowDestroyed++;
     if (coroutine == t_current)
     {
         // Destroying oneself: the fiber cannot be deleted from inside.
@@ -198,4 +238,20 @@ void Coroutines::Destroy(uint32_t key)
 bool Coroutines::Inside()
 {
     return t_current != nullptr;
+}
+
+void Coroutines::NewGeneration()
+{
+    uint32_t suspended = 0, finished = 0;
+    if (t_table != nullptr)
+        for (const auto& entry : *t_table)
+        {
+            if (entry.second->running) suspended++;
+            else if (entry.second->finished) finished++;
+        }
+    printf("coroutines: generation %u ends: %u threads begun, %u resumes, %u destroyed, %u fibers still suspended, %u finished and kept, %u stale resumes so far\n",
+        g_generation, g_begun, g_resumed, g_destroyed, suspended, finished, g_staleResumes);
+    fflush(stdout);
+    g_generation++;
+    g_begun = g_resumed = g_destroyed = 0;
 }
