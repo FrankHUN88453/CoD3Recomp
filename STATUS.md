@@ -215,7 +215,9 @@ causes were found, two fixed:
   three restarts of Chambois in a row came back with every soldier
   moving, and the pool stays whole (`COD3_TRACEANIMHEAP=1` checks it).
   `scripts/cut_tails.py` lists the functions that end on an instruction
-  that does not leave: memset was the only real one.
+  that does not leave: memset was the only real one. What was worked out
+  of the animation trees, the asset banks and the zones on the way is in
+  [docs/animation.md](docs/animation.md).
 - **Still open: the Polish soldiers' uniforms are black**, at the first
   load as much as after a restart (the head, helmet and pack are right).
   After the console's `spmap` mid-level the player has no weapon and no

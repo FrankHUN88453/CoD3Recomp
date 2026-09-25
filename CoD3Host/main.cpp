@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <Windows.h>
@@ -366,6 +367,49 @@ int Run(int argc, char** argv)
         }
         fflush(stdout);
         return 0;
+    }
+
+    // COD3_MEMDUMP=hexaddress,hexsize,seconds,path writes that much guest
+    // memory to a file once the run is that many seconds old, while the
+    // title goes on: what a level holds once loaded (the archives are
+    // compressed on the disc) searched offline. Several ranges may be given,
+    // separated by semicolons.
+    for (const char* memDump = getenv("COD3_MEMDUMP"); memDump != nullptr && *memDump != 0;)
+    {
+        const char* end = strchr(memDump, ';');
+        const std::string spec(memDump, end != nullptr ? size_t(end - memDump) : strlen(memDump));
+        memDump = end != nullptr ? end + 1 : nullptr;
+        char path[512] = {};
+        unsigned address = 0, size = 0, seconds = 0;
+        if (sscanf(spec.c_str(), "%x,%x,%u,%511s", &address, &size, &seconds, path) == 4)
+        {
+            const std::string where = path;
+            std::thread([address, size, seconds, where]() {
+                Sleep(seconds * 1000);
+                if (FILE* out = fopen(where.c_str(), "wb"))
+                {
+                    // Page by page, through ReadProcessMemory, which answers
+                    // a page it cannot read with a failure rather than a
+                    // fault for the guest's handlers: such a page reads as
+                    // zeros.
+                    std::vector<uint8_t> page(65536);
+                    for (uint64_t at = address; at < uint64_t(address) + size; at += page.size())
+                    {
+                        SIZE_T got = 0;
+                        if (!ReadProcessMemory(GetCurrentProcess(), Guest::Base + at, page.data(), page.size(), &got))
+                        {
+                            for (size_t part = 0; part < page.size(); part += 4096)
+                                if (!ReadProcessMemory(GetCurrentProcess(), Guest::Base + at + part, page.data() + part, 4096, &got))
+                                    std::fill(page.begin() + part, page.begin() + part + 4096, uint8_t(0));
+                        }
+                        fwrite(page.data(), 1, page.size(), out);
+                    }
+                    fclose(out);
+                    printf("memdump: 0x%08X, 0x%X bytes, written to %s\n", address, size, where.c_str());
+                    fflush(stdout);
+                }
+            }).detach();
+        }
     }
 
     printf("\nEntering guest code at _xstart\n");

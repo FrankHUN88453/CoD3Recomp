@@ -35,6 +35,23 @@
 
 namespace
 {
+    // A read of a guest address that may be anything (a field that holds a
+    // pointer in some objects and text in others): through ReadProcessMemory,
+    // so an address with nothing behind it answers false instead of faulting
+    // into the guest's handlers, which would commit a page there.
+    bool SafeRead(uint8_t* base, uint32_t address, void* out, size_t size)
+    {
+        SIZE_T got = 0;
+        return address >= 0x10000 && ReadProcessMemory(GetCurrentProcess(), base + address, out, size, &got) && got == size;
+    }
+
+    uint32_t SafeRead32(uint8_t* base, uint32_t address)
+    {
+        uint8_t bytes[4];
+        if (!SafeRead(base, address, bytes, 4)) return 0;
+        return (uint32_t(bytes[0]) << 24) | (uint32_t(bytes[1]) << 16) | (uint32_t(bytes[2]) << 8) | bytes[3];
+    }
+
     void NotePoolThread(uint32_t caller);
     void AfterTreeCall(const char* what, uint32_t tree, uint32_t index, uint32_t caller);
 }
@@ -414,18 +431,12 @@ namespace
     constexpr uint32_t GenerationAddress = 0x825D19E8;
     constexpr uint32_t AnimClassTable = 0x82027D84;
 
-    std::string EntryName(uint8_t* base, uint32_t name)
+    // An entry's name is a hash of the animation's name (sub_820CEBB8).
+    std::string EntryName(uint8_t*, uint32_t name)
     {
-        if (name < 0x10000 || name >= 0xC0000000u) { char hex[16]; snprintf(hex, sizeof hex, "#%08X", name); return hex; }
-        std::string text;
-        for (int i = 0; i < 64; i++)
-        {
-            const uint8_t c = base[name + i];
-            if (c == 0) break;
-            if (c < 32 || c >= 127) { char hex[16]; snprintf(hex, sizeof hex, "#%08X", name); return hex; }
-            text += char(c);
-        }
-        return text;
+        char hex[16];
+        snprintf(hex, sizeof hex, "#%08X", name);
+        return hex;
     }
 }
 
@@ -436,12 +447,12 @@ PPC_FUNC(sub_824FAF40)
     const uint32_t kept = Guest::Read32(base, entry + 8);
     const uint32_t tried = Guest::Read32(base, entry + 16);
     const uint32_t generation = Guest::Read32(base, GenerationAddress);
-    if (Wanted() && kept != 0 && Guest::Read32(base, kept) != AnimClassTable)
+    if (Wanted() && kept != 0 && SafeRead32(base, kept) != AnimClassTable)
     {
         if (s_stale.fetch_add(1) < 40)
         {
             printf("animtree: entry %08X \"%s\" keeps class %08X whose table is %08X, not an animation class\n",
-                entry, EntryName(base, Guest::Read32(base, entry)).c_str(), kept, Guest::Read32(base, kept));
+                entry, EntryName(base, Guest::Read32(base, entry)).c_str(), kept, SafeRead32(base, kept));
             fflush(stdout);
         }
     }
@@ -558,6 +569,68 @@ namespace
     }
 }
 
+// The asset banks, once: the resource manager at *(0x82A2AB68) keeps a bank
+// per id at +(13 + id) * 4, and the set of banks at *(0x82A2AB6C) a zone per
+// id at +(11 + id) * 4 and three ids of its own at +28, +32 and +40 (the last
+// is what a tree gets at +16 when its entity names no bank). Each is printed
+// with the first words of its object and any text in them, to put names to
+// the ids the trees carry (7, 8, 10, 12 in Chambois).
+namespace
+{
+    std::string TextAt(uint8_t* base, uint32_t address)
+    {
+        uint8_t bytes[48];
+        if (address < 0x10000 || address >= 0xC0000000u || !SafeRead(base, address, bytes, sizeof bytes)) return "";
+        std::string text;
+        for (int i = 0; i < 48; i++)
+        {
+            const uint8_t c = bytes[i];
+            if (c == 0) break;
+            if (c < 32 || c >= 127) return "";
+            text += char(c);
+        }
+        return text.size() >= 3 ? text : "";
+    }
+
+    void ListBanks(uint8_t* base)
+    {
+        const uint32_t manager = Guest::Read32(base, 0x82A2AB68);
+        const uint32_t set = Guest::Read32(base, 0x82A2AB6C);
+        printf("banks: manager %08X, set %08X; set +28 %d +32 %d +40 %d\n", manager, set,
+            int32_t(Guest::Read32(base, set + 28)), int32_t(Guest::Read32(base, set + 32)), int32_t(Guest::Read32(base, set + 40)));
+        for (uint32_t id = 0; id < 64; id++)
+        {
+            const uint32_t bank = manager ? Guest::Read32(base, manager + (13 + id) * 4) : 0;
+            const uint32_t zone = set ? Guest::Read32(base, set + (11 + id) * 4) : 0;
+            if (bank == 0 && zone == 0) continue;
+            printf("banks: id %2u bank %08X zone %08X", id, bank, zone);
+            if (zone >= 0x10000 && zone < 0xC0000000u)
+            {
+                printf(" (state +76 %d, +136 %d, +200 %d)", int32_t(Guest::Read32(base, zone + 76)),
+                    int32_t(Guest::Read32(base, zone + 136)), int32_t(Guest::Read32(base, zone + 200)));
+                for (uint32_t off = 0; off < 256; off += 4)
+                {
+                    const std::string text = TextAt(base, Guest::Read32(base, zone + off));
+                    if (!text.empty()) printf(" +%u:\"%s\"", off, text.c_str());
+                    const std::string inline_ = TextAt(base, zone + off);
+                    if (!inline_.empty() && off % 16 == 0) printf(" @+%u:\"%s\"", off, inline_.c_str());
+                }
+            }
+            if (bank >= 0x10000 && bank < 0xC0000000u)
+            {
+                printf(" | bank types %u", Guest::Read32(base, bank + 8));
+                for (uint32_t off = 0; off < 64; off += 4)
+                {
+                    const std::string text = TextAt(base, Guest::Read32(base, bank + off));
+                    if (!text.empty()) printf(" +%u:\"%s\"", off, text.c_str());
+                }
+            }
+            printf("\n");
+        }
+        fflush(stdout);
+    }
+}
+
 namespace AnimHeapTrace
 {
     void StartTreeScan(uint8_t* base)
@@ -565,9 +638,10 @@ namespace AnimHeapTrace
         static std::atomic<bool> started{ false };
         if (!Wanted() || started.exchange(true)) return;
         std::thread([base]() {
-            for (;;)
+            for (int scan = 0;; scan++)
             {
                 Sleep(3000);
+                if (scan == 3) ListBanks(base);
                 ScanTrees(base);
                 void CheckPoolNow(uint8_t * base, const char* why);
                 CheckPoolNow(base, "scan");

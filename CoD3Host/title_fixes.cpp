@@ -7,6 +7,8 @@
 #include "heap_trace.h"
 #include "kernel.h"
 
+#include <cstdlib>
+
 // --- a destructor that runs twice ------------------------------------------------------------------
 //
 // sub_823F0828 tears down a list of objects at the end of a level (and at a
@@ -40,7 +42,10 @@ PPC_FUNC(sub_823F04B0)
 {
     const uint32_t object = ctx.r3.u32;
     const uint32_t from = uint32_t(ctx.lr);
-    if (from == DeletingDestructorCall && object != 0 && object == t_justDestroyed)
+    // COD3_NODTORFIX=1 lets the second run happen, to see whether it still
+    // does harm.
+    static const bool leaveIt = getenv("COD3_NODTORFIX") != nullptr;
+    if (!leaveIt && from == DeletingDestructorCall && object != 0 && object == t_justDestroyed)
     {
         t_justDestroyed = 0;
         return;
