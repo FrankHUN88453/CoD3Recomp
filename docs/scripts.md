@@ -35,7 +35,7 @@ level: the C++ headers' inline wrappers compiled down to the offsets. They
 can be named only by what they do. `scripts/builtins.py` lists all 487
 with what can be read off each (the function, how often Chambois calls it,
 the argument registers it reads, the functions it calls, the text it
-refers to) and the names worked out so far: 48, which carry 89% of the
+refers to) and the names worked out so far: 445 of the 487, which carry 99% of the
 calls Chambois makes. The list is [builtins-table.md](builtins-table.md).
 
 The most used, with what they do:

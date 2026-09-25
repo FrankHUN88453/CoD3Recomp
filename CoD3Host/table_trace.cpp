@@ -4,6 +4,7 @@
 
 #include "kernel.h"
 #include "anim_heap_trace.h"
+#include "probe.h"
 #include "coroutines.h"
 
 #include <atomic>
@@ -120,6 +121,7 @@ PPC_FUNC(sub_8256D978)
         fflush(stdout);
     }
     AnimHeapTrace::LevelStart(base);
+    ProbeRun(ctx, base);
     __imp__sub_8256D978(ctx, base);
 }
 
