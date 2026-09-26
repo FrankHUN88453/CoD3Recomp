@@ -54,3 +54,24 @@ PPC_FUNC(sub_823F04B0)
     HeapTrace::Destroying(ctx, base);
     __imp__sub_823F04B0(ctx, base);
 }
+
+// --- the mission's film, skippable once the level has loaded (a PC addition) ---------------------
+//
+// A mission's film plays while its level loads (sub_824636D0 opens it and
+// the loading screen's callback, sub_824EECF8, draws it), and once the load
+// is done the level's start (sub_82517A00) plays the rest to its end in
+// sub_824EEBA0. That loop asks sub_824D0470 whether to stop: any button
+// pressed, once the film's clock (0x82A2A254, from nought in the loop) has
+// reached the threshold at 0x82A2A258. The intros set the threshold low and
+// can be skipped with A (Space); a mission's film has it set to the
+// largest float when it opens, so on the console it plays to its end. Here
+// the threshold goes to nought when the loop starts: the load is finished
+// by then, and a press skips the rest. COD3_NOFILMSKIP=1 keeps the
+// console's way.
+extern "C" PPC_FUNC(__imp__sub_824EEBA0);
+PPC_FUNC(sub_824EEBA0)
+{
+    static const bool consoleWay = getenv("COD3_NOFILMSKIP") != nullptr;
+    if (!consoleWay) Guest::Write32(base, 0x82A2A258u, 0);   // 0.0f
+    __imp__sub_824EEBA0(ctx, base);
+}

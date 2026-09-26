@@ -166,7 +166,14 @@ a 121647 byte sound track was 122880 bytes and had it read on past the
 end. Reads are padded only for the archives now (`.cod`, `.wbk`, `.cfg`).
 The legal notice, the logos, the attract loop and the mission briefings
 play, with A (Space) to skip; `COD3_NOFILMS=1` leaves them out, which the
-scripted runs do.
+scripted runs do. A mission's briefing film plays while its level loads,
+and on the console it cannot be skipped at all: the level's loader sets
+the skip threshold (0x82A2A258) to the largest float, and the loop that
+plays the rest after the load (sub_824EEBA0, which asks sub_824D0470 for
+a button) never gets past it. Here the threshold goes to nought when that
+loop starts, so once the level has loaded a press of Space (A, Start)
+goes straight into the mission; `COD3_NOFILMSKIP=1` keeps the console's
+way.
 
 ### A level's teardown: what is fixed and what is not
 
