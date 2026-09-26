@@ -221,13 +221,20 @@ PPC_FUNC(__imp__XamInputGetState)
             const auto now = std::chrono::steady_clock::now();
             reads++;
             if (now - last < std::chrono::milliseconds(2)) close++;
+            // The gaps between reads, in milliseconds, as a histogram.
+            static uint64_t gaps[8] = {};
+            const long long us = std::chrono::duration_cast<std::chrono::microseconds>(now - last).count();
+            gaps[us < 500 ? 0 : us < 1000 ? 1 : us < 2000 ? 2 : us < 4000 ? 3 : us < 6000 ? 4 : us < 9000 ? 5 : us < 14000 ? 6 : 7]++;
             last = now;
             const uint64_t tick = GetTickCount64() / 1000;
             if (tick != second)
             {
                 second = tick;
-                printf("xam: the pad read %llu times in a second, %llu of them within 2 ms of the one before\n", (unsigned long long)reads, (unsigned long long)close);
+                printf("xam: the pad read %llu times in a second, %llu of them within 2 ms of the one before; gaps <0.5 <1 <2 <4 <6 <9 <14 more: %llu %llu %llu %llu %llu %llu %llu %llu\n", (unsigned long long)reads, (unsigned long long)close,
+                    (unsigned long long)gaps[0], (unsigned long long)gaps[1], (unsigned long long)gaps[2], (unsigned long long)gaps[3],
+                    (unsigned long long)gaps[4], (unsigned long long)gaps[5], (unsigned long long)gaps[6], (unsigned long long)gaps[7]);
                 fflush(stdout);
+                memset(gaps, 0, sizeof(gaps));
                 reads = 0; close = 0;
             }
         }

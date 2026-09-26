@@ -289,6 +289,10 @@ void Kernel::UnmountContent(const std::string& rootName)
 void Kernel::InitializeFileSystem(const fs::path& exeDirectory)
 {
     g_savesRoot = exeDirectory / "saves";
+    // COD3_SAVES=path: the saves somewhere else, so a scripted test run
+    // beside the installed game does not write over the player's saves.
+    if (const char* saves = getenv("COD3_SAVES"); saves != nullptr && saves[0] != 0)
+        g_savesRoot = fs::path(saves);
     std::error_code ec;
     fs::create_directories(g_savesRoot, ec);
 }

@@ -1078,7 +1078,17 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
         if (entry.checkedFrame == g_frame && entry.seen >= bytes)
         {
             static const bool once = getenv("COD3_NOMIDFRAME") != nullptr;
-            if (once || entry.seen > AlwaysDenseBytes || !entry.dense) return handle;
+            // COD3_VBAUDIT=1 (with COD3_DENSEALL=1): every buffer, whatever
+            // its size, looked at by every draw, and the ones found changing
+            // within a frame named with their size.
+            static const bool audit = getenv("COD3_VBAUDIT") != nullptr;
+            if (once || (entry.seen > AlwaysDenseBytes && !audit) || !entry.dense) return handle;
+            if (audit && entry.seen > AlwaysDenseBytes && !entry.midFrame)
+            {
+                if (Fingerprint(data, entry.seen, true) == entry.fingerprint) return handle;
+                entry.midFrame = true;
+                printf("render: audit: the vertex buffer at %08X (%u bytes) changed within a frame\n", physical, entry.seen);
+            }
             if (entry.midFrame)
             {
                 if (Fingerprint(data, entry.seen, true) == entry.fingerprint) return handle;

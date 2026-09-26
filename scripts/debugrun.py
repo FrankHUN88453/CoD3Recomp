@@ -127,6 +127,14 @@ def main():
     # DEBUGRUN_EXE=CoD3-test.exe installs and runs them under another name,
     # for a run while the game itself is being played from the same folder.
     exe = os.path.join(r"D:\Games\x360", os.environ.get("DEBUGRUN_EXE", "CoD3.exe"))
+    # A run under another name is a test beside the installed game: its
+    # saves and its log go to a folder of their own, so the player's saves
+    # and CoD3.log are left alone (COD3_SAVES / COD3_LOG given override it).
+    if os.path.basename(exe).lower() != "cod3.exe":
+        scratch = os.path.join(os.environ.get("TEMP", "."), "claude", "debugrun-game")
+        os.makedirs(scratch, exist_ok=True)
+        env.setdefault("COD3_SAVES", os.path.join(scratch, "saves"))
+        env.setdefault("COD3_LOG", os.path.join(scratch, "CoD3.log"))
     import shutil
     build = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "build", "CoD3Host")
     stem = os.path.splitext(os.path.basename(exe))[0]

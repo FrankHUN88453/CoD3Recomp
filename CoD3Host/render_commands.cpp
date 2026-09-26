@@ -624,7 +624,7 @@ namespace
     // swap, the draw's number in it, the pass (bin select), the programs,
     // the primitive and count, the first vertex buffer with a sampled look
     // at its memory, a look at the indices and at the vertex program's
-    // first sixty four constants, and the depth and blend state. Frames
+    // 256 constants, and the depth and blend state. Frames
     // are then compared draw by draw, to find what one frame did that its
     // neighbours did not.
     uint64_t SampleHash(uint32_t physical, uint32_t bytes)
@@ -652,6 +652,11 @@ namespace
             return f;
         }();
         if (file == nullptr) return;
+        // COD3_DRAWLOG_FROM / _UNTIL: only the swaps in that range, so the
+        // log slows no more of the run than it has to.
+        static const uint64_t from = []() { const char* t = getenv("COD3_DRAWLOG_FROM"); return t ? uint64_t(strtoull(t, nullptr, 10)) : 0ull; }();
+        static const uint64_t until = []() { const char* t = getenv("COD3_DRAWLOG_UNTIL"); return t ? uint64_t(strtoull(t, nullptr, 10)) : ~0ull; }();
+        if (RenderInternal::Swaps() < from || RenderInternal::Swaps() >= until) return;
         static uint64_t lastSwap = ~0ull;
         static uint32_t number = 0;
         const uint64_t swap = RenderInternal::Swaps();
@@ -666,7 +671,7 @@ namespace
         }
         const std::atomic<uint32_t>* registers = Gpu::RegisterFile();
         uint64_t constants = 1469598103934665603ull;
-        for (uint32_t i = 0; i < 256; i++) constants = (constants ^ registers[0x4000 + i].load(std::memory_order_relaxed)) * 1099511628211ull;
+        for (uint32_t i = 0; i < 1024; i++) constants = (constants ^ registers[0x4000 + i].load(std::memory_order_relaxed)) * 1099511628211ull;
         const uint32_t indexBytes = out.indexed ? state.indexCount * 4 : 0;
         fprintf(file, "%llu %u %llx %016llx %016llx p%u n%u %c vb %08X %u %016llx ib %016llx c %016llx d %08X b %08X m %X t %u\n",
             (unsigned long long)swap, number++, (unsigned long long)Gpu::BinSelect(), (unsigned long long)vs->hash, (unsigned long long)ps->hash,
