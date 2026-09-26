@@ -6,7 +6,6 @@
 // the executable instead, so nothing ever modifies the installed copy.
 
 #include "kernel.h"
-#include "settings.h"
 #include <vector>
 #include "scheduler.h"
 
@@ -71,12 +70,6 @@ namespace
         // the console reports it: pending, with everything already filled
         // in for whoever comes to collect it.
         bool synchronous = true;
-
-        // The file's contents served from memory instead of the handle, when
-        // this is not empty: the title's default.cfg with the lines from
-        // CoD3.cfg beside the executable appended, so console variables can
-        // be set without touching the game's own files.
-        std::vector<uint8_t> overlay;
     };
 
     // The create options NtOpenFile passes in a register, for NtCreateFile,
@@ -273,80 +266,6 @@ namespace
     }
 }
 
-namespace
-{
-    fs::path g_extraConfig;   // CoD3.cfg beside the executable
-
-    // default.cfg is the first script the title runs, so lines appended to
-    // it are console commands run at start up: com_maxfps and the like.
-    // CoD3.cfg beside the executable holds them, one a line, and is made
-    // with a first line if it does not exist so the place is obvious.
-    std::vector<uint8_t> ConfigOverlay(HANDLE original, const std::string& guestPath)
-    {
-        std::string lower = guestPath;
-        for (char& c : lower) c = char(tolower(uint8_t(c)));
-        if (lower.size() < 18 || lower.compare(lower.size() - 18, 18, "config\\default.cfg") != 0)
-            return {};
-
-        std::error_code ec;
-        if (!fs::exists(g_extraConfig, ec))
-        {
-            FILE* made = _wfopen(g_extraConfig.c_str(), L"wb");
-            if (made != nullptr)
-            {
-                fputs("// Console commands run after the title's own default.cfg, one a line.\n"
-                      "seta com_maxfps 60\n", made);
-                fclose(made);
-            }
-        }
-
-        std::vector<uint8_t> extra;
-        if (FILE* file = _wfopen(g_extraConfig.c_str(), L"rb"))
-        {
-            uint8_t buffer[4096];
-            size_t got;
-            while ((got = fread(buffer, 1, sizeof(buffer), file)) > 0)
-                extra.insert(extra.end(), buffer, buffer + got);
-            fclose(file);
-        }
-        // And what the settings menu asks of the title.
-        {
-            const std::string lines = Settings::TitleConfigLines();
-            if (!lines.empty()) { extra.push_back('\n'); extra.insert(extra.end(), lines.begin(), lines.end()); }
-        }
-        // COD3_EXEC="command;command": console commands for this run only,
-        // for a scripted run that wants a level straight away (spmap island).
-        if (const char* exec = getenv("COD3_EXEC"))
-        {
-            std::string lines(exec);
-            for (char& c : lines) if (c == ';') c = '\n';
-            extra.push_back('\n'); extra.insert(extra.end(), lines.begin(), lines.end());
-        }
-        if (extra.empty()) return {};
-
-        std::vector<uint8_t> combined;
-        LARGE_INTEGER size{};
-        GetFileSizeEx(original, &size);
-        combined.resize(size_t(size.QuadPart));
-        LARGE_INTEGER zero{};
-        SetFilePointerEx(original, zero, nullptr, FILE_BEGIN);
-        DWORD read = 0;
-        if (!combined.empty())
-            ReadFile(original, combined.data(), DWORD(combined.size()), &read, nullptr);
-        combined.resize(read);
-        combined.push_back('\n');
-        combined.insert(combined.end(), extra.begin(), extra.end());
-        combined.push_back('\n');
-
-        int lines = 0;
-        for (uint8_t c : extra) if (c == '\n') lines++;
-        printf("config: %d lines from %s appended to default.cfg\n", lines,
-            g_extraConfig.string().c_str());
-        fflush(stdout);
-        return combined;
-    }
-}
-
 std::filesystem::path Kernel::SavesRoot() { return g_savesRoot; }
 
 void Kernel::MountContent(const std::string& rootName, const fs::path& folder)
@@ -370,7 +289,6 @@ void Kernel::UnmountContent(const std::string& rootName)
 void Kernel::InitializeFileSystem(const fs::path& exeDirectory)
 {
     g_savesRoot = exeDirectory / "saves";
-    g_extraConfig = exeDirectory / "CoD3.cfg";
     std::error_code ec;
     fs::create_directories(g_savesRoot, ec);
 }
@@ -502,11 +420,6 @@ PPC_FUNC(__imp__NtCreateFile)
     file.guestPath = guestPath;
     file.writable = writing;
     file.synchronous = (createOptions & (FileSynchronousIoAlert | FileSynchronousIoNonAlert)) != 0;
-    if (!writing && !directory)
-    {
-        file.overlay = ConfigOverlay(host, guestPath);
-        if (!file.overlay.empty()) file.size = file.overlay.size();
-    }
 
     const uint32_t handle = g_nextFileHandle;
     g_nextFileHandle += 4;
@@ -630,13 +543,6 @@ PPC_FUNC(__imp__NtReadFile)
     }
 
     DWORD read = 0;
-    if (!file.overlay.empty())
-    {
-        const uint64_t available = file.overlay.size() - file.position;
-        read = DWORD(std::min<uint64_t>(length, available));
-        memcpy(Guest::Ptr(buffer), file.overlay.data() + file.position, read);
-    }
-    else
     {
         LARGE_INTEGER position;
         position.QuadPart = static_cast<LONGLONG>(file.position);
@@ -672,7 +578,7 @@ PPC_FUNC(__imp__NtReadFile)
         for (char& c : extension) c = char(tolower(uint8_t(c)));
         return extension == ".cod" || extension == ".wbk" || extension == ".cfg";
     }();
-    if (padReads && archive && read < length && file.overlay.empty() && file.guestPath.rfind("savedrive:", 0) != 0)
+    if (padReads && archive && read < length && file.guestPath.rfind("savedrive:", 0) != 0)
     {
         static std::atomic<int> announced{ 0 };
         if (announced.fetch_add(1) < 20)

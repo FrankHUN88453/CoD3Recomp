@@ -121,8 +121,8 @@ namespace
     }
 
     // How far the pointer moved since the last look, in stick units. Full
-    // deflection at about twenty five pixels between reads, which at a read
-    // every four milliseconds is a brisk turn rather than a twitch.
+    // deflection at about twenty five pixels in a sixtieth of a second, a
+    // brisk turn rather than a twitch.
     void ReadMouse(int16_t& outX, int16_t& outY)
     {
         outX = 0;
@@ -175,11 +175,30 @@ namespace
             }
         }
 
+        // A stick's deflection is a speed: the title turns by it times its
+        // frame's time, and reads the pad once a frame (twice, the second
+        // read a moment after the first). The distance the mouse went since
+        // the read before is a speed only at one frame rate, so taken as it
+        // is, the turn would slow down as the frame rate went up (at 100 a
+        // second to 60 per cent of the turn at 60). It is scaled to the
+        // distance over a sixtieth of a second, the rate the gain was set
+        // at, so a sweep of the hand is the same turn at any frame rate.
+        // The read that comes straight after another is left as it is: what
+        // it carries is the crumb in between.
+        double scale = 1.0;
+        {
+            static auto lastRead = std::chrono::steady_clock::now();
+            const auto now = std::chrono::steady_clock::now();
+            const double interval = std::chrono::duration<double>(now - lastRead).count();
+            lastRead = now;
+            if (interval >= 0.002) scale = (1.0 / 60.0) / std::min(interval, 0.05);
+        }
+
         // The settings menu's sensitivity scales the gain, both axes alike.
-        const long Gain = long(1300.0f * Settings::Get().mouseSensitivity);
-        const long x = std::clamp(dx * Gain, -32767L, 32767L);
+        const double gain = 1300.0 * Settings::Get().mouseSensitivity * scale;
+        const long x = long(std::clamp(double(dx) * gain, -32767.0, 32767.0));
         // Screen coordinates grow downwards and a stick grows upwards.
-        const long y = std::clamp(-dy * Gain, -32767L, 32767L);
+        const long y = long(std::clamp(-double(dy) * gain, -32767.0, 32767.0));
         outX = int16_t(x);
         outY = int16_t(y);
     }

@@ -146,6 +146,47 @@ constants as most of a draw's cost; the indices are turned round straight
 into the ring now and the constants copied in runs, 1.35 to 1.13 µs a
 draw. The settings gained texture quality and the field of view.
 
+### The frame rate, unlocked in a level
+
+The title's ceiling was never its own: it draws a frame and waits for a
+vertical blank to show it, and the blanks came 60 a second. Its clock is
+the timebase (the frame clock at 0x829C2518 read 40002 ms forty seconds
+into a run with the rate unlocked), so it plays at the same speed at any
+frame rate, the way the Quake 3 engine under it was built. The blanks
+now come as the settings and the title's state say: 60 a second in the
+menus and while a film is open (the player at 0x82A2A24C), which the
+films show at their own 30, and every millisecond while a level is
+played (the title's `sv_running`, pointer at 0x829BAB18, with no film
+open), so the frame rate there is what the machine can do: Chambois at
+2560x1440 drawn at 200 per cent, RTX 4070 Ti, 85 to 110 frames a second
+where it had 60. A blank at 120 a second is not 120 frames: a frame of
+Chambois takes 10 to 12 ms, over a 120th, so every frame missed a blank
+and waited for the next, 60 again. `COD3_VBLANK=N` keeps N blanks a
+second throughout, for a test; `COD3_UNLOCKFPS=0` keeps the console's 60.
+
+One thing did depend on the frame rate, and it was this project's: the
+mouse. The title turns by the right stick's deflection times its frame's
+time and reads the pad twice a frame, and the deflection was the
+distance the mouse went since the read before, which is a speed at one
+frame rate only: at 100 frames a second the turn was 60 per cent of the
+turn at 60. The distance is scaled to a sixtieth of a second now, the
+rate the gain was set at (`COD3_PADRATE=1` counts the reads).
+
+The settings that are the title's own console variables (the field of
+view, the aim assist, and the new model detail, `r_lodscale`, 1 its own
+and 0 the finest model at every distance) were written as lines added
+to default.cfg, with `CoD3.cfg` beside the executable for more. None of
+it ever ran: the title only checks that default.cfg is there
+(sub_82532D28, at the file system's start) and runs ts_def.cfg and
+xenon_a.cfg instead; `com_maxfps 60` there never took, and the field of
+view only did when it was changed while playing. They go onto the
+title's command buffer now, `set` so a variable the title has not
+registered yet is made and then kept, the first time whatever differs
+from the title's own and later what changed; the queue waits until the
+title has set its buffer up (cmd_text at 0x829F1BB8), since
+Cbuf_AddText drops what does not fit. `CoD3.cfg` is gone and
+`COD3_EXEC` goes the same way.
+
 ### Sound, and the films
 
 The XMA contexts decode through FFmpeg's `xma1` decoder (the title's voices

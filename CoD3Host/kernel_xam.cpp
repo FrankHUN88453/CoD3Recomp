@@ -12,6 +12,7 @@
 #include "log.h"
 #include "sampler.h"
 #include <atomic>
+#include <chrono>
 #include "input.h"
 
 #include <cstdio>
@@ -206,6 +207,30 @@ PPC_FUNC(__imp__XamInputGetState)
         if (ctx.r5.u32 != 0) memset(Guest::Ptr(ctx.r5.u32), 0, 16);
         ctx.r3.u32 = X_ERROR_DEVICE_NOT_CONNECTED;
         return;
+    }
+
+    // COD3_PADRATE=1: how often the title reads the player's pad, once a
+    // second, and how many of the reads come within two milliseconds of the
+    // one before (a second read in the same frame).
+    {
+        static const bool rateLog = getenv("COD3_PADRATE") != nullptr;
+        if (rateLog)
+        {
+            static uint64_t reads = 0, close = 0, second = 0;
+            static auto last = std::chrono::steady_clock::now();
+            const auto now = std::chrono::steady_clock::now();
+            reads++;
+            if (now - last < std::chrono::milliseconds(2)) close++;
+            last = now;
+            const uint64_t tick = GetTickCount64() / 1000;
+            if (tick != second)
+            {
+                second = tick;
+                printf("xam: the pad read %llu times in a second, %llu of them within 2 ms of the one before\n", (unsigned long long)reads, (unsigned long long)close);
+                fflush(stdout);
+                reads = 0; close = 0;
+            }
+        }
     }
 
     if (ctx.r5.u32 != 0)

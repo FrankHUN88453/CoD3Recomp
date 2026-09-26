@@ -63,8 +63,13 @@ resolution (the desktop's by default; the window is made that size, full
 screen scales it, and the frame is drawn at it) and the resolution scale
 in per cent of it, the texture filtering
 and anisotropy, anti aliasing (MSAA 2x to 8x, FXAA, or both), the
-texture quality, the field of view (65 to 100), the blur while aiming,
-vertical sync, a frame counter and the renderer's statistics, the mouse
+texture quality, the field of view (65 to 100), the model detail (the
+game's own level of detail, or the finest model at every distance), the
+blur while aiming,
+vertical sync, the frame rate in a level (unlimited by default: a level
+is played at what the machine can do, around a hundred frames a second
+where the console had sixty, while the menus keep 60 and the films
+their 30), a frame counter and the renderer's statistics, the mouse
 sensitivity and whether the mouse is read raw, the title's aim assist,
 the pad, and the keys. It is drawn
 in the colours of the title's own menus. It keeps its values in `CoD3Recomp.ini` beside the
@@ -72,10 +77,10 @@ executable. Everything the game prints goes to `CoD3.log` beside the
 executable as well as to its console, and the run before is kept as
 `CoD3.previous.log`: after a freeze or a crash, that file says where every
 thread stood (`COD3_LOG=0` turns it off, `COD3_LOG=path` puts it
-elsewhere). `CoD3.cfg` beside the executable holds console commands run at
-start (`seta com_maxfps 60` by default). The same settings can be forced
+elsewhere). The same settings can be forced
 from the environment for a run: `COD3_SCALE`, `COD3_TEXTURE_FILTER`,
-`COD3_RESSCALE`, `COD3_ANISO`, `COD3_AA`, `COD3_TEXQUALITY`, `COD3_AIMBLUR`, `COD3_VSYNC`, `COD3_FULLSCREEN`;
+`COD3_RESSCALE`, `COD3_ANISO`, `COD3_AA`, `COD3_TEXQUALITY`, `COD3_MODELDETAIL`, `COD3_AIMBLUR`, `COD3_VSYNC`, `COD3_UNLOCKFPS`, `COD3_FULLSCREEN`;
+`COD3_EXEC="command;command"` runs the title's console commands at start;
 `COD3_RENDER_STATS=1` prints the renderer's counters once a second and
 `COD3_RENDER_PROFILE=1` where a draw's microseconds go.
 

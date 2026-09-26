@@ -267,7 +267,7 @@ the environment, over the menu: `COD3_SCALE`, `COD3_TEXTURE_FILTER=native|
 bilinear|trilinear|anisotropic`, `COD3_ANISO=1..16`, `COD3_VSYNC=0|1`,
 `COD3_AA=0|fxaa|msaa2|msaa4|msaa8|msaa4fxaa`, `COD3_TEXQUALITY=0|1|2`, `COD3_AIMBLUR=0|1`,
 `COD3_FULLSCREEN=0|1`, `COD3_NOMIPS=1`, `COD3_NOPIXELGEN=1`,
-`COD3_NOPOLYOFFSET=1`, `COD3_NOPREDICATE=1` (every predicated packet run), `COD3_OLDGRADIENTS=1`
+`COD3_VBLANK=N` (vertical blanks a second throughout), `COD3_UNLOCKFPS=0|1`, `COD3_NOPOLYOFFSET=1`, `COD3_NOPREDICATE=1` (every predicated packet run), `COD3_OLDGRADIENTS=1`
 (getGradients in the old order), `COD3_TRACESHADERLOAD=N` (the first N shader loads of a level),
 `COD3_NOSHADERCACHE=1`, `COD3_NOPRECOMPILE=1`. For a scripted run,
 `COD3_CMD="second:command;..."` puts console commands on the title's
@@ -299,7 +299,11 @@ counted, since the title loads hundreds it never draws with.
 ## Performance
 
 The forest level, 1280x720 window, the title's frame rate is its own cap
-of 60 (its vertical blank). Measured with `COD3_RENDER_STATS=1` on a
+of 60 (its vertical blank). That cap is lifted in a level now (the
+vertical blanks come every millisecond while one is played; the menus
+and films keep 60, see STATUS.md): Chambois at 2560x1440 drawn at 200
+per cent runs at 85 to 110 frames a second, a frame 10 to 12 ms, with
+the draw path 4.4 ms of it. Measured with `COD3_RENDER_STATS=1` on a
 GeForce RTX 4070 Ti; the old numbers from the same level and machine
 with the old backend's ten second report.
 

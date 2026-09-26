@@ -287,10 +287,17 @@ namespace
                     const char* qualities[] = { "Low", "Medium", "High" };
                     ImGui::Combo("Texture quality", &g_edit.textureQuality, qualities, 3);
                     ImGui::SliderInt("Field of view", &g_edit.fov, 65, 100, g_edit.fov == 65 ? "65 (the game's own)" : "%d");
+                    const char* details[] = { "The game's own", "Maximum" };
+                    ImGui::Combo("Model detail", &g_edit.modelDetail, details, 2);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(Maximum: the finest version of every model at any distance)");
                     ImGui::Checkbox("Blur while aiming", &g_edit.aimBlur);
                     ImGui::SameLine();
                     ImGui::TextDisabled("(the game's depth of field down the sights)");
                     ImGui::Checkbox("Vertical sync (VSync)", &g_edit.vsync);
+                    ImGui::Checkbox("Unlimited frame rate in levels", &g_edit.unlockFrameRate);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(the menus and films keep the console's 60)");
                     ImGui::Checkbox("Show FPS", &g_edit.fpsOverlay);
                     ImGui::Checkbox("Renderer statistics", &g_edit.statsOverlay);
                     ImGui::EndTabItem();

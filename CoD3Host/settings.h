@@ -33,9 +33,11 @@ namespace Settings
         int textureFilter = 3;        // 0 the title's own, 1 bilinear, 2 trilinear, 3 anisotropic
         int anisotropy = 16;          // 2..16, with textureFilter 3
         bool vsync = true;
+        bool unlockFrameRate = true;  // a level played at what the machine can do; the menus and films keep the console's 60
         int antialiasing = 3;         // 0 none, 1 FXAA, 2 MSAA 2x, 3 MSAA 4x, 4 MSAA 8x, 5 MSAA 4x and FXAA
         int textureQuality = 2;       // 0 low (two mip levels dropped), 1 medium (one), 2 high (all)
         int fov = 65;                 // the title's cg_fov, 65 (its own) .. 100
+        int modelDetail = 1;          // 0 the title's own level of detail (r_lodscale 1), 1 the most detailed models at every distance (r_lodscale 0)
         bool aimBlur = true;          // the title's depth of field while aiming down the sights
         int windowMode = 0;           // 0 windowed, 1 borderless full screen
         bool fpsOverlay = false;
@@ -69,13 +71,9 @@ namespace Settings
     void Load(const std::filesystem::path& exeDirectory);
     void Save();
 
-    // The console commands the settings ask of the title, for the config
-    // the file layer appends to default.cfg: the aim assist switches and
-    // the field of view.
-    std::string TitleConfigLines();
-
-    // The console commands that follow a change of the values while the
-    // title runs (the field of view), for the command buffer. Empty when
-    // nothing changed since the last ask.
+    // The console commands the settings ask of the title (the field of
+    // view, the model detail, the aim assist), for its command buffer: at
+    // the first ask whatever differs from the title's own values, then
+    // what changed since the last ask. Empty when there is nothing to say.
     std::string TitleCommandsChanged();
 }

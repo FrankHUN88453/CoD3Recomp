@@ -145,9 +145,11 @@ void Settings::Load(const std::filesystem::path& exeDirectory)
             else if (key == "texture_filter") v.textureFilter = atoi(value.c_str());
             else if (key == "anisotropy") v.anisotropy = atoi(value.c_str());
             else if (key == "vsync") v.vsync = atoi(value.c_str()) != 0;
+            else if (key == "unlock_frame_rate") v.unlockFrameRate = atoi(value.c_str()) != 0;
             else if (key == "antialiasing") v.antialiasing = atoi(value.c_str());
             else if (key == "texture_quality") v.textureQuality = atoi(value.c_str());
             else if (key == "fov") v.fov = atoi(value.c_str());
+            else if (key == "model_detail") v.modelDetail = atoi(value.c_str());
             else if (key == "aim_blur") v.aimBlur = atoi(value.c_str()) != 0;
             else if (key == "window_mode") v.windowMode = atoi(value.c_str());
             else if (key == "fps_overlay") v.fpsOverlay = atoi(value.c_str()) != 0;
@@ -172,6 +174,7 @@ void Settings::Load(const std::filesystem::path& exeDirectory)
     if (v.antialiasing < 0 || v.antialiasing > 5) v.antialiasing = 3;
     if (v.textureQuality < 0 || v.textureQuality > 2) v.textureQuality = 2;
     if (v.fov < 65 || v.fov > 100) v.fov = 65;
+    if (v.modelDetail < 0 || v.modelDetail > 1) v.modelDetail = 1;
     if (v.windowMode < 0 || v.windowMode > 1) v.windowMode = 0;
     if (!(v.mouseSensitivity >= 0.1f && v.mouseSensitivity <= 3.0f)) v.mouseSensitivity = 1.0f;
     std::lock_guard<std::mutex> lock(g_mutex);
@@ -188,8 +191,8 @@ void Settings::Save()
         char resolution[32];
         if (v.resolutionWidth > 0 && v.resolutionHeight > 0) snprintf(resolution, sizeof(resolution), "%dx%d", v.resolutionWidth, v.resolutionHeight);
         else snprintf(resolution, sizeof(resolution), "desktop");
-        fprintf(file, "[graphics]\nrenderer = %d\nresolution = %s\nresolution_scale = %d\ntexture_filter = %d\nanisotropy = %d\nvsync = %d\nantialiasing = %d\ntexture_quality = %d\nfov = %d\naim_blur = %d\nwindow_mode = %d\nfps_overlay = %d\nstats_overlay = %d\n",
-            v.renderer, resolution, v.resolutionScale, v.textureFilter, v.anisotropy, v.vsync ? 1 : 0, v.antialiasing, v.textureQuality, v.fov, v.aimBlur ? 1 : 0, v.windowMode, v.fpsOverlay ? 1 : 0, v.statsOverlay ? 1 : 0);
+        fprintf(file, "[graphics]\nrenderer = %d\nresolution = %s\nresolution_scale = %d\ntexture_filter = %d\nanisotropy = %d\nvsync = %d\nunlock_frame_rate = %d\nantialiasing = %d\ntexture_quality = %d\nfov = %d\nmodel_detail = %d\naim_blur = %d\nwindow_mode = %d\nfps_overlay = %d\nstats_overlay = %d\n",
+            v.renderer, resolution, v.resolutionScale, v.textureFilter, v.anisotropy, v.vsync ? 1 : 0, v.unlockFrameRate ? 1 : 0, v.antialiasing, v.textureQuality, v.fov, v.modelDetail, v.aimBlur ? 1 : 0, v.windowMode, v.fpsOverlay ? 1 : 0, v.statsOverlay ? 1 : 0);
         fprintf(file, "[game]\naim_assist = %d\ncontroller = %d\nmouse_sensitivity = %.2f\nraw_mouse = %d\n", v.aimAssist ? 1 : 0, v.controller ? 1 : 0, v.mouseSensitivity, v.rawMouse ? 1 : 0);
         fprintf(file, "[keys]\n");
         for (int i = 0; i < ActionCount; i++) fprintf(file, "key_%s = %d\n", ActionKeys[i], v.keys[i]);
@@ -243,24 +246,49 @@ const std::vector<Settings::Mode>& Settings::DisplayModes()
     return modes;
 }
 
-std::string Settings::TitleConfigLines()
+// The model detail: COD3_MODELDETAIL=0|1 over the settings.
+static int ModelDetail(const Settings::Values& v)
 {
-    const Values v = Get();
-    std::string lines;
-    // The title's own aim assist is three switches of its console. Off is
-    // said outright; on is the title's default, so nothing is said.
-    if (!v.aimAssist) lines += "seta aim_slowdown_enabled \"0\"\nseta aim_lockon_enabled \"0\"\nseta aim_autoaim_enabled \"0\"\n";
-    // The field of view is the title's cg_fov; 65 is its own.
-    if (v.fov != 65) lines += "seta cg_fov \"" + std::to_string(v.fov) + "\"\n";
-    return lines;
+    static const int detailOverride = []() { const char* t = getenv("COD3_MODELDETAIL"); return t ? (t[0] == '0' ? 0 : 1) : -1; }();
+    return detailOverride >= 0 ? detailOverride : v.modelDetail;
 }
 
 std::string Settings::TitleCommandsChanged()
 {
-    static int appliedFov = 0;
+    // What the title has, to begin with, is its own: the field of view 65,
+    // the aim assist on, r_lodscale 1. So the first ask brings whatever the
+    // settings change from that, and later ones what changed since. "set"
+    // rather than the variable's name alone, because the first ask comes
+    // before the title has registered most of them (the renderer's and the
+    // game's come later): set makes the variable, and the title's own
+    // registration then keeps the value it finds. These are commands on
+    // the title's buffer, not lines in a config: the title never runs
+    // default.cfg (it only checks the file is there), so lines added to
+    // it did nothing.
+    static int appliedFov = 65, appliedDetail = 0;
+    static bool appliedAimAssist = true;
     const Values v = Get();
-    if (appliedFov == 0) { appliedFov = v.fov; return {}; }   // the config at start has it
-    if (v.fov == appliedFov) return {};
-    appliedFov = v.fov;
-    return "cg_fov " + std::to_string(v.fov);
+    std::string commands;
+    if (v.fov != appliedFov)
+    {
+        appliedFov = v.fov;
+        commands += "set cg_fov " + std::to_string(v.fov) + "\n";
+    }
+    // The model detail is the title's r_lodscale, which scales the distance
+    // at which a model steps down to a coarser version: 1 is its own, 0
+    // keeps the finest one at every distance.
+    if (ModelDetail(v) != appliedDetail)
+    {
+        appliedDetail = ModelDetail(v);
+        commands += std::string("set r_lodscale ") + (appliedDetail ? "0" : "1") + "\n";
+    }
+    // The title's own aim assist is three switches of its console.
+    if (v.aimAssist != appliedAimAssist)
+    {
+        appliedAimAssist = v.aimAssist;
+        const char* on = v.aimAssist ? "1" : "0";
+        commands += std::string("set aim_slowdown_enabled ") + on + "\nset aim_lockon_enabled " + on + "\nset aim_autoaim_enabled " + on + "\n";
+    }
+    if (!commands.empty()) commands.pop_back();   // the last line's end: the queue adds its own
+    return commands;
 }

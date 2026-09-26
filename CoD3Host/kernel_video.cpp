@@ -153,10 +153,18 @@ namespace
     std::mutex g_consoleMutex;
     std::deque<std::string> g_consoleQueue;
 
+    // The next of them, when the title's command buffer has room for it.
+    // Cbuf_AddText (sub_824644D0) drops what does not fit, and until the
+    // title has set the buffer up (cmd_text at 0x829F1BB8: the text, its
+    // size, how much is used) nothing fits: a command asked for that early
+    // waits here instead of being lost.
     std::string TakeConsoleCommand()
     {
+        const uint32_t size = Guest::Read32(Guest::Base, 0x829F1BBCu);
+        const uint32_t used = Guest::Read32(Guest::Base, 0x829F1BC0u);
         std::lock_guard<std::mutex> lock(g_consoleMutex);
         if (g_consoleQueue.empty()) return {};
+        if (size <= used || g_consoleQueue.front().size() + 2 > size - used) return {};
         std::string command = std::move(g_consoleQueue.front());
         g_consoleQueue.pop_front();
         return command;
@@ -388,9 +396,53 @@ namespace
         }
     }
 
+    // A level being played: the title's server runs (sv_running, the
+    // console variable whose pointer is at 0x829BAB18, its integer at +32)
+    // and no film is open (the film player at 0x82A2A24C). The main menu,
+    // the films before it and a mission's briefing, which plays while the
+    // level loads and after, are not.
+    bool TitlePlaying()
+    {
+        const uint32_t running = Guest::Read32(Guest::Base, 0x829BAB18u);
+        if (running == 0 || Guest::Read32(Guest::Base, running + 32) == 0) return false;
+        return Guest::Read32(Guest::Base, 0x82A2A24Cu) == 0;
+    }
+
+    // How long until the next vertical blank. The title draws a frame and
+    // then waits for a vertical blank to show it, so this is its frame
+    // rate's ceiling. The console's is 60 a second, which is what the menu
+    // gets, and the films, which show a picture every second blank (30).
+    // While a level is played, with the frame rate unlocked in the settings
+    // (the default), a blank comes every millisecond: the title's frame
+    // rate is then what it can do, and its clock is the timebase, not the
+    // blanks, so the game keeps its speed. COD3_VBLANK=N keeps N a second
+    // throughout, for a test (30 .. 1000); COD3_UNLOCKFPS=0|1 over the
+    // settings.
+    std::chrono::nanoseconds VblankPeriod(uint64_t frame)
+    {
+        static const long fixed = []() { const char* t = getenv("COD3_VBLANK"); const long hz = t ? strtol(t, nullptr, 10) : 0; return hz >= 30 && hz <= 1000 ? hz : 0L; }();
+        if (fixed != 0) return std::chrono::nanoseconds(1000000000ll / fixed);
+        static const int unlockOverride = []() { const char* t = getenv("COD3_UNLOCKFPS"); return t ? (t[0] == '0' ? 0 : 1) : -1; }();
+        static bool unlocked = true;
+        if ((frame & 63) == 0) unlocked = unlockOverride >= 0 ? unlockOverride != 0 : Settings::Get().unlockFrameRate;
+        static bool wasPlaying = false;
+        const bool playing = unlocked && TitlePlaying();
+        if (playing != wasPlaying)
+        {
+            wasPlaying = playing;
+            printf("video: vertical blanks %s\n", playing ? "every millisecond, a level is played" : "60 a second");
+            fflush(stdout);
+        }
+        return playing ? std::chrono::nanoseconds(1000000) : std::chrono::nanoseconds(16666667);
+    }
+
     void VideoThread()
     {
         VideoState& video = Video();
+        // The seconds below are the wall clock's: the blanks come at more
+        // than one rate.
+        const auto started = std::chrono::steady_clock::now();
+        uint64_t lastSecond = 0;
 
         // Guest code runs on this thread when the interrupt callback fires, so
         // it needs a processor context and a stack of its own, exactly like a
@@ -410,7 +462,11 @@ namespace
         auto nextFrame = std::chrono::steady_clock::now();
         while (video.running.load(std::memory_order_acquire))
         {
-            nextFrame += std::chrono::microseconds(16667);   // 60 Hz
+            nextFrame += VblankPeriod(video.frames.load(std::memory_order_relaxed));
+            // After a stall (a debugger, a long interrupt), carry on from now
+            // rather than firing the missed blanks back to back.
+            if (std::chrono::steady_clock::now() - nextFrame > std::chrono::milliseconds(100))
+                nextFrame = std::chrono::steady_clock::now();
 
             // Two separate things, which looked like one and cost a while to
             // untangle. The command ring is the buffer VdInitializeRingBuffer
@@ -474,11 +530,15 @@ namespace
 
             const uint64_t frame = video.frames.fetch_add(1, std::memory_order_relaxed) + 1;
             Kernel::Stats().frames.store(frame, std::memory_order_relaxed);
+            const uint64_t clockSecond = uint64_t(std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - started).count());
+            const bool newSecond = clockSecond != lastSecond;
+            lastSecond = clockSecond;
 
             // Without a picture, this line is the only evidence the title is
             // doing anything. Once a second is often enough to see movement
             // and rare enough not to bury the rest of the output.
-            if (frame % 60 == 0)
+            if (newSecond)
             {
                 const auto& stats = Kernel::Stats();
                 // The ring pointers say whether the command processor is
@@ -637,13 +697,13 @@ namespace
                 Gpu::ReportFences();
                 Kernel::ReportFileReads();
                 Gpu::ReportPolling();
-                if (frame >= 600) Kernel::ReportWaitTraffic();
+                if (clockSecond >= 10) Kernel::ReportWaitTraffic();
                 const Gpu::Statistics gpu = Gpu::Stats();
                 static uint64_t swapsBefore = 0;
                 const uint64_t swaps = video.swaps.load();
                 printf("[%4llus] fps %llu  frames %llu  files %llu (%.1f MB read)  threads %llu  "
                        "allocated %.1f MB  audio %llu  packets %llu  draws %llu\n",
-                    (unsigned long long)(frame / 60),
+                    (unsigned long long)clockSecond,
                     (unsigned long long)(swaps - swapsBefore),
                     (unsigned long long)frame,
                     (unsigned long long)stats.filesOpened.load(),
@@ -660,7 +720,7 @@ namespace
                 // in the guest's memory, with what is around it: for finding
                 // the title's own data by a string it holds.
                 static const char* const scanFor = getenv("COD3_SCANMEM");
-                if (scanFor != nullptr && scanFor[0] != 0 && (frame / 60) % 10 == 5)
+                if (scanFor != nullptr && scanFor[0] != 0 && newSecond && clockSecond % 10 == 5)
                 {
                     const size_t needle = strlen(scanFor);
                     int found = 0;
@@ -706,7 +766,7 @@ namespace
                     std::string name(mapWanted);
                     long second = 12;
                     if (const size_t comma = name.find(','); comma != std::string::npos) { second = strtol(name.c_str() + comma + 1, nullptr, 10); name.resize(comma); }
-                    if (long(frame / 60) == second && !name.empty() && name.size() < 64)
+                    if (long(clockSecond) == second && !name.empty() && name.size() < 64)
                     {
                         mapStarted = true;
                         Kernel::QueueConsoleCommand("spmap " + name);
@@ -732,7 +792,7 @@ namespace
                         return list;
                     }();
                     for (size_t i = 0; i < pending.size(); i++)
-                        if (long(frame / 60) == pending[i].first) { Kernel::QueueConsoleCommand(pending[i].second); pending.erase(pending.begin() + i); break; }
+                        if (long(clockSecond) == pending[i].first) { Kernel::QueueConsoleCommand(pending[i].second); pending.erase(pending.begin() + i); break; }
                 }
                 // COD3_WIN="second:level": the mission won at that second, as
                 // the level script's missionsuccess (table slot 0x4A4,
@@ -743,7 +803,7 @@ namespace
                 {
                     static const char* const winWanted = getenv("COD3_WIN");
                     static bool won = false;
-                    if (winWanted != nullptr && !won && long(frame / 60) == strtol(winWanted, nullptr, 10))
+                    if (winWanted != nullptr && !won && long(clockSecond) == strtol(winWanted, nullptr, 10))
                     {
                         won = true;
                         const char* colon = strchr(winWanted, ':');
@@ -780,7 +840,7 @@ namespace
                             else if (!item.empty()) prefixes.push_back(item);
                             at = comma + 1;
                         }
-                        if (long(frame / 60) == second)
+                        if (long(clockSecond) == second)
                         {
                             listed = true;
                             const uint32_t first = 0x82000000u, last = 0x82000000u + (16u << 20);
@@ -806,12 +866,25 @@ namespace
                         }
                     }
                 }
-                // The settings that are the title's own console variables,
-                // when they changed: once a second is often enough.
-                if (frame % 60 == 0)
+                // The settings that are the title's own console variables:
+                // at first what differs from the title's own, then when they
+                // change; once a second is often enough. COD3_EXEC="command;
+                // command" adds commands of its own at the start, for a run.
+                if (newSecond)
                 {
                     const std::string changed = Settings::TitleCommandsChanged();
                     if (!changed.empty()) Kernel::QueueConsoleCommand(changed);
+                    static bool execQueued = false;
+                    if (!execQueued)
+                    {
+                        execQueued = true;
+                        if (const char* exec = getenv("COD3_EXEC"))
+                        {
+                            std::string lines(exec);
+                            for (char& c : lines) if (c == ';') c = '\n';
+                            Kernel::QueueConsoleCommand(lines);
+                        }
+                    }
                 }
                 // The host console's commands, and COD3_MAP's, onto the
                 // title's command buffer: the text through the title's va
@@ -845,7 +918,7 @@ namespace
                 {
                     static const long watchSecond = []() { const char* t = getenv("COD3_WATCH_SECOND"); return t ? strtol(t, nullptr, 10) : -1; }();
                     static bool watchArmed = false;
-                    if (watchSecond >= 0 && !watchArmed && long(frame / 60) == watchSecond)
+                    if (watchSecond >= 0 && !watchArmed && long(clockSecond) == watchSecond)
                     {
                         watchArmed = true;
                         const char* watch = getenv("COD3_WATCH");
@@ -879,7 +952,7 @@ namespace
                         char* end = nullptr;
                         const uint32_t mstate = uint32_t(strtoul(walkWanted, &end, 16));
                         const long second = (end != nullptr && *end == ',') ? strtol(end + 1, nullptr, 10) : 60L;
-                        if (long(frame / 60) == second)
+                        if (long(clockSecond) == second)
                         {
                             walked = true;
                             auto readable = [&](uint32_t a) {
@@ -914,8 +987,9 @@ namespace
                     }
                 }
                 // More ranges after the second, each "hexaddress,bytes",
-                // separated by semicolons: COD3_DUMPMEM=A,64,66;B,64;C,256.
-                if (dumpMem != nullptr && !dumped && long(frame / 60) == dumpSecond)
+                // separated by semicolons: COD3_DUMPMEM=A,64,66;B,64;C,256; *D,48
+                // dumps where the word at D points (a console variable, say).
+                if (dumpMem != nullptr && !dumped && long(clockSecond) == dumpSecond)
                 {
                     dumped = true;
                     const char* cursor = dumpMem;
@@ -923,7 +997,10 @@ namespace
                     while (cursor != nullptr && *cursor != 0)
                     {
                         char* end = nullptr;
-                        const uint32_t at = uint32_t(strtoul(cursor, &end, 16));
+                        // A leading * dumps where the word at that address points.
+                        const bool indirect = *cursor == '*';
+                        uint32_t at = uint32_t(strtoul(cursor + (indirect ? 1 : 0), &end, 16));
+                        if (indirect) at = Guest::Read32(Guest::Base, at);
                         const uint32_t bytes = (end != nullptr && *end == ',') ? uint32_t(strtoul(end + 1, &end, 0)) : 256u;
                         if (first && end != nullptr && *end == ',') strtoul(end + 1, &end, 10);   // the second
                         first = false;
