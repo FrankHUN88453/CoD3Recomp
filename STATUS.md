@@ -250,6 +250,21 @@ causes were found, two fixed:
   weapon in thick smoke is a pixel or two: the title draws its particles
   at half resolution and puts them back by depth, as it does on the
   console.
+- **Fixed: the game closed at the end of a mission.** The title goes
+  from one mission to the next the console's way, by rebooting itself:
+  once the mission is won its "reboot" command (sub_82514710) hands
+  `XamLoaderSetLaunchData` a 664-byte block of campaign state (0x82A8E610)
+  and asks `XamLoaderLaunchTitle` for `default.xex`; the new instance reads
+  the block back at start (sub_823FCCA8, "retrieving stub data"), skips
+  the front end and loads the next mission. The launch here ended the
+  process. Now the block goes to `saves/launchdata.bin` and the executable
+  starts itself again with `COD3_LAUNCHDATA` naming it (a scripted run's
+  `COD3_MAP`, `COD3_CMD`, `COD3_PAD` and `COD3_WIN` stay behind), and the
+  new process hands the block to `XamLoaderGetLaunchData`. Chambois won
+  with `COD3_WIN=30:mace2` came back as The Mace, Mont Ormel, its title
+  card and its level. The game's own way between missions is this, not an
+  `spmap` from inside a level, which is why the case below is a debugging
+  path rather than one a player meets.
 - **Still open:** after the console's `spmap` mid-level the player has no
   weapon and no HUD. The table of weapons (0x82A2A2E0) is not the cause, but it is not
   rebuilt at a reload as an earlier note said either: the title fills it

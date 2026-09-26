@@ -155,6 +155,11 @@ put on its command buffer. The main menu has to be up by then, which
 five seconds, A at eight) see to in a scripted run. The level names are the folders under `sp`: `saint_lo`,
 `island`, `nightd`, `crssrds`, `hostage`, `mayenne`, `forest`, `falaise`,
 `fuelplnt`, `chambois`, `mace2`, `laison`, `stbert`, `blkbrn`, `credits`.
+`COD3_WIN=<second>:<level>` marks the running mission won at that second
+with `<level>` as the next, the way a level script does, to test the way
+from one mission to the next: the title reboots itself for it, and this
+executable starts again with the title's launch data (`COD3_LAUNCHDATA`).
+`COD3_CMD="22:god"` puts the title's own console commands on its buffer.
 
 ## Layout
 

@@ -9,6 +9,7 @@
 // handles as a normal case rather than an error.
 
 #include "kernel.h"
+#include "log.h"
 #include "sampler.h"
 #include <atomic>
 #include "input.h"
@@ -20,6 +21,8 @@
 #include <string>
 #include <vector>
 #include <cstring>
+#include <algorithm>
+#include <cctype>
 
 #include <Windows.h>
 
@@ -704,15 +707,131 @@ PPC_FUNC(__imp__XamGetExecutionId)
     ctx.r3.u32 = X_ERROR_SUCCESS;
 }
 
+// --- Launch data and relaunching the title ---------------------------------
+//
+// Between missions the title reboots itself, as console titles do to start
+// with clean memory: its "reboot" command (sub_82514710) hands
+// XamLoaderSetLaunchData a 664-byte block of its campaign state (0x82A8E610)
+// and asks XamLoaderLaunchTitle for game:\default.xex; the new instance reads
+// the block back at start (sub_823FCCA8, "retrieving stub data") and goes on
+// to the next mission. Here the block is written to a file and this
+// executable started again with COD3_LAUNCHDATA naming it; the new process
+// hands it back. Launching anything else (the dashboard, the multiplayer
+// executable) still ends the process.
+
+namespace
+{
+    std::mutex g_launchMutex;
+    std::vector<uint8_t> g_launchOut;   // what this process will hand on
+    std::vector<uint8_t> g_launchIn;    // what this process was started with
+    bool g_launchInRead = false;
+
+    const std::vector<uint8_t>& LaunchDataIn()
+    {
+        std::lock_guard<std::mutex> lock(g_launchMutex);
+        if (!g_launchInRead)
+        {
+            g_launchInRead = true;
+            if (const char* path = getenv("COD3_LAUNCHDATA"))
+            {
+                if (FILE* in = fopen(path, "rb"))
+                {
+                    uint8_t buffer[4096];
+                    size_t got;
+                    while ((got = fread(buffer, 1, sizeof(buffer), in)) > 0)
+                        g_launchIn.insert(g_launchIn.end(), buffer, buffer + got);
+                    fclose(in);
+                    // Read once: a later start from the menu has none.
+                    std::error_code ignored;
+                    std::filesystem::remove(path, ignored);
+                }
+                printf("xam: started with %zu bytes of launch data from %s\n", g_launchIn.size(), path);
+            }
+        }
+        return g_launchIn;
+    }
+
+    // This executable again, with the launch data in a file and the scripted
+    // run's knobs left out (the relaunched title goes where its data says).
+    bool Relaunch()
+    {
+        std::filesystem::path file = Kernel::SavesRoot();
+        if (file.empty()) file = std::filesystem::temp_directory_path();
+        file /= "launchdata.bin";
+        {
+            std::lock_guard<std::mutex> lock(g_launchMutex);
+            FILE* out = _wfopen(file.c_str(), L"wb");
+            if (out == nullptr) return false;
+            if (!g_launchOut.empty()) fwrite(g_launchOut.data(), 1, g_launchOut.size(), out);
+            fclose(out);
+        }
+
+        std::wstring environment;
+        if (wchar_t* block = GetEnvironmentStringsW())
+        {
+            for (const wchar_t* entry = block; *entry != 0; entry += wcslen(entry) + 1)
+            {
+                // A scripted run's level, commands and pad presses belong to
+                // the first process, not to the one the title starts.
+                if (_wcsnicmp(entry, L"COD3_MAP=", 9) == 0 || _wcsnicmp(entry, L"COD3_CMD=", 9) == 0 ||
+                    _wcsnicmp(entry, L"COD3_PAD=", 9) == 0 || _wcsnicmp(entry, L"COD3_WIN=", 9) == 0 ||
+                    _wcsnicmp(entry, L"COD3_LAUNCHDATA=", 16) == 0) continue;
+                environment += entry;
+                environment.push_back(0);
+            }
+            FreeEnvironmentStringsW(block);
+        }
+        environment += L"COD3_LAUNCHDATA=" + file.wstring();
+        environment.push_back(0);
+        environment.push_back(0);
+
+        wchar_t executable[MAX_PATH] = {};
+        GetModuleFileNameW(nullptr, executable, MAX_PATH);
+        std::wstring commandLine = GetCommandLineW();
+        STARTUPINFOW startup{};
+        startup.cb = sizeof(startup);
+        PROCESS_INFORMATION process{};
+        if (!CreateProcessW(executable, commandLine.data(), nullptr, nullptr, FALSE, CREATE_UNICODE_ENVIRONMENT,
+                            environment.data(), nullptr, &startup, &process))
+            return false;
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+        return true;
+    }
+}
+
 PPC_FUNC(__imp__XamLoaderGetLaunchDataSize)
 {
     Kernel::CountImport("XamLoaderGetLaunchDataSize");
-    if (ctx.r3.u32 != 0) Guest::Write32(base, ctx.r3.u32, 0);
-    ctx.r3.u32 = X_ERROR_NOT_FOUND;   // nothing launched us with data
+    const std::vector<uint8_t>& data = LaunchDataIn();
+    if (ctx.r3.u32 != 0) Guest::Write32(base, ctx.r3.u32, uint32_t(data.size()));
+    ctx.r3.u32 = data.empty() ? X_ERROR_NOT_FOUND : X_ERROR_SUCCESS;
 }
 
-PPC_FUNC(__imp__XamLoaderGetLaunchData) { Kernel::CountImport("XamLoaderGetLaunchData"); ctx.r3.u32 = X_ERROR_NOT_FOUND; }
-PPC_FUNC(__imp__XamLoaderSetLaunchData) { Kernel::CountImport("XamLoaderSetLaunchData"); ctx.r3.u32 = X_ERROR_SUCCESS; }
+// DWORD XamLoaderGetLaunchData(void* buffer, DWORD size)
+PPC_FUNC(__imp__XamLoaderGetLaunchData)
+{
+    Kernel::CountImport("XamLoaderGetLaunchData");
+    const std::vector<uint8_t>& data = LaunchDataIn();
+    if (data.empty() || ctx.r3.u32 == 0) { ctx.r3.u32 = X_ERROR_NOT_FOUND; return; }
+    const size_t count = std::min<size_t>(ctx.r4.u32, data.size());
+    memcpy(base + ctx.r3.u32, data.data(), count);
+    ctx.r3.u32 = X_ERROR_SUCCESS;
+}
+
+// DWORD XamLoaderSetLaunchData(const void* data, DWORD size)
+PPC_FUNC(__imp__XamLoaderSetLaunchData)
+{
+    Kernel::CountImport("XamLoaderSetLaunchData");
+    {
+        std::lock_guard<std::mutex> lock(g_launchMutex);
+        g_launchOut.clear();
+        if (ctx.r3.u32 != 0 && ctx.r4.u32 != 0 && ctx.r4.u32 < 0x10000)
+            g_launchOut.assign(base + ctx.r3.u32, base + ctx.r3.u32 + ctx.r4.u32);
+    }
+    printf("xam: launch data set, %u bytes\n", ctx.r4.u32);
+    ctx.r3.u32 = X_ERROR_SUCCESS;
+}
 
 PPC_FUNC(__imp__XamLoaderLaunchTitle)
 {
@@ -721,10 +840,10 @@ PPC_FUNC(__imp__XamLoaderLaunchTitle)
     // Which title, and from where. A path of nothing is the dashboard, and a
     // title that asks for the dashboard has usually just decided that
     // something is fatally wrong: the call chain says what.
+    char path[256] = {};
     printf("\nThe game asked to launch another title");
     if (ctx.r3.u32 != 0)
     {
-        char path[256] = {};
         for (size_t i = 0; i + 1 < sizeof(path); i++)
         {
             path[i] = char(Guest::Base[ctx.r3.u32 + i]);
@@ -737,6 +856,21 @@ PPC_FUNC(__imp__XamLoaderLaunchTitle)
         printf(": the dashboard");
     }
     printf(", flags 0x%08X, from 0x%08X.\n", ctx.r4.u32, uint32_t(ctx.lr));
+
+    // Itself: the next mission. Started again, and this process ends.
+    std::string lower(path);
+    for (char& c : lower) c = char(tolower(static_cast<unsigned char>(c)));
+    if (lower.size() >= 11 && lower.compare(lower.size() - 11, 11, "default.xex") == 0)
+    {
+        if (Relaunch())
+        {
+            printf("Relaunched for the next mission; this process ends.\n");
+            fflush(stdout);
+            Log::Finish();
+            ExitProcess(0);
+        }
+        printf("The relaunch failed (error %lu).\n", GetLastError());
+    }
     {
         uint32_t functions[12] = {};
         const int count = Sampler::FunctionsOnStack(functions, 12);

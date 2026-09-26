@@ -734,6 +734,32 @@ namespace
                     for (size_t i = 0; i < pending.size(); i++)
                         if (long(frame / 60) == pending[i].first) { Kernel::QueueConsoleCommand(pending[i].second); pending.erase(pending.begin() + i); break; }
                 }
+                // COD3_WIN="second:level": the mission won at that second, as
+                // the level script's missionsuccess (table slot 0x4A4,
+                // sub_824A4F38) marks it in the game state at 0x82A4E790:
+                // +2760 success, +2764 failed cleared, +2752 the end asked
+                // for, +2780 the next level's name. For testing the way
+                // from one mission to the next.
+                {
+                    static const char* const winWanted = getenv("COD3_WIN");
+                    static bool won = false;
+                    if (winWanted != nullptr && !won && long(frame / 60) == strtol(winWanted, nullptr, 10))
+                    {
+                        won = true;
+                        const char* colon = strchr(winWanted, ':');
+                        const std::string next = colon != nullptr ? std::string(colon + 1) : std::string();
+                        constexpr uint32_t state = 0x82A4E790u;
+                        for (size_t i = 0; i < 255; i++)
+                            Guest::Write8(Guest::Base, state + 2780 + uint32_t(i), i < next.size() ? uint8_t(next[i]) : 0);
+                        Guest::Write32(Guest::Base, state + 2772, 0);
+                        Guest::Write32(Guest::Base, state + 2776, 0);
+                        Guest::Write32(Guest::Base, state + 2760, 1);
+                        Guest::Write32(Guest::Base, state + 2764, 0);
+                        Guest::Write32(Guest::Base, state + 2752, 1);
+                        printf("video: the mission marked won, next \"%s\"\n", next.c_str());
+                        fflush(stdout);
+                    }
+                }
                 // COD3_STRINGS="prefix,prefix[,second]": the strings in the
                 // title's image that start so, listed once, that many
                 // seconds in (twenty by default): what its console knows.
