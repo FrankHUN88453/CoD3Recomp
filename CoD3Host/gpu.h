@@ -23,6 +23,9 @@ namespace Gpu
     inline constexpr uint32_t RegisterInterruptStatus = 0x7FC86544;
 
     uint32_t ReadRegister(uint32_t address);
+    // The bin select the command stream set last (the pass a replayed
+    // buffer is drawing: 0x80000001 the depth pass, 2 the colour pass).
+    uint64_t BinSelect();
     void WriteRegister(uint32_t address, uint32_t value);
 
     // Where the driver says it has filled the ring, in dwords.

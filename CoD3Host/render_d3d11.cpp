@@ -626,8 +626,10 @@ namespace
         if (presents++ < from || presents > until) return;
         static int counter = 0;
         if ((counter++ % every) != 0) return;
+        // COD3_FRAMEDUMP_SHRINK=N: each side divided by N, for long runs.
+        static const uint32_t shrink = []() { const char* t = getenv("COD3_FRAMEDUMP_SHRINK"); const long v = t ? strtol(t, nullptr, 10) : 1; return uint32_t(v >= 1 && v <= 16 ? v : 1); }();
         uint32_t w = 0, h = 0;
-        const std::vector<uint8_t> pixels = ReadBack(back, w, h, 1);
+        const std::vector<uint8_t> pixels = ReadBack(back, w, h, shrink);
         if (pixels.empty()) return;
         char name[512];
         snprintf(name, sizeof(name), "%s-%03d.bmp", path, (counter / every) % keep);

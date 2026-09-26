@@ -148,21 +148,34 @@ draw. The settings gained texture quality and the field of view.
 
 ### The frame rate, unlocked in a level
 
-The title's ceiling was never its own: it draws a frame and waits for a
-vertical blank to show it, and the blanks came 60 a second. Its clock is
-the timebase (the frame clock at 0x829C2518 read 40002 ms forty seconds
-into a run with the rate unlocked), so it plays at the same speed at any
-frame rate, the way the Quake 3 engine under it was built. The blanks
-now come as the settings and the title's state say: 60 a second in the
-menus and while a film is open (the player at 0x82A2A24C), which the
-films show at their own 30, and every millisecond while a level is
-played (the title's `sv_running`, pointer at 0x829BAB18, with no film
-open), so the frame rate there is what the machine can do: Chambois at
-2560x1440 drawn at 200 per cent, RTX 4070 Ti, 85 to 110 frames a second
-where it had 60. A blank at 120 a second is not 120 frames: a frame of
-Chambois takes 10 to 12 ms, over a 120th, so every frame missed a blank
-and waited for the next, 60 again. `COD3_VBLANK=N` keeps N blanks a
-second throughout, for a test; `COD3_UNLOCKFPS=0` keeps the console's 60.
+The title's ceiling was never its own: it draws a frame, and its stream
+then waits on a flag (the second word of the scratch block the driver
+names in register 0x1DD) that its vertical blank handler clears a blank
+later; the blanks come 60 a second. Its clock is the timebase (the frame
+clock at 0x829C2518 read 40002 ms forty seconds into a run with the
+rate unlocked), so it plays at the same speed at any frame rate, the way
+the Quake 3 engine under it was built. While a level is played (the
+title's `sv_running`, pointer at 0x829BAB18, with no film open, the
+player at 0x82A2A24C) and the settings leave the frame rate unlocked,
+the command processor lets that one wait through, and the next frame
+starts as soon as the title has it: Saint-Lô at 2560x1440 drawn at 200
+per cent, RTX 4070 Ti, 115 frames a second where it had 60. The menus
+and the films keep the wait, so 60 and the films' own 30.
+
+The first way of doing it made the blanks themselves come every
+millisecond while a level was played. The frame rate came unlocked, but
+the title counts the blanks as well as waiting for them, and its
+soldiers' animation jumped back and forth every frame: consecutive
+frames of the same idle scene were closer two apart than one apart,
+three times the "back and forth" of a locked run, all of it on the
+soldiers (and, in some runs, a stretch of ground drawn as nothing for a
+frame). Letting the wait through with the blanks at sixty leaves the
+frame rate unlocked and the back and forth at the locked run's level.
+A blank at 120 a second would not have been 120 frames either: a frame
+of Chambois took 10 to 12 ms, over a 120th, so every frame missed a
+blank and waited for the next, 60 again. `COD3_UNLOCKFPS=0` keeps the
+console's 60; `COD3_VBLANK=N` makes the blanks come N a second, for a
+test.
 
 One thing did depend on the frame rate, and it was this project's: the
 mouse. The title turns by the right stick's deflection times its frame's
@@ -186,6 +199,25 @@ from the title's own and later what changed; the queue waits until the
 title has set its buffer up (cmd_text at 0x829F1BB8), since
 Cbuf_AddText drops what does not fit. `CoD3.cfg` is gone and
 `COD3_EXEC` goes the same way.
+
+### Buffers the title rewrites between the draws of one frame
+
+The renderer looks at a vertex buffer's memory once a frame and uploads
+it when it changed. The title rewrites some of its small buffers between
+the draws of a frame: a tank's treads are strips built each frame into
+16 KB buffers, one tread after another into the same memory once the
+GPU has drawn the one before (the console's GPU reads the memory at the
+draw), and a pair of 128 KB buffers in Chambois and Laison go the same
+way (`COD3_DRAWLOG` and a look at every draw found them: Saint-Lô one
+buffer, the Mace eight, Laison a dozen). Looked at once a frame, the
+second tread of a buffer was drawn with the first one's vertices, and
+its strip, a few vertices longer, ran on into whatever lay beyond them:
+a dark triangle with the tread's texture across the ground for a frame,
+or a tank's tread in the wrong place. Every later draw of a frame now
+takes a sampled look (64 words) at a buffer of up to 256 KB, and one
+found changing is looked at whole by every draw from then on; the cost
+did not show in the frame rate (87 against 89 in the Mace).
+`COD3_NOMIDFRAME=1` goes back to once a frame.
 
 ### Sound, and the films
 

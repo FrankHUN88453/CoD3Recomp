@@ -408,39 +408,44 @@ namespace
         return Guest::Read32(Guest::Base, 0x82A2A24Cu) == 0;
     }
 
-    // How long until the next vertical blank. The title draws a frame and
-    // then waits for a vertical blank to show it, so this is its frame
-    // rate's ceiling. The console's is 60 a second, which is what the menu
-    // gets, and the films, which show a picture every second blank (30).
-    // While a level is played, with the frame rate unlocked in the settings
-    // (the default), a blank comes every millisecond: the title's frame
-    // rate is then what it can do, and its clock is the timebase, not the
-    // blanks, so the game keeps its speed. COD3_VBLANK=N keeps N a second
-    // throughout, for a test (30 .. 1000); COD3_UNLOCKFPS=0|1 over the
-    // settings.
-    std::chrono::nanoseconds VblankPeriod(uint64_t frame)
+    // Whether the frame rate is unlocked now: the settings say so (the
+    // default; COD3_UNLOCKFPS=0|1 over them) and a level is being played.
+    // Looked at by the video thread once a blank, read by the command
+    // processor at the wait that follows each swap.
+    std::atomic<bool> g_frameRateUnlocked{ false };
+    void UpdateFrameRateUnlocked(uint64_t frame)
     {
-        static const long fixed = []() { const char* t = getenv("COD3_VBLANK"); const long hz = t ? strtol(t, nullptr, 10) : 0; return hz >= 30 && hz <= 1000 ? hz : 0L; }();
-        if (fixed != 0) return std::chrono::nanoseconds(1000000000ll / fixed);
         static const int unlockOverride = []() { const char* t = getenv("COD3_UNLOCKFPS"); return t ? (t[0] == '0' ? 0 : 1) : -1; }();
         static bool unlocked = true;
-        if ((frame & 63) == 0) unlocked = unlockOverride >= 0 ? unlockOverride != 0 : Settings::Get().unlockFrameRate;
-        static bool wasPlaying = false;
-        const bool playing = unlocked && TitlePlaying();
-        if (playing != wasPlaying)
+        if ((frame & 15) == 0) unlocked = unlockOverride >= 0 ? unlockOverride != 0 : Settings::Get().unlockFrameRate;
+        const bool now = unlocked && TitlePlaying();
+        if (now != g_frameRateUnlocked.load(std::memory_order_relaxed))
         {
-            wasPlaying = playing;
-            printf("video: vertical blanks %s\n", playing ? "every millisecond, a level is played" : "60 a second");
+            g_frameRateUnlocked.store(now, std::memory_order_relaxed);
+            printf("video: the frame rate is %s\n", now ? "unlocked, a level is played" : "the console's");
             fflush(stdout);
         }
-        return playing ? std::chrono::nanoseconds(1000000) : std::chrono::nanoseconds(16666667);
+    }
+
+    // How long until the next vertical blank: the console's sixty a second,
+    // always. The title draws a frame and its stream then waits for a flag
+    // its vertical blank handler clears, which is the frame rate's ceiling;
+    // an unlocked frame rate lets that wait through (gpu.cpp) rather than
+    // making the blanks come faster. Faster blanks were tried, one every
+    // millisecond: the frame rate came unlocked, but the title counts the
+    // blanks as well, and its soldiers' animation jumped back and forth
+    // every frame. COD3_VBLANK=N keeps N a second, for a test (30 .. 1000).
+    std::chrono::nanoseconds VblankPeriod()
+    {
+        static const long fixed = []() { const char* t = getenv("COD3_VBLANK"); const long hz = t ? strtol(t, nullptr, 10) : 0; return hz >= 30 && hz <= 1000 ? hz : 0L; }();
+        return fixed != 0 ? std::chrono::nanoseconds(1000000000ll / fixed) : std::chrono::nanoseconds(16666667);
     }
 
     void VideoThread()
     {
         VideoState& video = Video();
-        // The seconds below are the wall clock's: the blanks come at more
-        // than one rate.
+        // The seconds below are the wall clock's, whatever rate the blanks
+        // come at (COD3_VBLANK).
         const auto started = std::chrono::steady_clock::now();
         uint64_t lastSecond = 0;
 
@@ -462,7 +467,8 @@ namespace
         auto nextFrame = std::chrono::steady_clock::now();
         while (video.running.load(std::memory_order_acquire))
         {
-            nextFrame += VblankPeriod(video.frames.load(std::memory_order_relaxed));
+            UpdateFrameRateUnlocked(video.frames.load(std::memory_order_relaxed));
+            nextFrame += VblankPeriod();
             // After a stall (a debugger, a long interrupt), carry on from now
             // rather than firing the missed blanks back to back.
             if (std::chrono::steady_clock::now() - nextFrame > std::chrono::milliseconds(100))
@@ -1463,6 +1469,8 @@ uint32_t Gpu::InterruptContext()
 {
     return Video().interruptContext.load();
 }
+
+bool Kernel::FrameRateUnlocked() { return g_frameRateUnlocked.load(std::memory_order_relaxed); }
 
 void Kernel::QueueConsoleCommand(const std::string& text)
 {

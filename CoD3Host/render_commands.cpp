@@ -58,6 +58,29 @@ namespace
         RenderStats::Frame().skipped++;
     }
 
+    // COD3_SKIPLOG=1: each frame whose skips, reason by reason, are not the
+    // frame before's, for finding a draw that goes missing for one frame.
+    void SkipFrameCheck()
+    {
+        static const bool log = getenv("COD3_SKIPLOG") != nullptr;
+        if (!log) return;
+        static uint64_t lastSwap = 0, atStart[SkipCount] = {}, previous[SkipCount] = {};
+        const uint64_t swap = RenderInternal::Swaps();
+        if (swap == lastSwap) return;
+        uint64_t frame[SkipCount];
+        bool differs = false;
+        for (int i = 0; i < SkipCount; i++) { frame[i] = g_skips[i] - atStart[i]; if (frame[i] != previous[i]) differs = true; }
+        if (differs)
+        {
+            printf("render: skips in frame %llu:", (unsigned long long)lastSwap);
+            for (int i = 0; i < SkipCount; i++) if (frame[i] != 0) printf(" %s x%llu;", SkipNames[i], (unsigned long long)frame[i]);
+            printf("\n");
+        }
+        memcpy(previous, frame, sizeof(frame));
+        memcpy(atStart, g_skips, sizeof(atStart));
+        lastSwap = swap;
+    }
+
     // --- the constants ----------------------------------------------------------------------------------
 
     // The draw's own block, kept from one draw to the next so it goes up
@@ -595,8 +618,67 @@ namespace
     }
 }
 
+namespace
+{
+    // COD3_DRAWLOG=path: one line a draw, every frame, to that file: the
+    // swap, the draw's number in it, the pass (bin select), the programs,
+    // the primitive and count, the first vertex buffer with a sampled look
+    // at its memory, a look at the indices and at the vertex program's
+    // first sixty four constants, and the depth and blend state. Frames
+    // are then compared draw by draw, to find what one frame did that its
+    // neighbours did not.
+    uint64_t SampleHash(uint32_t physical, uint32_t bytes)
+    {
+        if (physical == 0 || bytes == 0 || bytes > (64u << 20)) return 0;
+        const uint8_t* data = Guest::Base + Guest::PhysicalAlias(physical);
+        uint64_t hash = 1469598103934665603ull ^ bytes;
+        const uint32_t step = std::max<uint32_t>(bytes / 64, 4) & ~3u;
+        for (uint32_t at = 0; at + 4 <= bytes; at += step)
+        {
+            uint32_t word;
+            memcpy(&word, data + at, 4);
+            hash = (hash ^ word) * 1099511628211ull;
+        }
+        return hash;
+    }
+
+    void DrawLog(const RenderState::Snapshot& state, const RenderShaders::Program* vs, const RenderShaders::Program* ps, const DrawCommand& out)
+    {
+        static FILE* const file = []() -> FILE* {
+            const char* path = getenv("COD3_DRAWLOG");
+            if (path == nullptr) return nullptr;
+            FILE* f = fopen(path, "wb");
+            if (f != nullptr) setvbuf(f, nullptr, _IOFBF, 4u << 20);
+            return f;
+        }();
+        if (file == nullptr) return;
+        static uint64_t lastSwap = ~0ull;
+        static uint32_t number = 0;
+        const uint64_t swap = RenderInternal::Swaps();
+        if (swap != lastSwap) { lastSwap = swap; number = 0; }
+        uint32_t vb = 0, vbBytes = 0;
+        if (!vs->vertexFetches.empty())
+        {
+            uint32_t word0, word1;
+            RenderState::ReadVertexFetch(vs->vertexFetches[0].slot, word0, word1);
+            vb = word0 & ~3u;
+            vbBytes = ((word1 >> 2) & 0xFFFFFF) * 4;
+        }
+        const std::atomic<uint32_t>* registers = Gpu::RegisterFile();
+        uint64_t constants = 1469598103934665603ull;
+        for (uint32_t i = 0; i < 256; i++) constants = (constants ^ registers[0x4000 + i].load(std::memory_order_relaxed)) * 1099511628211ull;
+        const uint32_t indexBytes = out.indexed ? state.indexCount * 4 : 0;
+        fprintf(file, "%llu %u %llx %016llx %016llx p%u n%u %c vb %08X %u %016llx ib %016llx c %016llx d %08X b %08X m %X t %u\n",
+            (unsigned long long)swap, number++, (unsigned long long)Gpu::BinSelect(), (unsigned long long)vs->hash, (unsigned long long)ps->hash,
+            state.primitive, state.indexCount, out.indexed ? 'i' : 'p', vb, vbBytes, (unsigned long long)SampleHash(vb, vbBytes),
+            (unsigned long long)(out.indexed ? SampleHash(state.indexBase, indexBytes) : 0), (unsigned long long)constants,
+            state.depthControl, state.blendControl[0], state.colorMask, out.targetCount);
+    }
+}
+
 bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCommand& out)
 {
+    SkipFrameCheck();
     RenderStats::Enter(RenderStats::SectionState);
     RenderState::Snapshot state;
     RenderState::Read(initiator, indexBase, state);
@@ -708,6 +790,7 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
         out.logged = true;
         Log(state, vs, ps, out);
     }
+    DrawLog(state, vs, ps, out);
     return true;
 }
 

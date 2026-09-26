@@ -250,6 +250,9 @@ namespace Kernel
     // put on the title's own command buffer at the next vertical blank,
     // the way COD3_MAP starts a level. Any thread may queue one.
     void QueueConsoleCommand(const std::string& text);
+    // The frame rate is unlocked (the settings) and a level is played:
+    // the wait after each swap is let through.
+    bool FrameRateUnlocked();
 
     // The heaps: how much is handed out and how much of that is free again.
     void ReportHeaps();

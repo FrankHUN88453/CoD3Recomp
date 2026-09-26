@@ -254,6 +254,8 @@ namespace
         uint64_t usedFrame = 0;
         uint32_t stable = 0;            // checks in a row that found no change; a buffer starts as changing
         bool dense = true;              // the fingerprint is of every byte
+        uint64_t sampled = 0;           // the sampled fingerprint, as the frame's first look found it
+        bool midFrame = false;          // the title rewrites it between the draws of one frame
         uint32_t bytes = 0;             // the buffer's size
         uint32_t seen = 0;              // the largest size a fetch asked for
         bool live = false;
@@ -1060,7 +1062,38 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
     if (handle != 0)
     {
         BufferEntry& entry = g_buffers[handle - 1];
-        if (entry.checkedFrame == g_frame && entry.seen >= bytes) return handle;
+        // Already looked at this frame. A buffer is looked at once a frame,
+        // like a texture, but the title rewrites some of its small ones
+        // between the draws of a frame: a tank's treads are strips built
+        // each frame into 16 KB buffers, one tread after another into the
+        // same memory once the GPU has drawn the one before (the console's
+        // GPU reads the memory at the draw), and a few 128 KB buffers go the
+        // same way. Looked at once a frame, the second tread was drawn with
+        // the first one's vertices, and its strip, longer by a few, ran on
+        // into whatever lay beyond them: a dark textured triangle across the
+        // ground for a frame, on every level with tanks. So every later draw
+        // of a frame takes a sampled look at a small buffer (sixty four
+        // words), and one found changing is looked at whole by every draw
+        // from then on. COD3_NOMIDFRAME=1 goes back to once a frame.
+        if (entry.checkedFrame == g_frame && entry.seen >= bytes)
+        {
+            static const bool once = getenv("COD3_NOMIDFRAME") != nullptr;
+            if (once || entry.seen > AlwaysDenseBytes || !entry.dense) return handle;
+            if (entry.midFrame)
+            {
+                if (Fingerprint(data, entry.seen, true) == entry.fingerprint) return handle;
+            }
+            else
+            {
+                if (Fingerprint(data, entry.seen, false) == entry.sampled) return handle;
+                entry.midFrame = true;
+                static int announced = 0;
+                if (announced++ < 16)
+                    printf("render: the vertex buffer at %08X (%u bytes) changes within a frame; every draw looks at it now\n",
+                        physical, entry.seen);
+            }
+            entry.checkedFrame = 0;   // changed: taken up again below
+        }
         const bool look = LookThisFrame(entry.stable, entry.usedFrame, handle) || entry.seen < bytes;
         entry.usedFrame = g_frame;
         if (!look) return handle;
@@ -1074,6 +1107,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
             if (entry.stable < StableLooks) entry.stable++;
             const bool wantDense = WantDense(entry.stable, wanted);
             if (wantDense != entry.dense) { entry.dense = wantDense; entry.fingerprint = Fingerprint(data, wanted, wantDense); }
+            if (!entry.midFrame && wanted <= AlwaysDenseBytes) entry.sampled = Fingerprint(data, wanted, false);
             return handle;
         }
         entry.stable = 0;
@@ -1095,6 +1129,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
         {
             D3D11_BOX box{ 0, 0, 0, wanted, 1, 1 };
             g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data, 0, 0);
+            if (!entry.midFrame && wanted <= AlwaysDenseBytes) entry.sampled = Fingerprint(data, wanted, false);
             g_bufferUploads.fetch_add(1, std::memory_order_relaxed);
             g_bufferBytes.fetch_add(wanted, std::memory_order_relaxed);
             RenderStats::Frame().bufferUploads++;
@@ -1109,6 +1144,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
     entry = BufferEntry();
     memcpy(entry.key, key, sizeof(entry.key));
     entry.fingerprint = Fingerprint(data, wanted, entry.dense);
+    if (wanted <= AlwaysDenseBytes) entry.sampled = Fingerprint(data, wanted, false);
     entry.checkedFrame = entry.usedFrame = g_frame;
     entry.seen = wanted;
     // A little room to grow: the title's dynamic buffers are asked for at

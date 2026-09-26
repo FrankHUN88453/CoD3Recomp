@@ -648,6 +648,18 @@ namespace
 
         g_waits.fetch_add(1, std::memory_order_relaxed);
 
+        // The wait after a swap: on the flag in the second word of the
+        // scratch block the driver named (register 0x1DD), which the
+        // title's vertical blank handler clears a blank after the swap.
+        // That is the frame rate's ceiling, sixty a second; with the frame
+        // rate unlocked while a level is played it is let through at once,
+        // and the next frame starts as soon as the title has it.
+        if (memory && Kernel::FrameRateUnlocked())
+        {
+            const uint32_t block = Gpu::ReadRegister(Gpu::ApertureBase + 0x1DD * 4) & ~3u;
+            if (block != 0 && (pollAddress & ~3u) == block + 4) return;
+        }
+
         // How long the command processor will wait for a value the title is
         // supposed to write. The console waits as long as it takes; giving up
         // early lets the next packet run against state that is not ready yet,
@@ -932,6 +944,8 @@ void Gpu::SnapshotRegisters(uint32_t firstIndex, uint32_t count, uint32_t* out)
     for (uint32_t i = 0; i < count; i++)
         out[i] = firstIndex + i < RegisterCount ? g_registerFile[firstIndex + i].load(std::memory_order_relaxed) : 0;
 }
+
+uint64_t Gpu::BinSelect() { return g_binSelect.load(std::memory_order_relaxed); }
 
 uint32_t Gpu::ReadRegister(uint32_t address)
 {
