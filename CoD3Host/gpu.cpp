@@ -28,6 +28,7 @@
 #include "scheduler.h"
 #include "sampler.h"
 #include "render.h"
+#include "render_internal.h"
 #include "timeline.h"
 #include "window.h"
 
@@ -185,6 +186,36 @@ namespace
         case OpSwap:            return "SWAP";
         default:                return nullptr;
         }
+    }
+
+    // Predicated packets. A type 3 packet with bit 0 of its header set runs
+    // only when the bin select and the bin mask share a bit (the SET_BIN_*
+    // packets set them), and a predicated swap never runs; that is Xenia's
+    // rule. The title's driver loads a character's depth only vertex program
+    // behind such a predicate right after the colour pass's program: running
+    // every load left the depth only one current, and the colour pass drew
+    // the soldier with no interpolators, black. COD3_NOPREDICATE=1 runs every
+    // packet again, to compare.
+    std::atomic<uint64_t> g_binMask{ ~0ull }, g_binSelect{ ~0ull };
+    std::atomic<uint64_t> g_predicatedOut{ 0 };
+    bool BinPass(uint32_t header, uint32_t opcode)
+    {
+        static const bool off = getenv("COD3_NOPREDICATE") != nullptr;
+        if ((header & 1) != 0 && RenderInternal::FrameLogged())
+            printf("frame: predicated %s (%02X), select %016llX mask %016llX\n", Type3Name(opcode) ? Type3Name(opcode) : "?", opcode,
+                (unsigned long long)g_binSelect.load(), (unsigned long long)g_binMask.load());
+        if (off || (header & 1) == 0) return true;
+        if ((g_binSelect.load(std::memory_order_relaxed) & g_binMask.load(std::memory_order_relaxed)) != 0 && opcode != OpSwap)
+            return true;
+        g_predicatedOut.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    void SetBin(uint32_t opcode, uint32_t value)
+    {
+        std::atomic<uint64_t>& target = (opcode == 0x60 || opcode == 0x61) ? g_binMask : g_binSelect;
+        const uint64_t old = target.load(std::memory_order_relaxed);
+        if (opcode == 0x60 || opcode == 0x62) target.store((old & 0xFFFFFFFF00000000ull) | value, std::memory_order_relaxed);
+        else target.store((old & 0xFFFFFFFFull) | (uint64_t(value) << 32), std::memory_order_relaxed);
     }
 
     // What the title is actually drawing, accumulated as the stream is decoded.
@@ -809,6 +840,26 @@ namespace
         }
     }
 
+    // COD3_TRACESHADERLOAD=N: the first N shader uploads once a level is
+    // loading, with where in the instruction memory they go, and the writes
+    // of SQ_PROGRAM_CNTL and of 0x21F6 and 0x21F7, which name the programs'
+    // bases on the console's relatives. This title never writes those two
+    // and loads every program at 0: the program last loaded is the one that
+    // runs, once the predicated loads are left out.
+    int ShaderLoadTraceLimit()
+    {
+        static const int limit = []() { const char* t = getenv("COD3_TRACESHADERLOAD"); return t ? int(strtol(t, nullptr, 10)) : 0; }();
+        return limit;
+    }
+    std::atomic<int> g_shaderLoadsTraced{ 0 };
+    void TraceShaderLoad(bool pixel, uint32_t startSize, uint32_t sizeDwords)
+    {
+        if (ShaderLoadTraceLimit() <= 0 || Kernel::Stats().filesOpened.load(std::memory_order_relaxed) < 40) return;
+        if (g_shaderLoadsTraced.fetch_add(1) >= ShaderLoadTraceLimit()) return;
+        printf("gpu: load %s start %u size %u hash %016llx\n", pixel ? "ps" : "vs", startSize >> 16, sizeDwords,
+            (unsigned long long)Render::CurrentProgramHash(pixel));
+    }
+
     // A shader upload. The first word says which pipeline stage, the second
     // packs where it goes and how long it is; the microcode follows inline.
     void DecodeShaderLoad(uint32_t typeWord, uint32_t startSize, uint32_t address)
@@ -829,7 +880,8 @@ namespace
                 g_draws.lastVertexShader = address;
             }
         }
-        Render::ShaderLoaded(pixel, address, sizeDwords);
+        Render::ShaderLoaded(pixel, address, sizeDwords, startSize >> 16);
+        TraceShaderLoad(pixel, startSize, sizeDwords);
     }
 
     // IM_LOAD is the same upload by reference: the packet names where the
@@ -941,6 +993,11 @@ void Gpu::WriteRegister(uint32_t address, uint32_t value)
         if (fileIndex >= 0x4000 && fileIndex < 0x4400) NoteConstantWrite(0, fileIndex - 0x4000);
         else if (fileIndex >= 0x4400 && fileIndex < 0x4800) NoteConstantWrite(1, fileIndex - 0x4400);
         else if (fileIndex >= 0x4900 && fileIndex < 0x4930) NoteConstantWrite(2, fileIndex - 0x4900);
+
+        if (ShaderLoadTraceLimit() > 0 && (fileIndex == 0x21F6 || fileIndex == 0x21F7 || fileIndex == 0x2180)
+            && Kernel::Stats().filesOpened.load(std::memory_order_relaxed) >= 40
+            && g_shaderLoadsTraced.load(std::memory_order_relaxed) < ShaderLoadTraceLimit())
+            printf("gpu: register %04X = %08X\n", fileIndex, value);
 
         // COD3_TRACEREG=1: every register written once a level is loading,
         // and how often, for the ones this runtime does not act on.
@@ -1194,7 +1251,10 @@ uint32_t Gpu::ProcessRing(uint32_t ringBase, uint32_t ringSizeDwords,
                 Remember(header, words, available);
             }
 
-            switch (opcode)
+            const bool runs = BinPass(header, opcode);
+            if (runs && opcode >= OpSetBinMaskLo && opcode <= OpSetBinSelectHi)
+                SetBin(opcode, ReadDword(cursor + 1));
+            if (runs) switch (opcode)
             {
             case OpDrawIndx:
                 local.draws++;
@@ -1581,7 +1641,13 @@ namespace
                     Remember(header, words, available);
                 }
 
-                if (opcode == OpInterrupt)
+                if (!BinPass(header, opcode))
+                {
+                    // predicated out: nothing runs
+                }
+                else if (opcode >= OpSetBinMaskLo && opcode <= OpSetBinSelectHi && cursor + 1 < dwords)
+                    SetBin(opcode, Guest::Read32(Guest::Base, base + (cursor + 1) * 4));
+                else if (opcode == OpInterrupt)
                 {
                     // Nearly all of the stream is inside these buffers, and so
                     // are nearly all of the interrupts; raising them only from

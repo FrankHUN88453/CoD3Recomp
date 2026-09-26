@@ -267,7 +267,8 @@ the environment, over the menu: `COD3_SCALE`, `COD3_TEXTURE_FILTER=native|
 bilinear|trilinear|anisotropic`, `COD3_ANISO=1..16`, `COD3_VSYNC=0|1`,
 `COD3_AA=0|fxaa|msaa2|msaa4|msaa8|msaa4fxaa`, `COD3_TEXQUALITY=0|1|2`, `COD3_AIMBLUR=0|1`,
 `COD3_FULLSCREEN=0|1`, `COD3_NOMIPS=1`, `COD3_NOPIXELGEN=1`,
-`COD3_NOPOLYOFFSET=1`,
+`COD3_NOPOLYOFFSET=1`, `COD3_NOPREDICATE=1` (every predicated packet run), `COD3_OLDGRADIENTS=1`
+(getGradients in the old order), `COD3_TRACESHADERLOAD=N` (the first N shader loads of a level),
 `COD3_NOSHADERCACHE=1`, `COD3_NOPRECOMPILE=1`. For a scripted run,
 `COD3_CMD="second:command;..."` puts console commands on the title's
 buffer at those seconds, `COD3_STRINGS="prefix,..."` lists the

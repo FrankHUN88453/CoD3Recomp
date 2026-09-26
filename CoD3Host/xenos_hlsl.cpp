@@ -578,7 +578,10 @@ namespace
                     // the second. The characters' programs take a tangent frame
                     // from these, and with both x derivatives first the frame
                     // lost its y half: the uniforms went black in patches.
-                    if (pixel) Line(Format("fetched = float4(ddx(%s.x), ddy(%s.x), ddx(%s.y), ddy(%s.y));",
+                    // COD3_OLDGRADIENTS=1 puts both d/dx first again, to compare.
+                    static const bool oldGradients = getenv("COD3_OLDGRADIENTS") != nullptr;
+                    if (pixel) Line(Format(oldGradients ? "fetched = float4(ddx(%s.x), ddx(%s.y), ddy(%s.x), ddy(%s.y));"
+                                                        : "fetched = float4(ddx(%s.x), ddy(%s.x), ddx(%s.y), ddy(%s.y));",
                         coordinate.c_str(), coordinate.c_str(), coordinate.c_str(), coordinate.c_str()));
                     else Line("fetched = float4(0.0, 0.0, 0.0, 0.0);");
                 }
@@ -1010,6 +1013,7 @@ uint64_t XenosHlsl::Version()
     if (const char* sign = getenv("COD3_D3DSHOWSIGN")) { text += " sign="; text += sign; }
     if (getenv("COD3_NOFETCHOFFSET")) text += " no offsets";
     if (getenv("COD3_OLDALUPAIR")) text += " write first";
+    if (getenv("COD3_OLDGRADIENTS")) text += " old gradients";
     if (getenv("COD3_NOPIXELGEN")) text += " no pixel params";
     uint64_t hash = 14695981039346656037ull;
     for (unsigned char c : text) { hash ^= c; hash *= 1099511628211ull; }

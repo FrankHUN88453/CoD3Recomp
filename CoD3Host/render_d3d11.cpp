@@ -1107,11 +1107,13 @@ void Render::Resolve()
     if (RenderCommands::PrepareResolve(command)) ExecuteResolve(command);
 }
 
-void Render::ShaderLoaded(bool pixel, uint32_t guestAddress, uint32_t sizeDwords)
+void Render::ShaderLoaded(bool pixel, uint32_t guestAddress, uint32_t sizeDwords, uint32_t start)
 {
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     if (!Start()) return;
     RenderShaders::Loaded(pixel, Guest::Base + guestAddress, sizeDwords);
+    if (FrameLogged()) printf("frame: load %s %016llx, %u dwords from %08X at %u\n", pixel ? "ps" : "vs",
+        (unsigned long long)RenderShaders::HashOf(RenderShaders::Current(pixel)), sizeDwords, guestAddress, start);
 }
 
 uint64_t Render::CurrentProgramHash(bool pixel)

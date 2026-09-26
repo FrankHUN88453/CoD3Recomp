@@ -40,7 +40,7 @@ namespace Render
 
     // A shader upload from the stream: the stage, and where the microcode
     // lies in guest memory. The program becomes the stage's current one.
-    void ShaderLoaded(bool pixel, uint32_t guestAddress, uint32_t sizeDwords);
+    void ShaderLoaded(bool pixel, uint32_t guestAddress, uint32_t sizeDwords, uint32_t start = 0);
 
     // VdSwap reached in the stream: the front buffer the title finished, by
     // physical address. The frame goes on the window from here.

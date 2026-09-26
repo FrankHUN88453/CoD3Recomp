@@ -231,6 +231,25 @@ causes were found, two fixed:
   order is Xenia's (x and z d/dx, y and w d/dy), and the program itself
   asks for `.x` and `.y` of the gradients of `r0.ww`, which only makes
   sense that way.
+- **Fixed: soldiers wholly black, and a ghost of the weapon cut out of the
+  smoke in front of it.** The title's driver records a frame's command
+  buffer once and plays it through more than once with a different bin
+  select (a Z pass, select 0x80000001, and a colour pass, 0x00000002):
+  packets whose header has bit 0 set run only when the select and the
+  bin mask set before them share a bit (Xenia's rule; a predicated swap
+  never runs). A character's colour pass loads its vertex program twice
+  in a row, the Z pass's position only program (2e954041, mask
+  0x15555555) and the colour pass's (ec1ebcf4, mask 0x2AAAAAAA); running
+  both left the position only one current, and the body drew with no
+  interpolators: black, at times for seconds on end, the pack and helmet
+  lit. The same held the Z pass's draws of the weapon and the particles'
+  depth in the colour pass, and the half resolution smoke was cut out
+  round a second weapon, several pixels wide, at any resolution. Both
+  decoders now keep the bin mask and select and skip what they rule out
+  (`COD3_NOPREDICATE=1` runs everything again). What stays round the
+  weapon in thick smoke is a pixel or two: the title draws its particles
+  at half resolution and puts them back by depth, as it does on the
+  console.
 - **Still open:** after the console's `spmap` mid-level the player has no
   weapon and no HUD. The table of weapons (0x82A2A2E0) is not the cause, but it is not
   rebuilt at a reload as an earlier note said either: the title fills it
