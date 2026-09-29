@@ -200,6 +200,25 @@ title has set its buffer up (cmd_text at 0x829F1BB8), since
 Cbuf_AddText drops what does not fit. `CoD3.cfg` is gone and
 `COD3_EXEC` goes the same way.
 
+### The soldiers' shadows: a depth only draw runs no pixel program
+
+The soldiers' shadows came and went, on every level, walking or
+standing, at any frame rate. The shadow maps and the depth pre-pass are
+drawn in the EDRAM's depth only mode (RB_MODECONTROL 5), in which the
+hardware writes depth and runs no pixel program, so the title loads none
+for those draws and leaves the last one in place. The renderer ran it.
+The soldiers' shadow casters inherited, in one cascade, the program of
+the clear before them (nothing discarded, a whole shadow) and in another
+the alpha tested casters' program, which discards by a texture and a
+reference the soldiers' draw never set; which of the two came before
+them changed from frame to frame with what each cascade held. A per
+frame count of each kind of draw found it (the draws with the soldiers'
+vertex program went 14 and 0 with one pixel program, then 10 and 4, frame
+after frame). A depth only draw now binds no pixel program and no colour
+target: 400 frames of the soldiers standing had 271 and 298 frames with a
+region going on and off one frame, and have 1 now (a muzzle flash).
+`COD3_DEPTHMODEPS=1` runs the programs as before.
+
 ### Buffers the title rewrites between the draws of one frame
 
 The renderer looks at a vertex buffer's memory once a frame and uploads

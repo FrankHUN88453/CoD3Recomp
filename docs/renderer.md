@@ -267,7 +267,7 @@ the environment, over the menu: `COD3_SCALE`, `COD3_TEXTURE_FILTER=native|
 bilinear|trilinear|anisotropic`, `COD3_ANISO=1..16`, `COD3_VSYNC=0|1`,
 `COD3_AA=0|fxaa|msaa2|msaa4|msaa8|msaa4fxaa`, `COD3_TEXQUALITY=0|1|2`, `COD3_AIMBLUR=0|1`,
 `COD3_FULLSCREEN=0|1`, `COD3_NOMIPS=1`, `COD3_NOPIXELGEN=1`,
-`COD3_VBLANK=N` (vertical blanks a second), `COD3_UNLOCKFPS=0|1`, `COD3_NOMIDFRAME=1` (vertex buffers looked at once a frame), `COD3_DRAWLOG=path` (one line a draw, every frame: pass, programs, buffer and constant looks, depth and blend), `COD3_SKIPLOG=1` (frames whose skipped draws differ), `COD3_FRAMEDUMP_SHRINK=N`, `COD3_NOPOLYOFFSET=1`, `COD3_NOPREDICATE=1` (every predicated packet run), `COD3_OLDGRADIENTS=1`
+`COD3_VBLANK=N` (vertical blanks a second), `COD3_UNLOCKFPS=0|1`, `COD3_NOMIDFRAME=1` (vertex buffers looked at once a frame), `COD3_DEPTHMODEPS=1` (run the pixel program in the depth only mode), `COD3_MISSAUDIT=1` (name changes the sampled fingerprints miss), `COD3_DRAWLOG_PSDUMP=hash`, `COD3_DRAWLOG=path` (one line a draw, every frame: pass, programs, buffer and constant looks, depth and blend), `COD3_SKIPLOG=1` (frames whose skipped draws differ), `COD3_FRAMEDUMP_SHRINK=N`, `COD3_NOPOLYOFFSET=1`, `COD3_NOPREDICATE=1` (every predicated packet run), `COD3_OLDGRADIENTS=1`
 (getGradients in the old order), `COD3_TRACESHADERLOAD=N` (the first N shader loads of a level),
 `COD3_NOSHADERCACHE=1`, `COD3_NOPRECOMPILE=1`. For a scripted run,
 `COD3_CMD="second:command;..."` puts console commands on the title's

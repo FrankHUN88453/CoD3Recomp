@@ -181,6 +181,25 @@ namespace
 
     // The targets the pixel program writes and the surface's scissor, in
     // host pixels. False when there is nowhere to draw.
+    // The EDRAM's depth only mode, RB_MODECONTROL 5: the hardware writes
+    // depth and runs no pixel program at all, so the title does not load
+    // one for such a draw and leaves the last one in place. The shadow maps
+    // are drawn so: the soldiers' casters followed a clear in one cascade
+    // and inherited its program (nothing discarded, a whole shadow), and
+    // followed the alpha tested casters in another and inherited theirs,
+    // which discards by a texture the soldiers' draw never meant for it,
+    // and which draws came before them changed from frame to frame with
+    // what each cascade held: the soldiers' shadows came and went. The
+    // depth pre-pass (select 0x80000001) uses the mode too, with the colour
+    // mask left open. Here such a draw gets no pixel program and no colour
+    // target. COD3_DEPTHMODEPS=1 runs the program as before.
+    bool DepthOnlyMode(const RenderState::Snapshot& state)
+    {
+        static const bool runProgram = getenv("COD3_DEPTHMODEPS") != nullptr;
+        return state.modeControl == 5 && !runProgram;
+    }
+    constexpr RenderState::Handle NoPixelProgram = 0xFFFFFFFFu;
+
     bool Targets(const RenderState::Snapshot& state, const RenderShaders::Program* vs, const RenderShaders::Program* ps, DrawCommand& out, float& scaleY)
     {
         // The rows the scissor reaches, so the surfaces are tall enough
@@ -195,7 +214,8 @@ namespace
         // Only the targets the pixel program writes, each once: the title
         // leaves the other target registers pointing at the same tiles, and
         // the host refuses one surface bound twice.
-        for (uint32_t i = 0; i < 4; i++)
+        const bool depthOnly = DepthOnlyMode(state);
+        for (uint32_t i = 0; i < 4 && !depthOnly; i++)
         {
             if (((ps->colourTargets >> i) & 1) == 0) continue;
             if (((state.colorMask >> (i * 4)) & 0xF) == 0) continue;
@@ -644,22 +664,30 @@ namespace
 
     void DrawLog(const RenderState::Snapshot& state, const RenderShaders::Program* vs, const RenderShaders::Program* ps, const DrawCommand& out)
     {
-        static FILE* const file = []() -> FILE* {
-            const char* path = getenv("COD3_DRAWLOG");
-            if (path == nullptr) return nullptr;
-            FILE* f = fopen(path, "wb");
-            if (f != nullptr) setvbuf(f, nullptr, _IOFBF, 4u << 20);
-            return f;
-        }();
-        if (file == nullptr) return;
-        // COD3_DRAWLOG_FROM / _UNTIL: only the swaps in that range, so the
-        // log slows no more of the run than it has to.
+        static const char* const path = getenv("COD3_DRAWLOG");
+        if (path == nullptr) return;
+        // COD3_DRAWLOG_FROM / _UNTIL: only the swaps in that range. The lines
+        // are kept in memory and written when the range is over, so the log
+        // slows the frames it covers as little as it can.
         static const uint64_t from = []() { const char* t = getenv("COD3_DRAWLOG_FROM"); return t ? uint64_t(strtoull(t, nullptr, 10)) : 0ull; }();
         static const uint64_t until = []() { const char* t = getenv("COD3_DRAWLOG_UNTIL"); return t ? uint64_t(strtoull(t, nullptr, 10)) : ~0ull; }();
-        if (RenderInternal::Swaps() < from || RenderInternal::Swaps() >= until) return;
+        static std::string lines;
+        static bool written = false;
+        const uint64_t swap = RenderInternal::Swaps();
+        if (written) return;
+        if (swap >= until || lines.size() > (512u << 20))
+        {
+            if (FILE* f = fopen(path, "wb")) { fwrite(lines.data(), 1, lines.size(), f); fclose(f); }
+            printf("render: the draw log went to %s, %zu bytes\n", path, lines.size());
+            fflush(stdout);
+            lines.clear(); lines.shrink_to_fit();
+            written = true;
+            return;
+        }
+        if (swap < from) return;
+        if (lines.empty()) lines.reserve(64u << 20);
         static uint64_t lastSwap = ~0ull;
         static uint32_t number = 0;
-        const uint64_t swap = RenderInternal::Swaps();
         if (swap != lastSwap) { lastSwap = swap; number = 0; }
         uint32_t vb = 0, vbBytes = 0;
         if (!vs->vertexFetches.empty())
@@ -670,14 +698,55 @@ namespace
             vbBytes = ((word1 >> 2) & 0xFFFFFF) * 4;
         }
         const std::atomic<uint32_t>* registers = Gpu::RegisterFile();
-        uint64_t constants = 1469598103934665603ull;
-        for (uint32_t i = 0; i < 1024; i++) constants = (constants ^ registers[0x4000 + i].load(std::memory_order_relaxed)) * 1099511628211ull;
+        uint64_t vsConstants = 1469598103934665603ull, psConstants = 1469598103934665603ull, textures = 1469598103934665603ull;
+        for (uint32_t i = 0; i < 1024; i++) vsConstants = (vsConstants ^ registers[0x4000 + i].load(std::memory_order_relaxed)) * 1099511628211ull;
+        for (uint32_t i = 0; i < 1024; i++) psConstants = (psConstants ^ registers[0x4400 + i].load(std::memory_order_relaxed)) * 1099511628211ull;
+        for (const XenosHlsl::TextureFetch& fetch : ps->textureFetches)
+        {
+            uint32_t w[6];
+            RenderState::ReadTextureFetch(fetch.slot, w);
+            const uint32_t base = w[1] & 0xFFFFF000u;
+            textures = (textures ^ (base | (RenderResources::ResolvedAt(base) ? 1u : 0u))) * 1099511628211ull;
+        }
+        // Every vertex stream the program reads, each hashed whole when it
+        // is small: a second stream (a model's lighting, say) is as likely
+        // to be what changes as the first.
+        uint64_t streams = 1469598103934665603ull;
+        for (const XenosHlsl::VertexFetch& fetch : vs->vertexFetches)
+        {
+            uint32_t word0, word1;
+            RenderState::ReadVertexFetch(fetch.slot, word0, word1);
+            const uint32_t at = word0 & ~3u, bytes = ((word1 >> 2) & 0xFFFFFF) * 4;
+            uint64_t h = (at ^ 0x9E3779B97F4A7C15ull) * 1099511628211ull;
+            if (at != 0 && bytes != 0 && bytes <= (256u << 10))
+            {
+                const uint8_t* data = Guest::Base + Guest::PhysicalAlias(at);
+                for (uint32_t i = 0; i + 8 <= bytes; i += 8) { uint64_t w; memcpy(&w, data + i, 8); h = (h ^ w) * 1099511628211ull; }
+            }
+            else h ^= SampleHash(at, bytes);
+            streams = (streams ^ h) * 1099511628211ull;
+        }
         const uint32_t indexBytes = out.indexed ? state.indexCount * 4 : 0;
-        fprintf(file, "%llu %u %llx %016llx %016llx p%u n%u %c vb %08X %u %016llx ib %016llx c %016llx d %08X b %08X m %X t %u\n",
+        char line[512];
+        const int n = snprintf(line, sizeof(line), "%llu %u %llx %016llx %016llx p%u n%u %c vb %08X %u %016llx ib %016llx c %016llx d %08X b %08X m %X t %u pc %016llx tx %016llx vs %016llx %u\n",
             (unsigned long long)swap, number++, (unsigned long long)Gpu::BinSelect(), (unsigned long long)vs->hash, (unsigned long long)ps->hash,
             state.primitive, state.indexCount, out.indexed ? 'i' : 'p', vb, vbBytes, (unsigned long long)SampleHash(vb, vbBytes),
-            (unsigned long long)(out.indexed ? SampleHash(state.indexBase, indexBytes) : 0), (unsigned long long)constants,
-            state.depthControl, state.blendControl[0], state.colorMask, out.targetCount);
+            (unsigned long long)(out.indexed ? SampleHash(state.indexBase, indexBytes) : 0), (unsigned long long)vsConstants,
+            state.depthControl, state.blendControl[0], state.colorMask, out.targetCount, (unsigned long long)psConstants, (unsigned long long)textures,
+            (unsigned long long)streams, unsigned(vs->vertexFetches.size()));
+        if (n > 0) lines.append(line, size_t(n));
+        // COD3_DRAWLOG_PSDUMP=hash: the first draw of a frame with that pixel
+        // program adds its 256 pixel constants, every word, to the log.
+        static const uint64_t psDump = []() { const char* t = getenv("COD3_DRAWLOG_PSDUMP"); return t ? uint64_t(strtoull(t, nullptr, 16)) : 0ull; }();
+        static uint64_t dumpedSwap = ~0ull;
+        if (psDump != 0 && ps->hash == psDump && dumpedSwap != swap)
+        {
+            dumpedSwap = swap;
+            char word[16];
+            lines += "PSDUMP " + std::to_string(swap);
+            for (uint32_t i = 0; i < 1024; i++) { snprintf(word, sizeof(word), " %08X", registers[0x4400 + i].load(std::memory_order_relaxed)); lines += word; }
+            lines += "\n";
+        }
     }
 }
 
@@ -718,6 +787,7 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
     const RenderShaders::Program* vs;
     const RenderShaders::Program* ps;
     if (!Programs(out, vs, ps)) return false;
+    if (DepthOnlyMode(state)) { out.ps = nullptr; out.pixelShader = NoPixelProgram; }
     if (state.pitch == 0) { Skip(SkipPitch); return false; }
 
     RenderStats::Enter(RenderStats::SectionTargets);

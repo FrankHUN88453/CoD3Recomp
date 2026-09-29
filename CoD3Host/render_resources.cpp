@@ -200,6 +200,21 @@ namespace
     // hashing them whole would be tens of megabytes a frame.
     // COD3_DENSEALL=1 hashes everything whole, whatever it costs.
     constexpr size_t AlwaysDenseBytes = 256u << 10;
+    // COD3_MISSAUDIT=1: a resource looked at by sampling is also hashed
+    // whole, and a change the samples did not see is named: which memory,
+    // how much, a texture or a buffer.
+    void MissAudit(const char* kind, uint32_t physical, const uint8_t* data, size_t bytes, bool dense, uint64_t& auditDense)
+    {
+        static const bool audit = getenv("COD3_MISSAUDIT") != nullptr;
+        if (!audit || dense) return;
+        const uint64_t whole = Fingerprint(data, bytes, true);
+        if (whole == auditDense) return;
+        static std::atomic<int> said{ 0 };
+        if (auditDense != 0 && said.fetch_add(1) < 200)
+            printf("render: missed a change: %s at %08X, %zu bytes\n", kind, physical, bytes);
+        auditDense = whole;
+    }
+
     bool WantDense(uint32_t stable, size_t bytes)
     {
         // COD3_DENSEALL=1: everything whole, whatever it costs, for
@@ -216,6 +231,7 @@ namespace
         bool cube = false;
         uint32_t key[4] = {};
         uint64_t fingerprint = 0;
+        uint64_t auditDense = 0;        // COD3_MISSAUDIT: every byte's fingerprint when the sampling began
         uint64_t checkedFrame = 0;      // the frame the fingerprint was last compared in
         uint64_t usedFrame = 0;
         uint32_t stable = StableLooks;  // checks in a row that found no change; a texture starts as still
@@ -250,6 +266,7 @@ namespace
         ComPtr<ID3D11ShaderResourceView> resource;
         uint32_t key[2] = {};
         uint64_t fingerprint = 0;
+        uint64_t auditDense = 0;        // COD3_MISSAUDIT: every byte's fingerprint when the sampling began
         uint64_t checkedFrame = 0;
         uint64_t usedFrame = 0;
         uint32_t stable = 0;            // checks in a row that found no change; a buffer starts as changing
@@ -1012,9 +1029,10 @@ RenderState::Handle RenderResources::TextureFor(const uint32_t fetch[6], uint32_
         const uint64_t fingerprint = Fingerprint(data, span, entry.dense);
         if (fingerprint == entry.fingerprint)
         {
+            MissAudit("texture", fetch[1] & 0xFFFFF000u, data, span, entry.dense, entry.auditDense);
             if (entry.stable < StableLooks) entry.stable++;
             const bool wantDense = WantDense(entry.stable, span);
-            if (wantDense != entry.dense) { entry.dense = wantDense; entry.fingerprint = Fingerprint(data, span, wantDense); }
+            if (wantDense != entry.dense) { if (!wantDense) entry.auditDense = entry.fingerprint; entry.dense = wantDense; entry.fingerprint = Fingerprint(data, span, wantDense); }
             return handle;
         }
         entry.stable = 0;
@@ -1114,9 +1132,10 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
         const uint64_t fingerprint = Fingerprint(data, wanted, entry.dense);
         if (fingerprint == entry.fingerprint && entry.bytes >= wanted)
         {
+            MissAudit("vertex buffer", physical, data, wanted, entry.dense, entry.auditDense);
             if (entry.stable < StableLooks) entry.stable++;
             const bool wantDense = WantDense(entry.stable, wanted);
-            if (wantDense != entry.dense) { entry.dense = wantDense; entry.fingerprint = Fingerprint(data, wanted, wantDense); }
+            if (wantDense != entry.dense) { if (!wantDense) entry.auditDense = entry.fingerprint; entry.dense = wantDense; entry.fingerprint = Fingerprint(data, wanted, wantDense); }
             if (!entry.midFrame && wanted <= AlwaysDenseBytes) entry.sampled = Fingerprint(data, wanted, false);
             return handle;
         }
