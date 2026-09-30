@@ -163,6 +163,8 @@ PPC_FUNC(sub_822F1B78)
 
 // sub_822F22C0(device, end, ib, dwords, count, list): an indirect buffer
 // goes to the ring, or to the list when submissions are pending.
+// A decompiled one (COD3_HAVE_DECOMP) takes its place: no "submit" lines then.
+#ifndef COD3_HAVE_DECOMP
 extern "C" PPC_FUNC(__imp__sub_822F22C0);
 PPC_FUNC(sub_822F22C0)
 {
@@ -183,6 +185,7 @@ PPC_FUNC(sub_822F22C0)
     }
     __imp__sub_822F22C0(ctx, base);
 }
+#endif
 
 // sub_82302DB0(device) and sub_82302E88(device, ...): a recording begins and ends.
 extern "C" PPC_FUNC(__imp__sub_82302DB0);
