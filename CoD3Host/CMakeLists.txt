@@ -93,6 +93,20 @@ target_link_libraries(CoD3 PRIVATE
     windowscodecs   # screenshots as PNG
     shell32)
 
+# Decompiled functions, from a CoD3Decomp checkout beside this repository (or
+# wherever COD3_DECOMP_DIR says): each takes the place of the recompiled
+# function of its name, the recompiled one staying callable as __imp__sub_X.
+# That code is derived from the game's and is kept in a private repository;
+# nothing of it is here. Without the checkout the build is as before.
+set(COD3_DECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../CoD3Decomp" CACHE PATH "A CoD3Decomp checkout, if there is one")
+if (EXISTS "${COD3_DECOMP_DIR}/src/decomp.h")
+    file(GLOB_RECURSE COD3_DECOMP_SOURCES CONFIGURE_DEPENDS "${COD3_DECOMP_DIR}/src/*.cpp")
+    list(LENGTH COD3_DECOMP_SOURCES decompCount)
+    message(STATUS "CoD3: ${decompCount} decompiled source files from ${COD3_DECOMP_DIR}")
+    target_sources(CoD3 PRIVATE ${COD3_DECOMP_SOURCES})
+    target_compile_definitions(CoD3 PRIVATE COD3_HAVE_DECOMP=1)
+endif()
+
 # FFmpeg's headers, for XMA decoding through its avcodec, loaded at run time
 # (xma.cpp). Without them the build decodes nothing and says so.
 find_path(COD3_FFMPEG_INCLUDE libavcodec/avcodec.h
