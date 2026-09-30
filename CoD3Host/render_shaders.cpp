@@ -435,6 +435,8 @@ const RenderShaders::Program* RenderShaders::Get(Handle handle)
     return handle != 0 && handle <= g_programs.size() ? &g_programs[handle - 1] : nullptr;
 }
 
+uint64_t RenderShaders::HashMicrocode(const uint8_t* words, uint32_t sizeDwords) { return HashBytes(words, size_t(sizeDwords) * 4); }
+
 uint64_t RenderShaders::HashOf(Handle handle)
 {
     const Program* program = Get(handle);

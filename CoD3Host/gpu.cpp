@@ -29,6 +29,7 @@
 #include "sampler.h"
 #include "render.h"
 #include "render_internal.h"
+#include "d3d_hooks.h"
 #include "timeline.h"
 #include "window.h"
 
@@ -1683,6 +1684,19 @@ namespace
                 else if (opcode == OpDrawIndx && cursor + 2 < dwords)
                 {
                     local.draws++;
+                    // COD3_CALLPS=1: the pixel program the title's draw
+                    // call named, from d3d_hooks.cpp, for colour draws (the
+                    // native path's first step; off, since the stream's
+                    // program was found to agree with it).
+                    const uint32_t lastWord = base + (cursor + count) * 4;
+                    if ((g_registerFile[0x2208].load(std::memory_order_relaxed) & 7) == 4)
+                    {
+                        uint32_t programPhysical = 0, programDwords = 0;
+                        if (D3dHooks::PixelProgram(lastWord, programPhysical, programDwords))
+                            Render::ShaderLoaded(true, programPhysical, programDwords);
+                    }
+                    if (D3dHooks::Observing())
+                        D3dHooks::CheckDraw(lastWord, Render::CurrentProgramHash(false), Render::CurrentProgramHash(true), g_registerFile[0x2208].load(std::memory_order_relaxed));
                     if (TraceConstants()) printf("const: draw indexed vs_%016llx\n", (unsigned long long)Render::CurrentProgramHash(false));
                     DecodeDraw(
                         Guest::Read32(Guest::Base, base + (cursor + 2) * 4),

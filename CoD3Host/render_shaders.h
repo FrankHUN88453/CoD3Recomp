@@ -63,6 +63,8 @@ namespace RenderShaders
 
     const Program* Get(Handle handle);
     uint64_t HashOf(Handle handle);
+    // The hash a program of that microcode is known by.
+    uint64_t HashMicrocode(const uint8_t* words, uint32_t sizeDwords);
 
     // Compiles, in the background, every captured program not in the disk
     // cache: the shaders folder's files, left by earlier runs.
