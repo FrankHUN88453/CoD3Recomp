@@ -1007,7 +1007,7 @@ uint64_t XenosHlsl::Version()
     // A number that changes when the translation would, or when one of the
     // environment knobs that shape the HLSL is set: the disk cache keyed by
     // it then starts afresh rather than serving the other translation.
-    std::string text = "xenos_hlsl 2026-09-26 bswap packed flat3d fetch offsets alu pairs read first pixel params gradients dx dy";
+    std::string text = "xenos_hlsl 2026-09-30 bswap packed flat3d fetch offsets alu pairs read first pixel params gradients dx dy depth offset";
     if (const char* lanes = getenv("COD3_SCALARLANES")) { text += " lanes="; text += lanes; }
     if (const char* show = getenv("COD3_D3DSHOW")) { text += " show="; text += show; }
     if (const char* sign = getenv("COD3_D3DSHOWSIGN")) { text += " sign="; text += sign; }
@@ -1207,6 +1207,9 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
                 "      float cx = p.x * (2.0 * xs / W) + ww * (2.0 * xo / W - 1.0);\n"
                 "      float cy = -(p.y * (2.0 * ys / H) + ww * (2.0 * yo / H - 1.0));\n"
                 "      float cz = (vte & 0x200u) ? (p.z * zs + zo) * ww : (p.z * zs + zo * ww);\n"
+                // The polygon offset's constant part, in depth units, as the
+                // console adds it (viewportOffset.w; see render_commands.cpp).
+                "      cz += viewportOffset.w * ww;\n"
                 "      output.position = float4(cx, cy, cz, ww); }\n";
         for (uint32_t i = 0; i < 16; i++) hlsl += Format("    output.o%u = o%u;\n", i, i);
         hlsl += "    return output;\n}\n";

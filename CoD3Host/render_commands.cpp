@@ -871,7 +871,28 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
     if (!Targets(state, vs, ps, out, scaleY)) return false;
 
     RenderStats::Enter(RenderStats::SectionPipeline);
-    out.rasterizer = RenderPipeline::Rasterizer(state.suScModeControl, true, out.rectangles, state.polyOffset);
+    // The polygon offset. Its constant part (PA_SU_POLY_OFFSET_*_OFFSET) is
+    // in depth units: the title writes 0.0001 for the layers it lays over a
+    // surface (the mud, the ivy, the decals, drawn with a greater or equal
+    // test and no depth write) and nought for the surfaces themselves, and
+    // the console adds it to the depth as it is. The host's bias counts in
+    // steps of the depth's own precision, which on a float depth buffer
+    // shrinks with the depth: with this title's depth running from one near
+    // to nought far, a layer fifty units away was lifted an eighth of what
+    // it should, lost to its surface in patches, and drew as ragged holes.
+    // So the constant part goes into the vertex program's depth (the w of
+    // the viewport offset constant) and the rasterizer keeps the slope's.
+    // COD3_OLDPOLYOFFSET=1 gives the host the constant part again.
+    static const bool oldOffset = getenv("COD3_OLDPOLYOFFSET") != nullptr;
+    static const bool noOffset = getenv("COD3_NOPOLYOFFSET") != nullptr;
+    float depthOffset = 0.0f;
+    float slopeOnly[4] = { state.polyOffset[0], 0.0f, state.polyOffset[2], 0.0f };
+    if (!oldOffset && !noOffset)
+    {
+        if ((state.suScModeControl >> 11) & 1) depthOffset = state.polyOffset[1];
+        else if ((state.suScModeControl >> 12) & 1) depthOffset = state.polyOffset[3];
+    }
+    out.rasterizer = RenderPipeline::Rasterizer(state.suScModeControl, true, out.rectangles, oldOffset ? state.polyOffset : slopeOnly);
     out.blend = RenderPipeline::Blend(state.blendControl, state.colorMask);
     out.depth = RenderPipeline::Depth(out.depthView ? state.depthControl : 0, state.stencilRefMask);
     memcpy(out.blendFactor, state.blendFactor, sizeof(out.blendFactor));
@@ -893,6 +914,7 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
     constants.viewportScale[0] = state.viewport[0]; constants.viewportOffset[0] = state.viewport[1];
     constants.viewportScale[1] = state.viewport[2]; constants.viewportOffset[1] = state.viewport[3];
     constants.viewportScale[2] = state.viewport[4]; constants.viewportOffset[2] = state.viewport[5];
+    constants.viewportOffset[3] = depthOffset;
     constants.targetSize[0] = float(state.pitch);
     constants.targetSize[1] = float(out.targetHeight) / scaleY;
     constants.targetSize[2] = 1.0f / float(state.pitch);
