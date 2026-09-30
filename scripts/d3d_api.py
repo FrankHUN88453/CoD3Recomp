@@ -16,7 +16,7 @@ LO, HI = 0x822E0000, 0x82300000
 
 # Names found so far, by what the function does (docs/native-d3d11-plan.md).
 NAMES = {
-    0x822F3620: 'draw indexed (DRAW_INDX)',
+    0x822F3620: 'draw indexed (DRAW_INDX, ~45 a frame)',
     0x822F3EA0: 'draw indexed, a variant (DRAW_INDX)',
     0x822F4338: 'draw indexed, a variant (DRAW_INDX)',
     0x822F6858: 'draw immediate (DRAW_INDX_2)',
@@ -28,6 +28,16 @@ NAMES = {
     0x822F1918: 'interrupt: vertical blank and command processor',
     0x822F16A0: 'wait for the GPU before a pool is reused',
     0x822EB950: 'get a surface description',
+    0x822F3A28: 'THE draw: ~890 calls a frame, from the four worker threads',
+    0x822F30F0: 'draw (~48 a frame)',
+    0x822F6DF8: 'draw (with 822F6858, ~8 a frame)',
+    0x822F8590: 'indirect buffer, predicated (INDIRECT_BUFFER)',
+    0x822F1E68: 'write recorded buffers to the ring (the replay thread)',
+    0x822F2818: 'kick the current segment to the GPU',
+    0x82302A90: 'the replay thread: its run over the queue',
+    0x82302DB0: 'begin recording a command buffer',
+    0x82302E88: 'end recording a command buffer',
+    0x822EC168: 'one turn of the wait for the GPU',
 }
 
 OPS = {0x22: 'DRAW_INDX', 0x36: 'DRAW_INDX_2', 0x27: 'IM_LOAD', 0x2B: 'IM_LOAD_IMMEDIATE', 0x2D: 'SET_CONSTANT',

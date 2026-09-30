@@ -1,6 +1,6 @@
 # Terv: natív D3D11 a játék D3D-hívásainál, Xenos-emuláció nélkül
 
-*2026-09-30. Állapot: terv, még nincs belőle kód.*
+*2026-09-30. Állapot: F0 (feltérképezés) folyamatban, F1 (megfigyelő horgok) elkezdve.*
 
 ## Mi a cél
 
@@ -59,6 +59,44 @@ pillanatában, közvetlenül D3D11-et hívni. A PM4-parancsok meg sem születnek
 - Az eszköz a 0x82001144-en lévő mutatón át érhető el; ismert mezők:
   +10772 (a swap-jelzőt is tartalmazó leíró), +15120..15136
   (VBlank-visszahívás, számlálók, csere-visszaszámlálás).
+
+## F0 eredménye: hogyan rajzol a játék (2026-09-30)
+
+A megfigyelő horgok (`CoD3Host/d3d_hooks.cpp`, `COD3_D3DHOOKS=1`) és a
+`pool_trace.cpp` mérései szerint, Saint-Lô elején:
+
+- **Négy munkaszál rögzít**, párhuzamosan, nagyjából egyenlő arányban. Mind
+  a négy ugyanabból a belépési pontból fut (`sub_8212A520` →
+  `sub_8212A780`), a renderelő-hátteret (`sub_8214F770` → … →
+  `sub_82140A90`) hajtják.
+- **Egy ötödik szál cserél** (`sub_822F4A10`, képkockánként egyszer), egy
+  hatodik, a D3D saját **visszajátszó szála** (`sub_82302A90`) írja a
+  rögzített puffereket a gyűrűbe (`sub_822F1E68`).
+- Képkockánként: 4 rögzítés (`sub_82302DB0` kezdi, `sub_82302E88`
+  zárja), 14 beküldés (`sub_822F2818`), 28 puffer a gyűrűbe.
+- **A rajzolások szinte mind D3D-függvényen mennek át:** a fő rajzoló a
+  `sub_822F3A28` (~890 hívás képkockánként), mellette `sub_822F30F0`
+  (~48), `sub_822F3620` (~45), `sub_822F6858`/`sub_822F6DF8` (~8), a
+  `sub_822EFFF0` (~20, téglalap + esemény). Ez együtt kb. 1000, ami
+  egyezik a renderelő által látott 1067 rajzolással (a különbség a
+  mélység- és színmenet visszajátszása). A játék saját, D3D-t megkerülő
+  rajzolója (`sub_82154930`) öt másodpercenként egyszer fut.
+- Rajzolásonként átlagosan két shaderbetöltés (`sub_822FB4B0`) történik.
+
+**Következmény a felépítésre:** a rajzolás a D3D-hívásoknál átvehető, de
+nem lehet a hívás pillanatában D3D11-gyel rajzolni, mert négy szál rögzít
+egyszerre, és a sorrendet a visszajátszó szál adja meg. Ezért:
+
+- minden munkaszál a saját **natív parancslistájába** rögzít (a mai
+  `DrawCommand` mintájára, de regiszterek nélkül: shaderek,
+  állapotobjektumok, nézetek, és a rajzoláshoz tartozó adatok másolata);
+- a rögzítés kezdete/vége (`sub_82302DB0`/`sub_82302E88`) a lista
+  kezdete/vége; a lista a vendég parancspufferének címéhez kötődik;
+- amikor a visszajátszó szál egy puffert a gyűrűbe írna, a hozzá tartozó
+  natív listát a végrehajtó (egyetlen D3D11-szál) lefuttatja, a
+  mélység/szín menetet a rögzített menetjelölés szerint szűrve;
+- a mai végrehajtó (`render_d3d11.cpp`) megmarad, csak regiszterek helyett
+  natív listát kap.
 
 ## Felépítés
 

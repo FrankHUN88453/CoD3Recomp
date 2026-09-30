@@ -107,7 +107,7 @@ argument the function touches; for a device function, the device's fields.
 | `sub_822EBFB8` | 12 | 1 | 1 |  |  | 0 4 8 12 16 20 |  |
 | `sub_822EBFE8` | 48 | 1 | 1 |  | 0 4 16 20 |  |  |
 | `sub_822EC0A8` | 5 | 2 | 2 |  |  |  |  |
-| `sub_822EC168` | 53 | 1 | 1 |  |  |  |  |
+| `sub_822EC168` | 53 | 1 | 1 |  |  |  | one turn of the wait for the GPU |
 | `sub_822EC240` | 21 | 7 | 7 |  |  |  |  |
 | `sub_822EC298` | 27 | 2 | 2 |  |  |  |  |
 | `sub_822EC308` | 16 | 5 | 5 |  |  |  |  |
@@ -143,7 +143,7 @@ argument the function touches; for a device function, the device's fields.
 | `sub_822F1A30` | 15 | 3 | 1 |  | 4 8 | 12 |  |
 | `sub_822F1B38` | 15 | 1 | 1 |  | 13040 13044 13048 13052 13056 13060 | 40 44 48 13496 13500 13504 13508 |  |
 | `sub_822F1D80` | 58 | 2 | 1 |  | 152 |  |  |
-| `sub_822F1E68` | 119 | 1 | 1 | INDIRECT_BUFFER | 0 |  |  |
+| `sub_822F1E68` | 119 | 1 | 1 | INDIRECT_BUFFER | 0 |  | write recorded buffers to the ring (the replay thread) |
 | `sub_822F2048` | 102 | 1 | 1 | WAIT_REG_MEM |  |  |  |
 | `sub_822F22C0` | 47 | 2 | 1 |  |  |  |  |
 | `sub_822F2448` | 72 | 1 | 1 | WAIT_REG_MEM (pred) | 10772 |  |  |
@@ -156,11 +156,11 @@ argument the function touches; for a device function, the device's fields.
 | `sub_822F2C20` | 29 | 1 | 1 |  |  |  |  |
 | `sub_822F2C98` | 21 | 3 | 2 |  |  |  |  |
 | `sub_822F2CF0` | 255 | 1 | 1 |  |  |  |  |
-| `sub_822F30F0` | 299 | 1 | 1 | DRAW_INDX (pred), EVENT_WRITE (pred), SET_BIN_MASK_LO | 8 12 |  |  |
+| `sub_822F30F0` | 299 | 1 | 1 | DRAW_INDX (pred), EVENT_WRITE (pred), SET_BIN_MASK_LO | 8 12 |  | draw (~48 a frame) |
 | `sub_822F35A0` | 6 | 1 | 1 |  | 10808 13076 | 40 |  |
 | `sub_822F35C0` | 23 | 10 | 8 |  |  |  |  |
-| `sub_822F3620` | 257 | 5 | 5 | DRAW_INDX (pred), EVENT_WRITE (pred), SET_BIN_MASK_LO | 8 12 | 4 | draw indexed (DRAW_INDX) |
-| `sub_822F3A28` | 285 | 5 | 5 | DRAW_INDX (pred), EVENT_WRITE (pred), SET_BIN_MASK_LO | 8 12 | 4 |  |
+| `sub_822F3620` | 257 | 5 | 5 | DRAW_INDX (pred), EVENT_WRITE (pred), SET_BIN_MASK_LO | 8 12 | 4 | draw indexed (DRAW_INDX, ~45 a frame) |
+| `sub_822F3A28` | 285 | 5 | 5 | DRAW_INDX (pred), EVENT_WRITE (pred), SET_BIN_MASK_LO | 8 12 | 4 | THE draw: ~890 calls a frame, from the four worker threads |
 | `sub_822F3EA0` | 293 | 1 | 1 | DRAW_INDX (pred), EVENT_WRITE (pred), SET_BIN_MASK_LO | 8 12 | 4 | draw indexed, a variant (DRAW_INDX) |
 | `sub_822F4338` | 381 | 1 | 1 | DRAW_INDX (pred), EVENT_WRITE (pred), SET_BIN_MASK_LO | 8 12 | 4 | draw indexed, a variant (DRAW_INDX) |
 | `sub_822F4AA0` | 98 | 2 | 2 | WAIT_REG_MEM |  |  |  |
@@ -171,7 +171,7 @@ argument the function touches; for a device function, the device's fields.
 | `sub_822F7EA0` | 41 | 1 | 1 |  |  |  |  |
 | `sub_822F7F48` | 291 | 1 | 1 |  |  |  |  |
 | `sub_822F83D8` | 109 | 7 | 4 | SET_BIN_MASK_HI, SET_BIN_MASK_LO |  | 4 |  |
-| `sub_822F8590` | 382 | 1 | 1 | EVENT_WRITE (pred), INDIRECT_BUFFER, INDIRECT_BUFFER (pred), SET_BIN_MASK_HI, SET_BIN_MASK_LO, SET_BIN_SELECT_HI | 8 12 | 4 |  |
+| `sub_822F8590` | 382 | 1 | 1 | EVENT_WRITE (pred), INDIRECT_BUFFER, INDIRECT_BUFFER (pred), SET_BIN_MASK_HI, SET_BIN_MASK_LO, SET_BIN_SELECT_HI | 8 12 | 4 | indirect buffer, predicated (INDIRECT_BUFFER) |
 | `sub_822F8B88` | 107 | 1 | 1 |  |  | 0 4 |  |
 | `sub_822F8D38` | 39 | 2 | 1 |  |  |  |  |
 | `sub_822F8DD8` | 31 | 6 | 1 |  |  | 4 |  |
