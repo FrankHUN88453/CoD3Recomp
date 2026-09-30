@@ -37,12 +37,15 @@ namespace
     std::map<uint32_t, uint64_t> g_counts[CallCount];   // by host thread id
     std::chrono::steady_clock::time_point g_lastReport = std::chrono::steady_clock::now();
 
-    void Count(Call call)
+    std::map<uint32_t, std::map<uint32_t, uint64_t>> g_devices;   // by thread: the devices its draws name
+
+    void Count(Call call, uint32_t device = 0)
     {
         if (!Observing()) return;
         const uint32_t thread = GetCurrentThreadId();
         std::lock_guard<std::mutex> lock(g_mutex);
         g_counts[call][thread]++;
+        if (device != 0) g_devices[thread][device]++;
         const auto now = std::chrono::steady_clock::now();
         if (now - g_lastReport < std::chrono::seconds(5)) return;
         g_lastReport = now;
@@ -55,6 +58,13 @@ namespace
             printf("\n");
             g_counts[i].clear();
         }
+        for (const auto& [thread, devices] : g_devices)
+        {
+            printf("  thread %u draws on device", thread);
+            for (const auto& [device, n] : devices) printf(" %08X x%llu", device, (unsigned long long)n);
+            printf("\n");
+        }
+        g_devices.clear();
         fflush(stdout);
     }
 }
@@ -77,6 +87,11 @@ COD3_OBSERVE(822F4A10, SwapCountdown)
 COD3_OBSERVE(822F8590, IndirectB)
 COD3_OBSERVE(82154930, GameDraw)
 COD3_OBSERVE(822F30F0, DrawD)
-COD3_OBSERVE(822F3A28, DrawE)
+extern "C" PPC_FUNC(__imp__sub_822F3A28);
+PPC_FUNC(sub_822F3A28)
+{
+    Count(DrawE, ctx.r3.u32);
+    __imp__sub_822F3A28(ctx, base);
+}
 COD3_OBSERVE(822F6DF8, DrawF)
 COD3_OBSERVE(82301888, DrawG)
