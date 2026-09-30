@@ -30,6 +30,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
+#include <filesystem>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -114,6 +116,7 @@ namespace
     ComPtr<ID3D11Buffer> g_drawConstants;
 
     int AntiAliasing(const Settings::Values& settings);
+    void PicturesAtDraw(const RenderState::DrawCommand& command);
 
     // --- the built in programs -------------------------------------------------------------------
 
@@ -856,6 +859,120 @@ namespace
             dumpThis = strncmp(name, dumpPixel, strlen(dumpPixel)) == 0;
         }
         if (dumpThis) DumpTargetAfterDraw(command.colorTexture, command.depthTexture);
+        PicturesAtDraw(command);
+    }
+
+    // The screenshot key's per draw pictures: after every draw of the first
+    // frame it logs, the colour target made small on the GPU (its mip chain,
+    // so thin things leave a trace) and read back, kept when it differs from
+    // the one before, all in one file beside the screenshot
+    // (screenshots/CoD3-<moment>-draws.bin): per picture the word 'DRAW',
+    // the draw's number in the frame (the order of the frame log's draw
+    // lines), the width and the height, then its RGBA bytes. Which draw
+    // brought a fault in is then a look through the pictures.
+    struct DrawPictures
+    {
+        FILE* file = nullptr;
+        uint32_t number = 0, kept = 0;
+        std::vector<uint8_t> last;
+        ComPtr<ID3D11Texture2D> copy, thumb, staging;
+        ComPtr<ID3D11ShaderResourceView> copyView;
+        ComPtr<ID3D11RenderTargetView> thumbView;
+        uint32_t copyWidth = 0, copyHeight = 0, thumbHeight = 0;
+        DXGI_FORMAT copyFormat = DXGI_FORMAT_UNKNOWN;
+    };
+    DrawPictures g_pictures;
+    std::atomic<int64_t> g_picturesSwap{ -1 };   // the swap whose draws are pictured
+    std::mutex g_picturesMutex;
+    std::wstring g_picturesPath;
+
+    void PictureAfterDraw(ID3D11Texture2D* texture)
+    {
+        DrawPictures& p = g_pictures;
+        const uint32_t number = p.number++;
+        if (texture == nullptr || p.file == nullptr) return;
+        D3D11_TEXTURE2D_DESC desc{};
+        texture->GetDesc(&desc);
+        if (desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM && desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM) return;
+        constexpr uint32_t Width = 160;
+        if (!p.copy || p.copyWidth != desc.Width || p.copyHeight != desc.Height || p.copyFormat != desc.Format)
+        {
+            p.copy.Reset(); p.copyView.Reset(); p.thumb.Reset(); p.thumbView.Reset(); p.staging.Reset();
+            D3D11_TEXTURE2D_DESC c{};
+            c.Width = desc.Width; c.Height = desc.Height; c.MipLevels = 0; c.ArraySize = 1; c.Format = desc.Format;
+            c.SampleDesc.Count = 1; c.Usage = D3D11_USAGE_DEFAULT;
+            c.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET; c.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
+            if (FAILED(g_device->CreateTexture2D(&c, nullptr, &p.copy))) return;
+            g_device->CreateShaderResourceView(p.copy.Get(), nullptr, &p.copyView);
+            p.thumbHeight = std::max(1u, uint32_t(uint64_t(Width) * desc.Height / desc.Width));
+            D3D11_TEXTURE2D_DESC s = c;
+            s.Width = Width; s.Height = p.thumbHeight; s.MipLevels = 1; s.MiscFlags = 0; s.BindFlags = D3D11_BIND_RENDER_TARGET;
+            if (FAILED(g_device->CreateTexture2D(&s, nullptr, &p.thumb))) return;
+            g_device->CreateRenderTargetView(p.thumb.Get(), nullptr, &p.thumbView);
+            s.Usage = D3D11_USAGE_STAGING; s.BindFlags = 0; s.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            if (FAILED(g_device->CreateTexture2D(&s, nullptr, &p.staging))) return;
+            p.copyWidth = desc.Width; p.copyHeight = desc.Height; p.copyFormat = desc.Format;
+            p.last.clear();
+        }
+        if (desc.SampleDesc.Count > 1) g_context->ResolveSubresource(p.copy.Get(), 0, texture, 0, desc.Format);
+        else g_context->CopySubresourceRegion(p.copy.Get(), 0, 0, 0, 0, texture, 0, nullptr);
+        g_context->GenerateMips(p.copyView.Get());
+        const D3D11_VIEWPORT viewport{ 0.0f, 0.0f, float(Width), float(p.thumbHeight), 0.0f, 1.0f };
+        DrawQuad(p.copyView.Get(), desc.Width, desc.Height, 0, 0, float(desc.Width), float(desc.Height),
+                 p.thumbView.Get(), viewport, g_copyPixelShader.Get(), g_linearSampler.Get());
+        ID3D11RenderTargetView* noTargets[1] = { nullptr };
+        g_context->OMSetRenderTargets(1, noTargets, nullptr);
+        ForgetBindings();
+        g_context->CopyResource(p.staging.Get(), p.thumb.Get());
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        if (FAILED(g_context->Map(p.staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return;
+        std::vector<uint8_t> pixels(size_t(Width) * p.thumbHeight * 4);
+        const bool bgra = desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM;
+        for (uint32_t y = 0; y < p.thumbHeight; y++)
+        {
+            const uint8_t* row = static_cast<const uint8_t*>(mapped.pData) + size_t(y) * mapped.RowPitch;
+            uint8_t* to = pixels.data() + size_t(y) * Width * 4;
+            for (uint32_t x = 0; x < Width; x++)
+            {
+                to[x * 4 + 0] = row[x * 4 + (bgra ? 2 : 0)];
+                to[x * 4 + 1] = row[x * 4 + 1];
+                to[x * 4 + 2] = row[x * 4 + (bgra ? 0 : 2)];
+                to[x * 4 + 3] = row[x * 4 + 3];
+            }
+        }
+        g_context->Unmap(p.staging.Get(), 0);
+        if (pixels == p.last) return;
+        const uint32_t header[4] = { 0x57415244u, number, Width, p.thumbHeight };   // 'DRAW'
+        fwrite(header, sizeof(header), 1, p.file);
+        fwrite(pixels.data(), 1, pixels.size(), p.file);
+        p.last.swap(pixels);
+        p.kept++;
+    }
+
+    // At each draw: the pictures of the swap asked for, opening and closing
+    // their file at its start and end.
+    void PicturesAtDraw(const RenderState::DrawCommand& command)
+    {
+        const int64_t wanted = g_picturesSwap.load(std::memory_order_relaxed);
+        DrawPictures& p = g_pictures;
+        const int64_t swap = int64_t(g_swaps.load(std::memory_order_relaxed));
+        if (p.file != nullptr && swap != wanted)
+        {
+            fclose(p.file);
+            p.file = nullptr;
+            printf("render: the screenshot key: %u of %u draws pictured\n", p.kept, p.number);
+            fflush(stdout);
+            g_picturesSwap.store(-1, std::memory_order_relaxed);
+        }
+        if (wanted < 0 || swap != wanted) return;
+        if (p.file == nullptr)
+        {
+            std::wstring path;
+            { std::lock_guard<std::mutex> lock(g_picturesMutex); path = g_picturesPath; }
+            if (path.empty() || _wfopen_s(&p.file, path.c_str(), L"wb") != 0) { p.file = nullptr; g_picturesSwap.store(-1); return; }
+            p.number = 0; p.kept = 0; p.last.clear();
+        }
+        PictureAfterDraw(command.colorTexture);
     }
 
     // --- the resolve ----------------------------------------------------------------------------------
@@ -1181,6 +1298,23 @@ void Render::LogNextFrame()
     const int64_t swap = int64_t(g_swaps.load(std::memory_order_relaxed));
     if (!::FrameLogged()) g_frameWanted.store(swap + 1, std::memory_order_relaxed);
     g_frameUntil.store(swap + 3, std::memory_order_relaxed);
+    // And the next frame's draws pictured one by one, unless a press before
+    // this one is still at it.
+    if (g_picturesSwap.load(std::memory_order_relaxed) < 0)
+    {
+        wchar_t exe[MAX_PATH];
+        GetModuleFileNameW(nullptr, exe, MAX_PATH);
+        const std::filesystem::path folder = std::filesystem::path(exe).parent_path() / "screenshots";
+        std::error_code ec;
+        std::filesystem::create_directories(folder, ec);
+        const std::time_t now = std::time(nullptr);
+        std::tm local{};
+        localtime_s(&local, &now);
+        wchar_t name[64];
+        wcsftime(name, 64, L"CoD3-%Y%m%d-%H%M%S-draws.bin", &local);
+        { std::lock_guard<std::mutex> lock(g_picturesMutex); g_picturesPath = (folder / name).wstring(); }
+        g_picturesSwap.store(swap + 1, std::memory_order_relaxed);
+    }
     printf("render: the screenshot key: frames %lld to %lld go to the log in full\n",
         (long long)g_frameWanted.load(std::memory_order_relaxed), (long long)swap + 2);
     fflush(stdout);

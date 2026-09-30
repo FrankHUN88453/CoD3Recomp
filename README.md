@@ -59,7 +59,7 @@ turns that off for anyone who wants the pointer's travel back.
 | Escape | pause |
 | Enter, arrows | the menus |
 | F11 | settings menu |
-| F12 | screenshot into `screenshots/`, and the next two frames' draws into `CoD3.log` (press it when something looks wrong) |
+| F12 | screenshot into `screenshots/`, the next two frames' draws into `CoD3.log`, and a small picture after each draw of the next frame (`screenshots/*-draws.bin`): press it when something looks wrong |
 | ` (the key left of 1) | the console |
 
 The settings menu (F11, and it opens by itself when OPTIONS is chosen in
