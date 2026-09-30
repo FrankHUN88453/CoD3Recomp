@@ -1,5 +1,11 @@
 # CoD3Recomp
 
+> **Still in development: bugs can and will occur.** A build ready to play,
+> with your own Xbox 360 disc image, is on the
+> [releases page](https://github.com/FrankHUN88453/CoD3Recomp/releases).
+>
+> *Még fejlesztés alatt: hibák előfordulhatnak.*
+
 Static recompilation of Call of Duty 3 (Xbox 360) to native x86-64, using
 [XenonRecomp](https://github.com/hedge-dev/XenonRecomp).
 
