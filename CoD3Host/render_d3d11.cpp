@@ -20,6 +20,7 @@
 #include "overlay.h"
 #include "settings.h"
 #include "kernel.h"
+#include "gpu.h"
 
 #include <algorithm>
 #include <atomic>
@@ -126,6 +127,9 @@ namespace
     ComPtr<ID3D11PixelShader> g_flatPixelShader;
     ComPtr<ID3D11SamplerState> g_pointSampler, g_linearSampler;
     ComPtr<ID3D11Buffer> g_quadConstants;
+    ComPtr<ID3D11Texture1D> g_gammaTexture;           // the display's colour table (Gpu::DisplayGamma)
+    ComPtr<ID3D11ShaderResourceView> g_gammaView;
+    uint64_t g_gammaVersion = ~0ull;
 
     // The console's rectangle list, three corners with the fourth implied,
     // as two triangles. The three can come in any order: the diagonal is
@@ -154,12 +158,17 @@ namespace
     // and the source's texel size come in the constants.
     const char* const QuadSource =
         "Texture2D source : register(t0); SamplerState smp : register(s0);\n"
+        // The display's colour table (Gpu::DisplayGamma), 256 entries, which
+        // the console puts every channel of the picture through on its way out.
+        "Texture1D gammaTable : register(t1);\n"
+        "float3 gamma(float3 c) { float3 at = saturate(c) * (255.0 / 256.0) + (0.5 / 256.0);"
+        " return float3(gammaTable.SampleLevel(smp, at.r, 0).r, gammaTable.SampleLevel(smp, at.g, 0).g, gammaTable.SampleLevel(smp, at.b, 0).b); }\n"
         "cbuffer Quad : register(b0) { float4 uvRect; float4 texel; };\n"
         "struct V { float4 position : SV_Position; float2 uv : TEXCOORD0; };\n"
         "V vsmain(uint id : SV_VertexID) { V v; float2 t = float2((id << 1) & 2, id & 2);"
         " v.position = float4(t * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0); v.uv = uvRect.xy + t * uvRect.zw; return v; }\n"
         "float4 copy(V v) : SV_Target { return source.Sample(smp, v.uv); }\n"
-        "float4 present(V v) : SV_Target { return float4(source.Sample(smp, v.uv).rgb, 1.0); }\n"
+        "float4 present(V v) : SV_Target { return float4(gamma(source.Sample(smp, v.uv).rgb), 1.0); }\n"
         // FXAA 3.11, the quality path, on the presented picture: the edges
         // the title's own picture has, softened by the luma along them.
         "float luma(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }\n"
@@ -170,7 +179,7 @@ namespace
         "    float lW = luma(source.Sample(smp, uv + float2(-px.x, 0)).rgb), lE = luma(source.Sample(smp, uv + float2(px.x, 0)).rgb);\n"
         "    float lMin = min(lM, min(min(lN, lS), min(lW, lE))), lMax = max(lM, max(max(lN, lS), max(lW, lE)));\n"
         "    float range = lMax - lMin;\n"
-        "    if (range < max(0.0312, lMax * 0.125)) return float4(rgbM, 1.0);\n"
+        "    if (range < max(0.0312, lMax * 0.125)) return float4(gamma(rgbM), 1.0);\n"
         "    float lNW = luma(source.Sample(smp, uv + float2(-px.x, -px.y)).rgb), lNE = luma(source.Sample(smp, uv + float2(px.x, -px.y)).rgb);\n"
         "    float lSW = luma(source.Sample(smp, uv + float2(-px.x, px.y)).rgb), lSE = luma(source.Sample(smp, uv + float2(px.x, px.y)).rgb);\n"
         "    float lNS = lN + lS, lWE = lW + lE, lWc = lNW + lSW, lEc = lNE + lSE, lNc = lNW + lNE, lSc = lSW + lSE;\n"
@@ -204,7 +213,7 @@ namespace
         "    float subFinal = (-2.0 * sub + 3.0) * sub * sub; subFinal = subFinal * subFinal * 0.75;\n"
         "    finalOffset = max(finalOffset, subFinal);\n"
         "    float2 finalUv = uv; if (horizontal) finalUv.y += finalOffset * step; else finalUv.x += finalOffset * step;\n"
-        "    return float4(source.Sample(smp, finalUv).rgb, 1.0); }\n";
+        "    return float4(gamma(source.Sample(smp, finalUv).rgb), 1.0); }\n";
 
     // The copy of a multisampled target, which has no sampler: the texel
     // by position, a colour as the average of its samples, a depth as its
@@ -279,7 +288,7 @@ namespace
     void DrawQuad(ID3D11ShaderResourceView* source, uint32_t sourceWidth, uint32_t sourceHeight,
                   float x0, float y0, float width, float height,
                   ID3D11RenderTargetView* target, const D3D11_VIEWPORT& viewport,
-                  ID3D11PixelShader* program, ID3D11SamplerState* sampler)
+                  ID3D11PixelShader* program, ID3D11SamplerState* sampler, ID3D11ShaderResourceView* second = nullptr)
     {
         if (!BuiltInPrograms()) return;
         const float constants[8] = { x0 / sourceWidth, y0 / sourceHeight, width / sourceWidth, height / sourceHeight,
@@ -302,8 +311,8 @@ namespace
         ID3D11Buffer* buffers[1] = { g_quadConstants.Get() };
         g_context->VSSetConstantBuffers(0, 1, buffers);
         g_context->PSSetConstantBuffers(0, 1, buffers);
-        ID3D11ShaderResourceView* sources[1] = { source };
-        g_context->PSSetShaderResources(0, 1, sources);
+        ID3D11ShaderResourceView* sources[2] = { source, second };
+        g_context->PSSetShaderResources(0, 2, sources);
         ID3D11SamplerState* samplers[1] = { sampler };
         g_context->PSSetSamplers(0, 1, samplers);
         g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -419,6 +428,7 @@ namespace
     // or more, ten seconds into a level. COD3_D3DFRAME=loading: the first
     // frame of the loading screen with anything on it.
     std::atomic<int64_t> g_frameWanted{ -1 };
+    std::atomic<int64_t> g_frameUntil{ 0 };   // the first swap not logged, when the screenshot key set it
     long g_autoSeconds = 10;
     uint64_t g_drawsAtSwap = 0, g_drawsTotal = 0;
     int g_dumpNumber = 0;
@@ -446,7 +456,8 @@ namespace
         // COD3_D3DFRAME_COUNT=N logs N frames instead of two, for a fault
         // that comes and goes from one frame to the next.
         static const int64_t count = []() { const char* t = getenv("COD3_D3DFRAME_COUNT"); const long v = t ? strtol(t, nullptr, 10) : 2; return int64_t(v > 0 ? v : 2); }();
-        return swap >= wanted && swap < wanted + count;
+        const int64_t until = g_frameUntil.load(std::memory_order_relaxed);
+        return swap >= wanted && swap < (until > 0 ? until : wanted + count);
     }
 
     void FrameSwapped()
@@ -934,6 +945,45 @@ namespace
         return g_backView != nullptr;
     }
 
+    // The display's colour table as a texture for the output programs: the
+    // identity until the title writes one, then the title's, again each
+    // time it changes. COD3_NOGAMMA=1 keeps the identity, to compare.
+    ID3D11ShaderResourceView* GammaTable()
+    {
+        if (!g_gammaTexture)
+        {
+            D3D11_TEXTURE1D_DESC desc{};
+            desc.Width = 256;
+            desc.MipLevels = 1;
+            desc.ArraySize = 1;
+            desc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
+            desc.Usage = D3D11_USAGE_DEFAULT;
+            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            uint32_t identity[256];
+            for (uint32_t i = 0; i < 256; i++) { const uint32_t v = (i << 2) | (i >> 6); identity[i] = v | (v << 10) | (v << 20) | (3u << 30); }
+            const D3D11_SUBRESOURCE_DATA initial{ identity, 0, 0 };
+            if (FAILED(g_device->CreateTexture1D(&desc, &initial, &g_gammaTexture))) return nullptr;
+            g_device->CreateShaderResourceView(g_gammaTexture.Get(), nullptr, &g_gammaView);
+        }
+        static const bool off = getenv("COD3_NOGAMMA") != nullptr;
+        uint32_t table[256];
+        uint64_t version = 0;
+        if (!off && Gpu::DisplayGamma(table, version) && version != g_gammaVersion)
+        {
+            g_gammaVersion = version;
+            // The console's entries have blue in the low bits and red in the
+            // high; the host's format the other way round.
+            uint32_t texels[256];
+            for (uint32_t i = 0; i < 256; i++)
+            {
+                const uint32_t e = table[i];
+                texels[i] = ((e >> 20) & 0x3FF) | (((e >> 10) & 0x3FF) << 10) | ((e & 0x3FF) << 20) | (3u << 30);
+            }
+            g_context->UpdateSubresource(g_gammaTexture.Get(), 0, nullptr, texels, 0, 0);
+        }
+        return g_gammaView.Get();
+    }
+
     // The last swapped frame onto the window, the overlay over it, and the
     // present with or without vertical sync.
     void PresentLocked(const Settings::Values& settings)
@@ -958,7 +1008,7 @@ namespace
             // chosen resolution, so its rows are the window's, and it has
             // no black either side to bleed a dark rim into the edges.
             DrawQuad(frame->resource, frame->width, frame->height, 0, 0, float(frame->width), float(frame->height),
-                     g_backView.Get(), viewport, fxaa ? g_fxaaPixelShader.Get() : g_presentPixelShader.Get(), g_linearSampler.Get());
+                     g_backView.Get(), viewport, fxaa ? g_fxaaPixelShader.Get() : g_presentPixelShader.Get(), g_linearSampler.Get(), GammaTable());
         }
         // The menu, the counters and the screenshot key, over the picture.
         Overlay::Initialize(g_swapChainWindow, g_device.Get(), g_context.Get());
@@ -1125,10 +1175,14 @@ uint64_t Render::CurrentProgramHash(bool pixel)
 
 void Render::LogNextFrame()
 {
-    (void)::FrameLogged();   // the environment's choice read first, so it does not undo this
-    const uint64_t swap = g_swaps.load(std::memory_order_relaxed);
-    g_frameWanted.store(int64_t(swap) + 1, std::memory_order_relaxed);
-    printf("render: the screenshot key: frames %llu and %llu go to the log in full\n", (unsigned long long)swap + 1, (unsigned long long)swap + 2);
+    // A press while frames are being logged makes the run longer: starting
+    // it again would cut the frame being logged short. (The first call also
+    // reads the environment's choice, so it does not undo this.)
+    const int64_t swap = int64_t(g_swaps.load(std::memory_order_relaxed));
+    if (!::FrameLogged()) g_frameWanted.store(swap + 1, std::memory_order_relaxed);
+    g_frameUntil.store(swap + 3, std::memory_order_relaxed);
+    printf("render: the screenshot key: frames %lld to %lld go to the log in full\n",
+        (long long)g_frameWanted.load(std::memory_order_relaxed), (long long)swap + 2);
     fflush(stdout);
 }
 

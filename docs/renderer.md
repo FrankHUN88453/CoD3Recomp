@@ -271,6 +271,8 @@ bilinear|trilinear|anisotropic`, `COD3_ANISO=1..16`, `COD3_VSYNC=0|1`,
 
 While playing, F12 logs the next two frames in full (as `COD3_D3DFRAME` does) besides the screenshot, so a fault a player sees can be read from `CoD3.log`. Two checks run all the time and say what they find once each: a texture sampled as a surface a resolve left at its address that is not of its kind or size ("is sampled as the ... surface a resolve left there"), and a texture bound to a view of another format than its fetch names ("is bound to a view of DXGI format"). Either would draw foliage as flat red or black cards.
 
+The display's colour table: the title writes a 256 entry gamma ramp into the display controller (0x1922 DC_LUT_RW_INDEX, 0x1925 DC_LUT_30_COLOR, ten bits a channel, 0x1927 the write mask) at start and as a level loads, as CoD2 on PC sets its fullscreen gamma ramp. The console puts the whole picture through it on the way out; the present program does the same (`Gpu::DisplayGamma`). Its curve darkens the lower half (32 of 255 goes out as 66 of 1023): without it the picture was brighter and flatter than the console's, and fogged hills stood out pale against a sky too light. `COD3_NOGAMMA=1` leaves it out, `COD3_TRACELUT=N` prints the first N writes, `COD3_SKIPPS=hash` leaves out the draws of one pixel program, `COD3_INDEXCHECK=1` names draws whose indices leave the clamp (VGT_MIN/MAX_VTX_INDX) or the vertex buffer.
+
 (getGradients in the old order), `COD3_TRACESHADERLOAD=N` (the first N shader loads of a level),
 `COD3_NOSHADERCACHE=1`, `COD3_NOPRECOMPILE=1`. For a scripted run,
 `COD3_CMD="second:command;..."` puts console commands on the title's

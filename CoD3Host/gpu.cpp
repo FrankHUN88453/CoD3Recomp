@@ -510,6 +510,62 @@ namespace
     // Which path a register write is coming by, for the report below.
     thread_local const char* t_writeSource = "unknown";
 
+    // The display's colour table (the gamma ramp D3D sets), which the
+    // console's display controller puts the picture through on its way
+    // out. The title writes all 256 entries at start and again as a level
+    // loads: 0x1922 DC_LUT_RW_INDEX then 0x1925 DC_LUT_30_COLOR, ten bits
+    // a channel, blue low and red high, with 0x1927 DC_LUT_WRITE_EN_MASK
+    // naming the channels a write changes (4 red, 2 green, 1 blue). Its
+    // curve darkens the lower half (32 of 255 comes out as 66 of 1023),
+    // and without it the picture was brighter and flatter than the
+    // console's: the sky too pale for the fog to meet it at the horizon.
+    std::mutex g_lutMutex;
+    uint32_t g_lut[256];
+    uint32_t g_lutIndex = 0, g_lutMask = 7;
+    uint64_t g_lutVersion = 0;
+    bool g_lutWritten = false;
+
+    void DisplayLutWrite(uint32_t index, uint32_t value)
+    {
+        // COD3_TRACELUT=N: the first N writes to these registers.
+        static const int traceLut = []() { const char* t = getenv("COD3_TRACELUT"); return t ? int(strtol(t, nullptr, 10)) : 0; }();
+        static std::atomic<int> traced{ 0 };
+        if (traceLut > 0 && traced.fetch_add(1) < traceLut)
+            printf("gpu: lut register %04X = %08X (%s)\n", index, value, t_writeSource ? t_writeSource : "a register write");
+        std::lock_guard<std::mutex> lock(g_lutMutex);
+        switch (index)
+        {
+        case 0x1922: g_lutIndex = value & 0xFF; break;
+        case 0x1927: g_lutMask = value & 7; break;
+        case 0x1925:
+        {
+            if (!g_lutWritten)
+            {
+                // Until the title writes one, the table is the identity.
+                for (uint32_t i = 0; i < 256; i++) { const uint32_t v = (i << 2) | (i >> 6); g_lut[i] = (v << 20) | (v << 10) | v; }
+                g_lutWritten = true;
+            }
+            uint32_t entry = g_lut[g_lutIndex];
+            if (g_lutMask & 1) entry = (entry & ~0x3FFu) | (value & 0x3FFu);
+            if (g_lutMask & 2) entry = (entry & ~(0x3FFu << 10)) | (value & (0x3FFu << 10));
+            if (g_lutMask & 4) entry = (entry & ~(0x3FFu << 20)) | (value & (0x3FFu << 20));
+            g_lut[g_lutIndex] = entry;
+            g_lutIndex = (g_lutIndex + 1) & 0xFF;
+            g_lutVersion++;
+            break;
+        }
+        case 0x1923: case 0x1924:
+        {
+            // The sequential and the piecewise linear ways of writing it,
+            // which this title does not use: said once if one ever comes.
+            static bool said = false;
+            if (!said) { said = true; printf("gpu: the display colour table was written through %04X, which is not applied\n", index); }
+            break;
+        }
+        default: break;
+        }
+    }
+
     // Interrupts the command stream has asked for and nobody has raised yet.
     std::atomic<uint32_t> g_pendingInterrupts{ 0 };
 
@@ -956,6 +1012,15 @@ uint32_t Gpu::ReadRegister(uint32_t address)
 
 const std::atomic<uint32_t>* Gpu::RegisterFile() { return g_registerFile; }
 
+bool Gpu::DisplayGamma(uint32_t table[256], uint64_t& version)
+{
+    std::lock_guard<std::mutex> lock(g_lutMutex);
+    version = g_lutVersion;
+    if (!g_lutWritten) return false;
+    memcpy(table, g_lut, sizeof(g_lut));
+    return true;
+}
+
 uint64_t Gpu::ConstantWrites(uint32_t range) { return range < 3 ? g_constantWrites[range].load(std::memory_order_relaxed) : 0; }
 
 bool Gpu::TakeConstantSpan(uint32_t range, uint32_t& first, uint32_t& end)
@@ -985,6 +1050,7 @@ void Gpu::WriteRegister(uint32_t address, uint32_t value)
     {
         uint32_t fileIndex;
         if (!RegisterIndex(address, fileIndex)) return;
+        if (fileIndex >= 0x1920 && fileIndex < 0x1930) DisplayLutWrite(fileIndex, value);
         // COD3_VSCONST=N:x,y,z,w overrides vertex constant N with the given
         // values whenever it is written: an experiment's knob, for telling
         // whether a value the title writes is the one its program expects.

@@ -45,6 +45,8 @@ void RenderState::Read(uint32_t initiator, uint32_t indexBase, Snapshot& out)
     out.scissorBottomRight = Reg(ScissorBottomRight);
     out.windowOffset = Reg(WindowOffset);
     out.indexOffset = int32_t(Reg(IndexOffset));
+    out.minVertexIndex = Reg(MinVertexIndex);
+    out.maxVertexIndex = Reg(MaxVertexIndex);
     out.resetIndex = Reg(ResetIndex);
     out.pointSize = Reg(PointSize);
 

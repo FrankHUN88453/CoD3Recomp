@@ -39,6 +39,13 @@ namespace Gpu
     // writes the constants have had, by range: 0 the vertex floats, 1 the
     // pixel floats, 2 the booleans and loops.
     const std::atomic<uint32_t>* RegisterFile();
+
+    // The display's colour table, as the title last wrote it through
+    // DC_LUT_RW_INDEX and DC_LUT_30_COLOR: 256 entries of ten bits a
+    // channel (blue low, red high), which the console applies to the
+    // picture as it goes out. False until the title has written one;
+    // the version changes with every write.
+    bool DisplayGamma(uint32_t table[256], uint64_t& version);
     uint64_t ConstantWrites(uint32_t range);
     // The span of words written in a range since it was last taken, and
     // whether there was one; taking it clears it.

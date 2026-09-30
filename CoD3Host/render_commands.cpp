@@ -529,6 +529,49 @@ namespace
         return true;
     }
 
+    // COD3_INDEXCHECK=1: an indexed draw whose indices reach outside the
+    // hardware's clamp (VGT_MIN/MAX_VTX_INDX) or past the end of a vertex
+    // buffer its program reads, said for each vertex program.
+    void IndexCheck(const RenderState::Snapshot& state, const RenderShaders::Program* vs, const DrawCommand& out)
+    {
+        static const bool on = getenv("COD3_INDEXCHECK") != nullptr;
+        if (!on || !out.indexed || state.sourceSelect != 0 || state.indexCount == 0) return;
+        const uint8_t* data = Guest::Base + Guest::PhysicalAlias(state.indexBase);
+        const bool strips = out.topology == D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP || out.topology == D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP;
+        const bool resetEnabled = strips && (state.suScModeControl & (1u << 21)) != 0;
+        const uint32_t reset = state.resetIndex & (state.wideIndices ? 0xFFFFFFu : 0xFFFFu);
+        uint32_t lowest = 0xFFFFFFFFu, highest = 0, resets = 0;
+        for (uint32_t i = 0; i < state.indexCount; i++)
+        {
+            uint32_t index;
+            if (state.wideIndices) { uint32_t w; memcpy(&w, data + i * 4, 4); index = _byteswap_ulong(w) & 0xFFFFFFu; }
+            else { uint16_t h; memcpy(&h, data + i * 2, 2); index = BSwap16(h); }
+            if (resetEnabled && index == reset) { resets++; continue; }
+            lowest = std::min(lowest, index);
+            highest = std::max(highest, index);
+        }
+        if (lowest > highest) return;
+        uint32_t vertices = 0xFFFFFFFFu;
+        for (const XenosHlsl::VertexFetch& fetch : vs->vertexFetches)
+        {
+            uint32_t word0, word1;
+            RenderState::ReadVertexFetch(fetch.slot, word0, word1);
+            if (fetch.stride != 0) vertices = std::min(vertices, ((word1 >> 2) & 0xFFFFFFu) / fetch.stride);
+        }
+        const int64_t first = int64_t(lowest) + state.indexOffset, last = int64_t(highest) + state.indexOffset;
+        const uint32_t clampLow = state.minVertexIndex & 0xFFFFFFu, clampHigh = state.maxVertexIndex & 0xFFFFFFu;
+        const bool past = last >= int64_t(vertices) || first < 0 || highest > clampHigh || lowest < clampLow;
+        if (!past) return;
+        static std::atomic<int> said{ 0 };
+        static uint64_t lastHash = 0;
+        if (vs->hash == lastHash || said.fetch_add(1) >= 60) return;
+        lastHash = vs->hash;
+        printf("render: frame %llu, vs %016llx: %u indices (%u resets) from %u to %u, offset %d, clamp %u..%u, the buffer has %u vertices\n",
+            (unsigned long long)RenderInternal::Swaps(), (unsigned long long)vs->hash, state.indexCount, resets, lowest, highest,
+            state.indexOffset, clampLow, clampHigh, vertices);
+        fflush(stdout);
+    }
+
     // The indices: the title's, byte swapped into the index ring, or none.
     // Quads and fans become triangle lists. The index that ends a strip and
     // starts the next, when the title has turned it on (PA_SU_SC_MODE_CNTL
@@ -873,6 +916,11 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
         constants.pixelGen[3] = ((state.programControl >> 18) & 1) ? 1.0f : 0.0f;
     }
 
+    // COD3_SKIPPS=hash: the draws of that pixel program are left out, to
+    // see what a pass (the fog, say) puts over the picture.
+    static const uint64_t skipPixel = []() { const char* t = getenv("COD3_SKIPPS"); return t ? uint64_t(strtoull(t, nullptr, 16)) : 0ull; }();
+    if (skipPixel != 0 && ps != nullptr && ps->hash == skipPixel) return false;
+
     RenderStats::Enter(RenderStats::SectionTextures);
     Textures(vs, ps, out, constants);
 
@@ -885,6 +933,7 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
     RenderStats::Enter(RenderStats::SectionIndices);
     if (!Indices(state, convertQuads, convertFan, out)) return false;
     out.baseVertex = state.indexOffset;
+    IndexCheck(state, vs, out);
     switch (out.topology)
     {
     case D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST: out.triangles = out.rectangles ? out.indexCount / 3 * 2 : out.indexCount / 3; break;

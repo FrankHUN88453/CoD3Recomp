@@ -97,6 +97,7 @@ namespace RenderState
         float polyOffset[4] = {};      // front scale, front offset, back scale, back offset
         uint32_t scissorTopLeft = 0, scissorBottomRight = 0, windowOffset = 0;
         int32_t indexOffset = 0;
+        uint32_t minVertexIndex = 0, maxVertexIndex = 0;   // VGT_MIN/MAX_VTX_INDX: the hardware clamps indices into these
         uint32_t resetIndex = 0;
         uint32_t pointSize = 0;
 
