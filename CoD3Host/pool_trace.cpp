@@ -66,11 +66,19 @@ namespace
 // hands over at kernel calls, and a spinning thread that never made one
 // held its hardware thread until the two second timeout let the other
 // run.
+// With the decompiled code (COD3_HAVE_DECOMP) the turn itself is its
+// decompiled body, decomp_sub_822EC168.
+#ifdef COD3_HAVE_DECOMP
+PPC_FUNC(decomp_sub_822EC168);
+#define COD3_WAIT_TURN decomp_sub_822EC168
+#else
 extern "C" PPC_FUNC(__imp__sub_822EC168);
+#define COD3_WAIT_TURN __imp__sub_822EC168
+#endif
 PPC_FUNC(sub_822EC168)
 {
     Scheduler::Checkpoint();
-    __imp__sub_822EC168(ctx, base);
+    COD3_WAIT_TURN(ctx, base);
 }
 
 // How the title's GPU pipeline spends its time, once a second: how long
