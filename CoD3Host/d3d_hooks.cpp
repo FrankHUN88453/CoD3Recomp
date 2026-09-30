@@ -149,7 +149,7 @@ COD3_OBSERVE(822F3EA0, DrawIndexedB)
 COD3_OBSERVE(822F4338, DrawIndexedC)
 COD3_OBSERVE(822F6858, DrawImmediate)
 COD3_OBSERVE(822EFFF0, RectangleEvent)
-COD3_OBSERVE(822FB4B0, ShaderLoad)
+// 822FB4B0 (the shader load) is not observed here: the decompiled one takes its place.
 COD3_OBSERVE(822F4A10, SwapCountdown)
 COD3_OBSERVE(822F8590, IndirectB)
 COD3_OBSERVE(82154930, GameDraw)
