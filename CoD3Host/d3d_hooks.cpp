@@ -154,6 +154,9 @@ COD3_OBSERVE(822F4A10, SwapCountdown)
 COD3_OBSERVE(822F8590, IndirectB)
 COD3_OBSERVE(82154930, GameDraw)
 COD3_OBSERVE(822F30F0, DrawD)
+// With the decompiled draw (COD3_HAVE_DECOMP) this record is not kept: that
+// function takes the place this hook would.
+#ifndef COD3_HAVE_DECOMP
 extern "C" PPC_FUNC(__imp__sub_822F3A28);
 PPC_FUNC(sub_822F3A28)
 {
@@ -174,6 +177,7 @@ PPC_FUNC(sub_822F3A28)
     if (g_records.size() > 200000) g_records.clear();
     g_records[last] = record;
 }
+#endif
 
 bool D3dHooks::Observing() { return ObservingNow(); }
 
