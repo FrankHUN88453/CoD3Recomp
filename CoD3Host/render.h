@@ -64,6 +64,10 @@ namespace Render
     // The hash of the stage's current program, for the traces.
     uint64_t CurrentProgramHash(bool pixel);
 
+    // The screenshot key: the next frame's draws go to the log in full, as
+    // COD3_D3DFRAME logs one, so a fault seen while playing can be read.
+    void LogNextFrame();
+
     // The ten second report.
     void Report();
 }

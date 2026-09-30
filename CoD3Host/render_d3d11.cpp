@@ -1123,6 +1123,15 @@ uint64_t Render::CurrentProgramHash(bool pixel)
     return RenderShaders::HashOf(RenderShaders::Current(pixel));
 }
 
+void Render::LogNextFrame()
+{
+    (void)::FrameLogged();   // the environment's choice read first, so it does not undo this
+    const uint64_t swap = g_swaps.load(std::memory_order_relaxed);
+    g_frameWanted.store(int64_t(swap) + 1, std::memory_order_relaxed);
+    printf("render: the screenshot key: frames %llu and %llu go to the log in full\n", (unsigned long long)swap + 1, (unsigned long long)swap + 2);
+    fflush(stdout);
+}
+
 void Render::Swap(uint32_t frontBufferPhysical, uint32_t width, uint32_t height)
 {
     (void)width; (void)height;

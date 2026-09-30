@@ -271,6 +271,38 @@ namespace
         return true;
     }
 
+    // A view that is not of the fetch's kind, said once each: a compressed
+    // or 8 bit texture that reads as a surface a resolve made (a depth copy,
+    // a shadow map, a copy of the frame) draws as a flat red or black
+    // shape, which is how foliage was once seen to go.
+    void CheckView(ID3D11ShaderResourceView* view, const uint32_t words[6], bool resolved, Handle texture, uint32_t slot, int stage)
+    {
+        if (view == nullptr || (!resolved && texture == RenderResources::WhiteTexture())) return;
+        const uint32_t format = words[1] & 0x3F;
+        DXGI_FORMAT expected;
+        switch (format)
+        {
+        case 2: expected = DXGI_FORMAT_R8_UNORM; break;
+        case 6: if (resolved) return; expected = DXGI_FORMAT_R8G8B8A8_UNORM; break;
+        case 18: expected = DXGI_FORMAT_BC1_UNORM; break;
+        case 19: expected = DXGI_FORMAT_BC2_UNORM; break;
+        case 20: expected = DXGI_FORMAT_BC3_UNORM; break;
+        default: return;
+        }
+        D3D11_SHADER_RESOURCE_VIEW_DESC desc{};
+        view->GetDesc(&desc);
+        if (desc.Format == expected && !resolved) return;
+        static std::atomic<int> said{ 0 };
+        static uint64_t last = 0;
+        const uint64_t what = (uint64_t(words[1]) << 32) ^ (uint64_t(slot) << 8) ^ uint64_t(desc.Format);
+        if (what == last || said.fetch_add(1) >= 100) return;
+        last = what;
+        printf("render: frame %llu, %s texture %u, format %u at %08X (%ux%u), is bound to a view of DXGI format %u%s\n",
+            (unsigned long long)RenderInternal::Swaps(), stage == 0 ? "pixel" : "vertex", slot, format, words[1] & 0xFFFFF000u,
+            (words[2] & 0x1FFF) + 1, ((words[2] >> 13) & 0x1FFF) + 1, unsigned(desc.Format), resolved ? ", a resolved surface" : "");
+        fflush(stdout);
+    }
+
     // The textures and samplers the programs sample: the pixel program's,
     // and the vertex program's (the terrain's height map).
     void Textures(const RenderShaders::Program* vs, const RenderShaders::Program* ps, DrawCommand& out, RenderState::DrawConstants& constants)
@@ -292,6 +324,7 @@ namespace
                 binding.samplerSlot = uint8_t(fetch.sampler);
                 if (resolved) binding.view = RenderResources::ResolvedAt(words[1] & 0xFFFFF000u)->resource;
                 else binding.view = RenderResources::TextureView(texture, fetch.dimension);
+                CheckView(binding.view, words, resolved, texture, fetch.slot, stage);
                 binding.sampler = RenderPipeline::SamplerObject(RenderPipeline::Sampler(words));
                 constants.textureSize[fetch.slot][0] = float(width);
                 constants.textureSize[fetch.slot][1] = float(height);

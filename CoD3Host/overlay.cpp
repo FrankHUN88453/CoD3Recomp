@@ -2,6 +2,7 @@
 #include "kernel.h"
 #include "settings.h"
 #include "render_stats.h"
+#include "render.h"
 
 #include <atomic>
 #include <chrono>
@@ -519,7 +520,9 @@ bool Overlay::HandleMessage(void* hwnd, uint32_t message, uint64_t wParam, int64
     if (message == WM_KEYDOWN || message == WM_SYSKEYDOWN)
     {
         if (wParam == VK_F11) { Toggle(); return true; }
-        if (wParam == VK_F12) { RequestScreenshot(); return true; }
+        // F12: the picture, and the next frame's draws to the log, so a
+        // fault seen while playing can be read afterwards.
+        if (wParam == VK_F12) { RequestScreenshot(); Render::LogNextFrame(); return true; }
         // The key left of 1 (scan code 0x29: ` and ~ on a US keyboard, 0
         // on a Hungarian one): the console, as the title's own configs
         // bind it. By scan code, so it is that key on every layout.

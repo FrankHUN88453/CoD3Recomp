@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <set>
 
 #include <d3d11_1.h>
 #include <wrl/client.h>
@@ -992,6 +993,22 @@ RenderState::Handle RenderResources::TextureFor(const uint32_t fetch[6], uint32_
     // the shadow maps and the post processing's copies of the frame.
     if (const Resolved* surface = ResolvedAt(base))
     {
+        // A fetch that does not look like the resolve: said once each. A
+        // shadow map or depth copy read as 24 bit depth, or a copy of the
+        // frame read as 8888, at its own size, is what the title does.
+        const bool kindMatches = surface->depth ? (format == 22 || format == 23) : format == 6;
+        if (!kindMatches || width != surface->guestWidth || height != surface->guestHeight)
+        {
+            static std::set<uint64_t> said;
+            const uint64_t what = (uint64_t(base) << 32) ^ (uint64_t(format) << 26) ^ (uint64_t(width) << 13) ^ height;
+            if (said.size() < 200 && said.insert(what).second)
+            {
+                printf("render: a texture at %08X, format %u, %ux%u, is sampled as the %ux%u %s surface a resolve left there (resolve %llu of %llu)\n",
+                    base, format, width, height, surface->guestWidth, surface->guestHeight, surface->depth ? "depth" : "colour",
+                    (unsigned long long)surface->serial, (unsigned long long)g_resolveSerial);
+                fflush(stdout);
+            }
+        }
         width = surface->guestWidth;
         height = surface->guestHeight;
         resolved = true;

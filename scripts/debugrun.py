@@ -124,9 +124,10 @@ def main():
             env[key] = value
 
     # The build's executable and its symbols, installed next to the game.
-    # DEBUGRUN_EXE=CoD3-test.exe installs and runs them under another name,
-    # for a run while the game itself is being played from the same folder.
-    exe = os.path.join(r"D:\Games\x360", os.environ.get("DEBUGRUN_EXE", "CoD3.exe"))
+    # A test installs and runs them as CoD3-test.exe, so it never replaces
+    # the player's CoD3.exe nor touches their saves; DEBUGRUN_EXE=CoD3.exe
+    # installs the build as the game itself.
+    exe = os.path.join(r"D:\Games\x360", os.environ.get("DEBUGRUN_EXE", "CoD3-test.exe"))
     # A run under another name is a test beside the installed game: its
     # saves and its log go to a folder of their own, so the player's saves
     # and CoD3.log are left alone (COD3_SAVES / COD3_LOG given override it).
