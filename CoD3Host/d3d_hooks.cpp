@@ -26,7 +26,7 @@
 namespace
 {
     enum Call { DrawIndexed, DrawIndexedB, DrawIndexedC, DrawImmediate, RectangleEvent, ShaderLoad, SwapCountdown, IndirectA, IndirectB, GameDraw, DrawD, DrawE, DrawF, DrawG, CallCount };
-    const char* const CallNames[CallCount] = { "draw indexed 822F3620", "draw indexed 822F3EA0", "draw indexed 822F4338",
+    const char* const CallNames[CallCount] = { "draw 822F3620", "draw tessellated 822F3EA0", "draw indexed tessellated 822F4338",
         "draw immediate 822F6858", "rectangle + event 822EFFF0", "shader load 822FB4B0", "swap countdown 822F4A10",
         "(ring write 822F1E68: pool_trace.cpp)", "indirect buffer 822F8590",
         "game's own draw 82154930", "draw 822F30F0", "draw 822F3A28", "draw 822F6DF8", "draw 82301888" };
@@ -144,16 +144,20 @@ namespace
         __imp__sub_##address(ctx, base);                \
     }
 
+// With the decompiled D3D library (COD3_HAVE_DECOMP) its draws are not
+// observed here: the decompiled ones take the place these hooks would.
+// Neither is 822FB4B0 (the shader load), decompiled too.
+#ifndef COD3_HAVE_DECOMP
 COD3_OBSERVE(822F3620, DrawIndexed)
 COD3_OBSERVE(822F3EA0, DrawIndexedB)
 COD3_OBSERVE(822F4338, DrawIndexedC)
-COD3_OBSERVE(822F6858, DrawImmediate)
 COD3_OBSERVE(822EFFF0, RectangleEvent)
-// 822FB4B0 (the shader load) is not observed here: the decompiled one takes its place.
-COD3_OBSERVE(822F4A10, SwapCountdown)
 COD3_OBSERVE(822F8590, IndirectB)
-COD3_OBSERVE(82154930, GameDraw)
 COD3_OBSERVE(822F30F0, DrawD)
+#endif
+COD3_OBSERVE(822F6858, DrawImmediate)
+COD3_OBSERVE(822F4A10, SwapCountdown)
+COD3_OBSERVE(82154930, GameDraw)
 // With the decompiled draw (COD3_HAVE_DECOMP) this record is not kept: that
 // function takes the place this hook would.
 #ifndef COD3_HAVE_DECOMP
