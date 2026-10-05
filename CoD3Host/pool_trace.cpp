@@ -132,14 +132,21 @@ PPC_FUNC(sub_82302A90)
     g_replayRuns.fetch_add(1, std::memory_order_relaxed);
 }
 
-// sub_822F1E68(device, buffers, count): buffers written to the ring.
+// sub_822F1E68(device, buffers, count): buffers written to the ring. With
+// the decompiled code (COD3_HAVE_DECOMP) the write is its decompiled body.
+#ifdef COD3_HAVE_DECOMP
+PPC_FUNC(decomp_sub_822F1E68);
+#define COD3_RING_WRITE decomp_sub_822F1E68
+#else
 extern "C" PPC_FUNC(__imp__sub_822F1E68);
+#define COD3_RING_WRITE __imp__sub_822F1E68
+#endif
 PPC_FUNC(sub_822F1E68)
 {
     g_ringWrites.fetch_add(1, std::memory_order_relaxed);
     g_ringBuffers.fetch_add(ctx.r5.u32, std::memory_order_relaxed);
     Timeline::Mark("ring write", ctx.r4.u32, ctx.r5.u32);
-    __imp__sub_822F1E68(ctx, base);
+    COD3_RING_WRITE(ctx, base);
     Timeline::Mark("ring written", ctx.r4.u32, ctx.r5.u32);
 }
 
