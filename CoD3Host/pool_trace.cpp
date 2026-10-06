@@ -230,6 +230,14 @@ PPC_FUNC(sub_82302E88)
 // wait up). Said every time: whether the title's own timeout comes at all
 // is the question when a pool wait never ends.
 extern "C" PPC_FUNC(__imp__sub_822FDB70);
+// With the decompiled code (COD3_HAVE_DECOMP) the timeout is its decompiled
+// body, decomp_sub_822FDB70.
+#ifdef COD3_HAVE_DECOMP
+PPC_FUNC(decomp_sub_822FDB70);
+#define COD3_GPU_TIMEOUT decomp_sub_822FDB70
+#else
+#define COD3_GPU_TIMEOUT __imp__sub_822FDB70
+#endif
 PPC_FUNC(sub_822FDB70)
 {
     static std::atomic<int> announced{ 0 };
@@ -239,6 +247,6 @@ PPC_FUNC(sub_822FDB70)
         fflush(stdout);
     }
     Timeline::Mark("gpu timeout", uint32_t(ctx.lr));
-    __imp__sub_822FDB70(ctx, base);
+    COD3_GPU_TIMEOUT(ctx, base);
     Timeline::Mark("gpu timeout done", ctx.r3.u32);
 }
