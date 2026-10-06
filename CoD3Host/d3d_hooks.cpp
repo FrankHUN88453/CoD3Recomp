@@ -226,4 +226,8 @@ void D3dHooks::CheckDraw(uint32_t lastWordPhysical, uint64_t vertexHash, uint64_
     }
 }
 COD3_OBSERVE(822F6DF8, DrawF)
+// With the decompiled D3D library (COD3_HAVE_DECOMP) the movie capture's
+// frame is the decompiled one.
+#ifndef COD3_HAVE_DECOMP
 COD3_OBSERVE(82301888, DrawG)
+#endif
