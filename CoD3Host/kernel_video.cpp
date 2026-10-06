@@ -1195,6 +1195,14 @@ namespace
 }
 
 extern "C" PPC_FUNC(__imp__sub_822F16A0);
+// With the decompiled code (COD3_HAVE_DECOMP) the wait is its decompiled
+// body, decomp_sub_822F16A0.
+#ifdef COD3_HAVE_DECOMP
+PPC_FUNC(decomp_sub_822F16A0);
+#define COD3_POOL_WAIT decomp_sub_822F16A0
+#else
+#define COD3_POOL_WAIT __imp__sub_822F16A0
+#endif
 PPC_FUNC(sub_822F16A0)
 {
     const uint32_t osId = GetCurrentThreadId();
@@ -1209,7 +1217,7 @@ PPC_FUNC(sub_822F16A0)
     }
     const int64_t started = NowMilliseconds();
     Timeline::Mark("gpu wait", ctx.r4.u32, ctx.r5.u32);
-    __imp__sub_822F16A0(ctx, base);
+    COD3_POOL_WAIT(ctx, base);
     Timeline::Mark("gpu waited", ctx.r4.u32, ctx.r5.u32);
     PoolTrace::Waited(uint64_t(NowMilliseconds() - started) * 1000000ull);
     std::lock_guard<std::mutex> lock(g_poolWaitMutex);
