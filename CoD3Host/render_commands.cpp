@@ -106,6 +106,24 @@ namespace
 
     // Without the ring, the files go whole: the scratch the command points at.
     uint32_t g_floatFile[2][1024];
+
+    // From a draw's record: the file as it was when it last went up, by
+    // stage, and whether a program's constants differ from it now.
+    uint32_t g_sentFile[2][1024];
+    bool RecordChanged(uint32_t stage, const std::vector<uint16_t>& map, const uint32_t* file)
+    {
+        const uint32_t* now = file + (stage == 0 ? 0x4000 : 0x4400);
+        if (map.empty()) return memcmp(g_sentFile[stage], now, 4096) != 0;
+        size_t i = 0;
+        while (i < map.size())
+        {
+            size_t run = 1;
+            while (i + run < map.size() && map[i + run] == map[i] + run) run++;
+            if (memcmp(g_sentFile[stage] + map[i] * 4u, now + map[i] * 4u, run * 16) != 0) return true;
+            i += run;
+        }
+        return false;
+    }
     uint32_t g_bools[40];
     bool g_boolsUploaded = false;
 
@@ -378,7 +396,10 @@ namespace
     // False when the ring could not be mapped.
     bool Constants(const RenderShaders::Program* vs, const RenderShaders::Program* ps, DrawCommand& out, const RenderState::DrawConstants& constants)
     {
-        const std::atomic<uint32_t>* file = Gpu::RegisterFile();
+        const uint32_t* file = RenderState::Registers();
+        // From the register file, what was written since is what the stream
+        // says; from a draw's record, what differs from what went up.
+        const bool record = RenderState::UsingRecord();
         for (uint32_t range = 0; range < 2; range++)
         {
             uint32_t spanFirst, spanEnd;
@@ -388,9 +409,12 @@ namespace
         }
         {
             uint32_t spanFirst, spanEnd;
-            if (Gpu::TakeConstantSpan(2, spanFirst, spanEnd) || !g_boolsUploaded)
+            const bool written = Gpu::TakeConstantSpan(2, spanFirst, spanEnd);
+            if (record ? memcmp(g_bools, file + 0x4900, sizeof(g_bools)) != 0 : written)
+                g_boolsUploaded = false;
+            if (!g_boolsUploaded)
             {
-                for (uint32_t i = 0; i < 40; i++) g_bools[i] = file[0x4900 + i].load(std::memory_order_relaxed);
+                memcpy(g_bools, file + 0x4900, sizeof(g_bools));
                 out.bools = g_bools;
                 out.boolsChanged = true;
                 g_boolsUploaded = true;
@@ -405,9 +429,10 @@ namespace
             // No offsets on this device: the whole files, in place.
             for (uint32_t stage = 0; stage < 2; stage++)
             {
-                if (g_pendingFirst[stage] >= 256 && g_uploaded.floatAt[stage] != 0xFFFFFFFFu) continue;
+                if (!record && g_pendingFirst[stage] >= 256 && g_uploaded.floatAt[stage] != 0xFFFFFFFFu) continue;
                 const uint32_t first = stage == 0 ? 0x4000 : 0x4400;
-                for (uint32_t i = 0; i < 1024; i++) g_floatFile[stage][i] = file[first + i].load(std::memory_order_relaxed);
+                if (record && g_uploaded.floatAt[stage] != 0xFFFFFFFFu && memcmp(g_floatFile[stage], file + first, 4096) == 0) continue;
+                memcpy(g_floatFile[stage], file + first, 4096);
                 out.floatFile[stage] = g_floatFile[stage];
                 out.floatChanged[stage] = true;
                 g_uploaded.floatAt[stage] = 0;
@@ -434,7 +459,7 @@ namespace
             need[stage] = std::min(256u, std::max(16u, (count + 15) & ~15u));
             // The file's span the program reads, for the dirty check.
             const uint32_t readFirst = map.empty() ? 0 : map.front(), readEnd = map.empty() ? 256 : map.back() + 1u;
-            const bool dirty = g_pendingFirst[stage] < readEnd && g_pendingEnd[stage] > readFirst;
+            const bool dirty = record ? RecordChanged(stage, map, file) : g_pendingFirst[stage] < readEnd && g_pendingEnd[stage] > readFirst;
             upload[stage] = g_uploaded.floatAt[stage] == 0xFFFFFFFFu || g_uploaded.floatProgram[stage] != handles[stage] || dirty;
             if (upload[stage]) bytes += need[stage] * 16;
         }
@@ -491,9 +516,9 @@ namespace
                         last = now;
                         const float* values = reinterpret_cast<const float*>(words);
                         printf("const %016llx %u read: bools", (unsigned long long)programs[stage]->hash, unsigned(map.size()));
-                        for (uint32_t i = 0; i < 8; i++) printf(" %08X", file[0x4900 + i].load(std::memory_order_relaxed));
+                        for (uint32_t i = 0; i < 8; i++) printf(" %08X", file[0x4900 + i]);
                         printf(" loops");
-                        for (uint32_t i = 0; i < 32; i++) printf(" %08X", file[0x4908 + i].load(std::memory_order_relaxed));
+                        for (uint32_t i = 0; i < 32; i++) printf(" %08X", file[0x4908 + i]);
                         printf(" ::");
                         for (size_t i = 0; i < map.size(); i++)
                             printf(" c%u=(%.4g %.4g %.4g %.4g)", unsigned(map[i]),
@@ -502,6 +527,7 @@ namespace
                         fflush(stdout);
                     }
                 }
+                memcpy(g_sentFile[stage], from, 4096);
                 g_uploaded.floatAt[stage] = base + at;
                 g_uploaded.floatCount[stage] = need[stage];
                 g_uploaded.floatProgram[stage] = handles[stage];

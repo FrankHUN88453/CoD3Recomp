@@ -120,6 +120,16 @@ namespace RenderState
     // The state from the register file, for a draw with this initiator.
     void Read(uint32_t initiator, uint32_t indexBase, Snapshot& out);
 
+    // Where the draw's registers are read from, on this thread: the register
+    // file (null), or a draw's own registers by register number (the native
+    // path's record, native_state.cpp; only the draw's registers, 0x2000..
+    // 0x2387 and the constants, are in it). Register and Registers read
+    // from there.
+    void UseRegisters(const uint32_t* registers);
+    bool UsingRecord();
+    uint32_t Register(uint32_t index);
+    const uint32_t* Registers();
+
     // A fetch constant's words, straight from the file.
     void ReadTextureFetch(uint32_t slot, uint32_t words[6]);
     void ReadVertexFetch(uint32_t slot, uint32_t& word0, uint32_t& word1);

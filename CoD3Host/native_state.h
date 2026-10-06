@@ -20,6 +20,17 @@ namespace NativeState
     // COD3_NATIVECHECK=1: the draws' states are recorded and checked.
     bool Checking();
 
+    // COD3_NATIVE=1: the draws are made from their records (N2): the
+    // registers, constants and programs, not the register file's.
+    bool Drawing();
+
+    // The command processor is at a draw packet whose last word is at that
+    // physical address: with COD3_NATIVE=1 and a record of it, the record
+    // becomes what the draw is made from (RenderState::UseRegisters, the
+    // programs loaded) until End. False when the register file stays.
+    bool Begin(uint32_t lastWordPhysical);
+    void End();
+
     // A draw call on `device` has written its packets after `before` (the
     // device's write pointer before the call, on the last word written then)
     // up to `after` (on the last word it wrote).

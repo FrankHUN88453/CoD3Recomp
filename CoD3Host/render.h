@@ -42,6 +42,10 @@ namespace Render
     // lies in guest memory. The program becomes the stage's current one.
     void ShaderLoaded(bool pixel, uint32_t guestAddress, uint32_t sizeDwords, uint32_t start = 0);
 
+    // A draw's program from its native record (native_state.cpp): as a
+    // load from the stream, the microcode's hash known already.
+    void UseProgram(bool pixel, uint32_t guestAddress, uint32_t sizeDwords, uint64_t hash);
+
     // VdSwap reached in the stream: the front buffer the title finished, by
     // physical address. The frame goes on the window from here.
     void Swap(uint32_t frontBufferPhysical, uint32_t width, uint32_t height);

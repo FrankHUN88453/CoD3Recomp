@@ -6,8 +6,11 @@
 
 namespace
 {
+    thread_local const uint32_t* t_registers = nullptr;
+
     inline uint32_t Reg(uint32_t index)
     {
+        if (t_registers != nullptr) return t_registers[index];
         return Gpu::RegisterFile()[index].load(std::memory_order_relaxed);
     }
 
@@ -93,4 +96,16 @@ void RenderState::ReadResolve(ResolveSnapshot& out)
     out.depthInfo = Reg(DepthInfo);
     out.colorClearValue = Reg(CopyColorClear);
     out.depthClearValue = Reg(CopyDepthClear);
+}
+
+void RenderState::UseRegisters(const uint32_t* registers) { t_registers = registers; }
+
+bool RenderState::UsingRecord() { return t_registers != nullptr; }
+
+uint32_t RenderState::Register(uint32_t index) { return Reg(index); }
+
+const uint32_t* RenderState::Registers()
+{
+    // The file's words are written on this thread: plain reads of them.
+    return t_registers != nullptr ? t_registers : reinterpret_cast<const uint32_t*>(Gpu::RegisterFile());
 }

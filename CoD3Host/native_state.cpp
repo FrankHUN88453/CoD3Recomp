@@ -42,6 +42,7 @@
 #include "gpu.h"
 #include "render.h"
 #include "render_shaders.h"
+#include "render_state.h"
 
 #include <algorithm>
 #include <chrono>
@@ -87,12 +88,25 @@ namespace
     constexpr uint32_t ColourPass = 0, ZPass = 1;
     constexpr uint32_t ZBins = 0x80000001u, ColourBins = 0x00000002u;
 
+    bool Wanted(const char* name)
+    {
+        const char* text = getenv(name);
+        return text != nullptr && text[0] != 0 && text[0] != '0';
+    }
     bool CheckingNow()
     {
-        static const bool on = []() {
-            const char* text = getenv("COD3_NATIVECHECK");
-            return text != nullptr && text[0] != 0 && text[0] != '0';
-        }();
+        static const bool on = Wanted("COD3_NATIVECHECK");
+        return on;
+    }
+    bool DrawingNow()
+    {
+        static const bool on = Wanted("COD3_NATIVE");
+        return on;
+    }
+    // Whether draws are recorded at all.
+    bool RecordingNow()
+    {
+        static const bool on = CheckingNow() || DrawingNow();
         return on;
     }
 
@@ -399,9 +413,55 @@ namespace
 
 bool NativeState::Checking() { return CheckingNow(); }
 
+bool NativeState::Drawing() { return DrawingNow(); }
+
+namespace
+{
+    // The registers of the draw being made, by register number: only the
+    // draw's own (the blocks above) are filled, each draw.
+    uint32_t g_image[0x5000];
+}
+
+bool NativeState::Begin(uint32_t lastWordPhysical)
+{
+    if (!DrawingNow()) return false;
+    const uint32_t key = lastWordPhysical & 0x1FFFFFFF;
+    Program vertex, pixel;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_byKey.find(key);
+        if (it == g_byKey.end()) return false;
+        const Record& record = g_records[it->second];
+        if (Guest::Read32(Guest::Base, Guest::PhysicalAlias(lastWordPhysical)) != record.lastWordValue) return false;
+        const uint32_t select = uint32_t(Gpu::BinSelect());
+        const uint32_t pass = (select & ZBins) != 0 && (select & ColourBins) == 0 ? ZPass : ColourPass;
+        uint32_t at = 0;
+        for (const Block& block : Blocks)
+        {
+            memcpy(g_image + block.first, record.registers + at, block.count * 4);
+            at += block.count;
+        }
+        for (const auto& [index, address] : record.constantMemory)
+        {
+            const uint32_t reg = 0x4000 + index * 4u;
+            for (uint32_t i = 0; i < 4; i++) g_image[reg + i] = Guest::Read32(Guest::Base, Guest::PhysicalAlias(address + i * 4));
+        }
+        for (const auto& [reg, value] : record.passRegisters[pass])
+            if (reg < 0x5000) g_image[reg] = value;
+        vertex = record.vertex[pass];
+        pixel = record.pixel[pass];
+    }
+    if (vertex.dwords != 0) Render::UseProgram(false, Guest::PhysicalAlias(vertex.address), vertex.dwords, vertex.hash);
+    if (pixel.dwords != 0) Render::UseProgram(true, Guest::PhysicalAlias(pixel.address), pixel.dwords, pixel.hash);
+    RenderState::UseRegisters(g_image);
+    return true;
+}
+
+void NativeState::End() { RenderState::UseRegisters(nullptr); }
+
 void NativeState::Recorded(uint8_t* base, uint32_t device, uint32_t before, uint32_t after)
 {
-    if (!CheckingNow()) return;
+    if (!RecordingNow()) return;
     std::lock_guard<std::mutex> modelLock(g_modelMutex);
     DeviceModel& model = ModelOf(device);
     if (!Continues(base, device, model, after))
@@ -420,7 +480,7 @@ void NativeState::Recorded(uint8_t* base, uint32_t device, uint32_t before, uint
 
 void NativeState::Kicking(uint8_t* base, uint32_t device)
 {
-    if (!CheckingNow()) return;
+    if (!RecordingNow()) return;
     std::lock_guard<std::mutex> modelLock(g_modelMutex);
     DeviceModel& model = ModelOf(device);
     const uint32_t last = Guest::Read32(base, device + DeviceWrite);
@@ -429,7 +489,7 @@ void NativeState::Kicking(uint8_t* base, uint32_t device)
 
 void NativeState::Kicked(uint8_t* base, uint32_t device)
 {
-    if (!CheckingNow()) return;
+    if (!RecordingNow()) return;
     std::lock_guard<std::mutex> modelLock(g_modelMutex);
     DeviceModel& model = ModelOf(device);
     if (!model.started) return;

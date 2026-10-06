@@ -31,6 +31,7 @@
 #include "render_internal.h"
 #include "d3d_hooks.h"
 #include "native_state.h"
+#include "render_state.h"
 #include "timeline.h"
 #include "window.h"
 
@@ -433,7 +434,7 @@ namespace
         // A resolve is spelled as a rectangle list draw with the render backend
         // in copy mode. It is the only draw in the stream that this runtime can
         // carry out completely, because it moves pixels rather than making them.
-        const uint32_t mode = Gpu::ReadRegister(Gpu::ApertureBase + 0x2208 * 4) & 7;
+        const uint32_t mode = RenderState::Register(0x2208) & 7;
         if (primitive == 8 && mode == 6) Render::Resolve();
         else Render::Draw(initiator, indexBase, indexWord);
     }
@@ -1357,15 +1358,23 @@ uint32_t Gpu::ProcessRing(uint32_t ringBase, uint32_t ringSizeDwords,
                 if (NativeState::Checking())
                     NativeState::Check(ringBase + ((cursor + count) % ringSizeDwords) * 4, ReadDword(cursor + 2), ReadDword(cursor + 3));
                 if (TraceConstants()) printf("const: draw indexed vs_%016llx\n", (unsigned long long)Render::CurrentProgramHash(false));
-                DecodeDraw(ReadDword(cursor + 2), ReadDword(cursor + 3),
-                           ReadDword(cursor + 4));
+                {
+                    const bool native = NativeState::Begin(ringBase + ((cursor + count) % ringSizeDwords) * 4);
+                    DecodeDraw(ReadDword(cursor + 2), ReadDword(cursor + 3),
+                               ReadDword(cursor + 4));
+                    if (native) NativeState::End();
+                }
                 break;
             case OpDrawIndx2:
                 local.draws++;
                 if (NativeState::Checking())
                     NativeState::Check(ringBase + ((cursor + count) % ringSizeDwords) * 4, ReadDword(cursor + 1), 0);
                 if (TraceConstants()) printf("const: draw vs_%016llx\n", (unsigned long long)Render::CurrentProgramHash(false));
-                DecodeDraw(ReadDword(cursor + 1));
+                {
+                    const bool native = NativeState::Begin(ringBase + ((cursor + count) % ringSizeDwords) * 4);
+                    DecodeDraw(ReadDword(cursor + 1));
+                    if (native) NativeState::End();
+                }
                 break;
             case OpImLoadImmediate:
                 DecodeShaderLoad(ReadDword(cursor + 1), ReadDword(cursor + 2),
@@ -1787,12 +1796,14 @@ namespace
                         NativeState::Check(lastWord, Guest::Read32(Guest::Base, base + (cursor + 2) * 4),
                             cursor + 3 < dwords ? Guest::Read32(Guest::Base, base + (cursor + 3) * 4) : 0);
                     if (TraceConstants()) printf("const: draw indexed vs_%016llx\n", (unsigned long long)Render::CurrentProgramHash(false));
+                    const bool native = NativeState::Begin(lastWord);
                     DecodeDraw(
                         Guest::Read32(Guest::Base, base + (cursor + 2) * 4),
                         cursor + 3 < dwords
                             ? Guest::Read32(Guest::Base, base + (cursor + 3) * 4) : 0,
                         cursor + 4 < dwords
                             ? Guest::Read32(Guest::Base, base + (cursor + 4) * 4) : 0);
+                    if (native) NativeState::End();
                 }
                 else if (opcode == OpDrawIndx2 && cursor + 1 < dwords)
                 {
@@ -1802,7 +1813,9 @@ namespace
                     if (NativeState::Checking()) NativeState::Check(base + (cursor + count) * 4, w1, 0);
                     DumpDraw("DRAW_INDX_2", header, w1,
                         cursor + 2 < dwords ? Guest::Read32(Guest::Base, base + (cursor + 2) * 4) : 0);
+                    const bool native = NativeState::Begin(base + (cursor + count) * 4);
                     DecodeDraw(w1);
+                    if (native) NativeState::End();
                 }
                 else if (opcode == OpImLoadImmediate && cursor + 2 < dwords)
                 {

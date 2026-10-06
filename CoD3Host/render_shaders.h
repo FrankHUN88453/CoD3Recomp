@@ -38,6 +38,8 @@ namespace RenderShaders
     // A program uploaded by the stream: its words in guest memory. Returns
     // the program's handle, which becomes the stage's current one.
     Handle Loaded(bool pixel, const uint8_t* words, uint32_t sizeDwords);
+    // The same, with the microcode's hash (HashMicrocode) already known.
+    Handle Loaded(bool pixel, const uint8_t* words, uint32_t sizeDwords, uint64_t hash);
     Handle Current(bool pixel);
 
     enum class State : uint8_t { New, Translating, Compiling, Ready, Failed };

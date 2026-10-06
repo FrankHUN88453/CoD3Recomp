@@ -417,7 +417,12 @@ RenderState::Handle RenderShaders::Loaded(bool pixel, const uint8_t* words, uint
     if (sizeDwords == 0 || sizeDwords > 64 * 1024 || words == nullptr) return g_current[pixel ? 1 : 0];
     // The same program again, which the title does between most of its
     // draws: one hash and one compare.
-    const uint64_t hash = HashBytes(words, size_t(sizeDwords) * 4);
+    return Loaded(pixel, words, sizeDwords, HashBytes(words, size_t(sizeDwords) * 4));
+}
+
+RenderState::Handle RenderShaders::Loaded(bool pixel, const uint8_t* words, uint32_t sizeDwords, uint64_t hash)
+{
+    if (sizeDwords == 0 || sizeDwords > 64 * 1024 || words == nullptr) return g_current[pixel ? 1 : 0];
     const int stage = pixel ? 1 : 0;
     if (g_current[stage] != 0 && g_currentHash[stage] == hash) return g_current[stage];
     size_t slot;

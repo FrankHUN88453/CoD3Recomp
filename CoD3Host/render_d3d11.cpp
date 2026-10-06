@@ -1285,6 +1285,13 @@ void Render::ShaderLoaded(bool pixel, uint32_t guestAddress, uint32_t sizeDwords
         (unsigned long long)RenderShaders::HashOf(RenderShaders::Current(pixel)), sizeDwords, guestAddress, start);
 }
 
+void Render::UseProgram(bool pixel, uint32_t guestAddress, uint32_t sizeDwords, uint64_t hash)
+{
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    if (!Start()) return;
+    RenderShaders::Loaded(pixel, Guest::Base + guestAddress, sizeDwords, hash);
+}
+
 uint64_t Render::CurrentProgramHash(bool pixel)
 {
     return RenderShaders::HashOf(RenderShaders::Current(pixel));
