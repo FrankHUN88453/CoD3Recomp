@@ -69,6 +69,14 @@ namespace RenderStats
     void EndGpuFrame();   // before the present: the GPU's work for the frame ends here
     void EndFrame();
 
+    // COD3_GPU_DRAWS=1: a GPU timestamp after every draw, the time since
+    // the one before put down to the draw's key (its pixel program's hash;
+    // 1 a resolve, 3 a draw with no pixel program; what follows the last
+    // draw, the present's own work, to 2), and the keys that took the most
+    // printed every five seconds, in milliseconds a frame.
+    bool DrawsTimed();
+    void DrawTimed(uint64_t key);
+
     // The averages of the last second, for showing.
     struct Snapshot
     {

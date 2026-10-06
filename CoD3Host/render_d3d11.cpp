@@ -864,6 +864,11 @@ namespace
         // indices; the host adds it as the base vertex.
         if (command.indexed) g_context->DrawIndexed(command.indexCount, command.indexRingOffset / (command.indices32 ? 4 : 2), command.baseVertex);
         else g_context->Draw(command.indexCount, UINT(command.baseVertex));
+        // The key: the pixel program's hash (3 for none), and the target's
+        // width in the top 16 bits, to see which targets the time goes to.
+        if (RenderStats::DrawsTimed())
+            RenderStats::DrawTimed(((command.ps != nullptr ? RenderShaders::HashOf(command.pixelShader) : 3) & 0x0000FFFFFFFFFFFFull) |
+                                   (uint64_t(command.targetWidth & 0xFFFF) << 48));
 
         // COD3_D3DDRAWDUMPPS=hex: only after the draws whose pixel program's
         // hash starts so, for watching one kind of draw over many frames.
@@ -996,6 +1001,7 @@ namespace
 
     void ExecuteResolve(const RenderState::ResolveCommand& command)
     {
+        struct ResolveStamp { ~ResolveStamp() { RenderStats::DrawTimed(1); } } resolveStamp;
         if (command.bindingsLost) ForgetBindings();
         if (command.copy)
         {

@@ -6,7 +6,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <mutex>
+#include <vector>
 
 #include <d3d11_1.h>
 #include <intrin.h>
@@ -60,11 +62,89 @@ namespace
     }
 }
 
+namespace
+{
+    // The draws' timestamps, a ring of four frames read back four frames on.
+    constexpr uint32_t DrawStamps = 8192;
+    struct DrawFrame
+    {
+        ComPtr<ID3D11Query> disjoint;
+        std::vector<ComPtr<ID3D11Query>> stamps;
+        std::vector<uint64_t> keys;
+        uint32_t count = 0;
+        bool issued = false;
+    };
+    DrawFrame g_drawFrames[4];
+    uint32_t g_drawFrame = 0;
+    bool g_drawsTimed = false;
+    struct DrawCost { double milliseconds = 0; uint64_t draws = 0; };
+    std::map<uint64_t, DrawCost> g_drawCosts;
+    uint32_t g_drawCostFrames = 0;
+    std::chrono::steady_clock::time_point g_drawCostsSince = std::chrono::steady_clock::now();
+
+    void ReadDraws(DrawFrame& frame)
+    {
+        if (!frame.issued) return;
+        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjoint{};
+        if (g_context->GetData(frame.disjoint.Get(), &disjoint, sizeof(disjoint), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) return;
+        std::vector<UINT64> times(frame.count);
+        for (uint32_t i = 0; i < frame.count; i++)
+            if (g_context->GetData(frame.stamps[i].Get(), &times[i], sizeof(UINT64), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) return;
+        frame.issued = false;
+        if (disjoint.Disjoint || disjoint.Frequency == 0) return;
+        for (uint32_t i = 1; i < frame.count; i++)
+        {
+            if (times[i] < times[i - 1]) continue;
+            DrawCost& cost = g_drawCosts[frame.keys[i]];
+            cost.milliseconds += double(times[i] - times[i - 1]) * 1000.0 / double(disjoint.Frequency);
+            cost.draws++;
+        }
+        g_drawCostFrames++;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - g_drawCostsSince < std::chrono::seconds(5) || g_drawCostFrames == 0) return;
+        std::vector<std::pair<uint64_t, DrawCost>> list(g_drawCosts.begin(), g_drawCosts.end());
+        std::sort(list.begin(), list.end(), [](const auto& a, const auto& b) { return a.second.milliseconds > b.second.milliseconds; });
+        double total = 0;
+        for (const auto& [key, cost] : list) total += cost.milliseconds;
+        const double frames = double(g_drawCostFrames);
+        printf("gpu draws: %.2f ms a frame over %u frames; the most:\n", total / frames, g_drawCostFrames);
+        int shown = 0;
+        for (const auto& [key, cost] : list)
+        {
+            if (shown++ >= 30) break;
+            char name[32];
+            if (key == 1) snprintf(name, sizeof(name), "resolves");
+            else if (key == 2) snprintf(name, sizeof(name), "present and after");
+            else if ((key & 0x0000FFFFFFFFFFFFull) == 3) snprintf(name, sizeof(name), "no ps, %u wide", unsigned(key >> 48));
+            else snprintf(name, sizeof(name), "ps %012llx, %u wide", (unsigned long long)(key & 0x0000FFFFFFFFFFFFull), unsigned(key >> 48));
+            printf("  %-30s %6.3f ms (%4.1f%%), %6.1f draws a frame\n", name, cost.milliseconds / frames,
+                total > 0 ? 100.0 * cost.milliseconds / total : 0.0, double(cost.draws) / frames);
+        }
+        fflush(stdout);
+        g_drawCosts.clear();
+        g_drawCostFrames = 0;
+        g_drawCostsSince = now;
+    }
+}
+
 void RenderStats::Initialize(ID3D11Device* device, ID3D11DeviceContext* context)
 {
     g_device = device;
     g_context = context;
     g_gpuProfile = getenv("COD3_GPU_PROFILE") != nullptr;
+    g_drawsTimed = getenv("COD3_GPU_DRAWS") != nullptr;
+    for (DrawFrame& frame : g_drawFrames)
+    {
+        if (!g_drawsTimed) break;
+        D3D11_QUERY_DESC desc{};
+        desc.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
+        device->CreateQuery(&desc, &frame.disjoint);
+        desc.Query = D3D11_QUERY_TIMESTAMP;
+        frame.stamps.resize(DrawStamps);
+        frame.keys.resize(DrawStamps);
+        for (auto& stamp : frame.stamps) device->CreateQuery(&desc, &stamp);
+        if (!frame.disjoint) g_drawsTimed = false;
+    }
     if (!g_gpuProfile) return;
     for (GpuFrame& frame : g_gpu)
     {
@@ -79,6 +159,18 @@ void RenderStats::Initialize(ID3D11Device* device, ID3D11DeviceContext* context)
 }
 
 RenderStats::Counters& RenderStats::Frame() { return g_frame; }
+
+bool RenderStats::DrawsTimed() { return g_drawsTimed; }
+
+void RenderStats::DrawTimed(uint64_t key)
+{
+    if (!g_drawsTimed) return;
+    DrawFrame& frame = g_drawFrames[g_drawFrame % 4];
+    if (!frame.issued || frame.count >= DrawStamps) return;
+    g_context->End(frame.stamps[frame.count].Get());
+    frame.keys[frame.count] = key;
+    frame.count++;
+}
 
 const char* RenderStats::SectionName(Section section)
 {
@@ -117,6 +209,18 @@ void RenderStats::Leave()
 void RenderStats::BeginFrame()
 {
     g_frameStarted = std::chrono::steady_clock::now();
+    if (g_drawsTimed)
+    {
+        DrawFrame& frame = g_drawFrames[g_drawFrame % 4];
+        ReadDraws(frame);
+        if (!frame.issued)
+        {
+            g_context->Begin(frame.disjoint.Get());
+            frame.issued = true;
+            frame.count = 0;
+            DrawTimed(0);   // the frame's start
+        }
+    }
     if (!g_gpuProfile) return;
     GpuFrame& frame = g_gpu[g_gpuFrame % 4];
     ReadGpu(frame);   // the one from four frames ago, done by now
@@ -129,6 +233,15 @@ void RenderStats::BeginFrame()
 
 void RenderStats::EndGpuFrame()
 {
+    if (g_drawsTimed)
+    {
+        DrawFrame& frame = g_drawFrames[g_drawFrame % 4];
+        if (frame.issued && frame.count > 0 && frame.keys[frame.count - 1] != 2)
+        {
+            DrawTimed(2);
+            g_context->End(frame.disjoint.Get());
+        }
+    }
     if (!g_gpuProfile) return;
     GpuFrame& frame = g_gpu[g_gpuFrame % 4];
     if (!frame.issued || frame.ended) return;
@@ -140,11 +253,9 @@ void RenderStats::EndGpuFrame()
 void RenderStats::EndFrame()
 {
     const auto now = std::chrono::steady_clock::now();
-    if (g_gpuProfile)
-    {
-        EndGpuFrame();
-        g_gpuFrame++;
-    }
+    if (g_gpuProfile || g_drawsTimed) EndGpuFrame();
+    if (g_gpuProfile) g_gpuFrame++;
+    if (g_drawsTimed) g_drawFrame++;
     g_frames++;
     g_secondFrames++;
     g_secondFrameMilliseconds += std::chrono::duration<double, std::milli>(now - g_frameStarted).count();
