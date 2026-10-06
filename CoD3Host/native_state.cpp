@@ -65,17 +65,21 @@ namespace
     };
     constexpr uint32_t ShadowWords = 16 + 3 + 21 + 5 + 12 + 21 + 38 + 8 + 192 + 1024 + 1024 + 40;
 
-    // Where a register is in a record's copy; ShadowWords for none.
-    uint32_t CopyIndex(uint32_t reg)
+    // Where a register is in a record's copy; ShadowWords for none. A table
+    // by register: the stream writes thousands of registers a frame.
+    struct CopyIndexTable
     {
-        uint32_t at = 0;
-        for (const Block& block : Blocks)
+        uint16_t at[0x5000];
+        CopyIndexTable()
         {
-            if (reg >= block.first && reg < block.first + block.count) return at + reg - block.first;
-            at += block.count;
+            for (uint32_t reg = 0; reg < 0x5000; reg++) at[reg] = uint16_t(ShadowWords);
+            uint32_t next = 0;
+            for (const Block& block : Blocks)
+                for (uint32_t i = 0; i < block.count; i++) at[block.first + i] = uint16_t(next++);
         }
-        return ShadowWords;
-    }
+    };
+    const CopyIndexTable g_copyIndex;
+    inline uint32_t CopyIndex(uint32_t reg) { return reg < 0x5000 ? g_copyIndex.at[reg] : ShadowWords; }
 
     constexpr uint32_t DeviceWrite = 40, DeviceSegmentEnd = 44;
 
@@ -149,9 +153,16 @@ namespace
         uint32_t binMask = ~0u;              // SET_BIN_MASK_LO's last
         uint32_t registers[ShadowWords];
         bool known[ShadowWords] = {};
+        uint32_t unknown = ShadowWords;      // how many are not known yet
         uint32_t constantMemory[512] = {};   // per float4 (vertex, then pixel): the physical address it is loaded from, 0 none
+        uint32_t fromMemory = 0;             // how many of those are not nought
         Program vertex[2], pixel[2];         // by pass
-        std::map<uint32_t, uint32_t> passRegisters[2];   // registers a predicated packet set for one pass
+        // Registers a predicated packet set for one pass: by copy index, the
+        // passes (bit 0 colour, 1 Z) and the values; and the indices that
+        // have any, perhaps more than once and some cleared since.
+        uint8_t passMask[ShadowWords] = {};
+        uint32_t passValue[2][ShadowWords];
+        std::vector<uint16_t> passList;
     };
     std::mutex g_modelMutex;
     std::unordered_map<uint32_t, std::unique_ptr<DeviceModel>> g_devices;
@@ -265,29 +276,23 @@ namespace
 
     // A record for one draw packet, from the device's model as it is at the
     // packet, the shadows standing in for what it does not know.
-    void Keep(uint8_t* base, uint32_t device, uint32_t lastWord, uint32_t initiator, const DeviceModel& model)
+    void Keep(uint8_t* base, uint32_t device, uint32_t lastWord, uint32_t initiator, DeviceModel& model)
     {
-        Record record;
-        record.lastWordValue = Guest::Read32(base, lastWord);
-        record.initiator = initiator;
-        record.device = device;
-        uint32_t at = 0, unknown = 0;
-        for (const Block& block : Blocks)
-            for (uint32_t i = 0; i < block.count; i++, at++)
-            {
-                if (model.known[at]) record.registers[at] = model.registers[at];
-                else { record.registers[at] = Guest::Read32(base, device + block.offset + i * 4); unknown++; }
-            }
-        for (uint32_t i = 0; i < 512; i++)
-            if (model.constantMemory[i] != 0) record.constantMemory.emplace_back(uint16_t(i), model.constantMemory[i]);
-        for (uint32_t pass = 0; pass < 2; pass++)
+        const uint32_t key = Physical(lastWord);
+        // The pass overrides still in force, the list kept short.
+        if (!model.passList.empty())
         {
-            record.vertex[pass] = model.vertex[pass];
-            record.pixel[pass] = model.pixel[pass];
-            record.passRegisters[pass].assign(model.passRegisters[pass].begin(), model.passRegisters[pass].end());
+            size_t kept = 0;
+            for (uint16_t at : model.passList)
+                if ((model.passMask[at] & 3) != 0 && (model.passMask[at] & 0x80) == 0)
+                {
+                    model.passMask[at] |= 0x80;   // listed once
+                    model.passList[kept++] = at;
+                }
+            model.passList.resize(kept);
+            for (uint16_t at : model.passList) model.passMask[at] &= 0x7F;
         }
 
-        const uint32_t key = Physical(lastWord);
         std::lock_guard<std::mutex> lock(g_mutex);
         if (!g_records)
         {
@@ -300,7 +305,45 @@ namespace
             auto it = g_byKey.find(g_keys[slot]);
             if (it != g_byKey.end() && it->second == slot) g_byKey.erase(it);
         }
-        g_records[slot] = std::move(record);
+        Record& record = g_records[slot];
+        record.lastWordValue = Guest::Read32(base, lastWord);
+        record.initiator = initiator;
+        record.device = device;
+        uint32_t unknown = 0;
+        if (model.unknown == 0) memcpy(record.registers, model.registers, sizeof(record.registers));
+        else
+        {
+            uint32_t at = 0;
+            for (const Block& block : Blocks)
+                for (uint32_t i = 0; i < block.count; i++, at++)
+                {
+                    if (model.known[at]) record.registers[at] = model.registers[at];
+                    else { record.registers[at] = Guest::Read32(base, device + block.offset + i * 4); unknown++; }
+                }
+        }
+        record.constantMemory.clear();
+        if (model.fromMemory != 0)
+            for (uint32_t i = 0; i < 512; i++)
+                if (model.constantMemory[i] != 0) record.constantMemory.emplace_back(uint16_t(i), model.constantMemory[i]);
+        for (uint32_t pass = 0; pass < 2; pass++)
+        {
+            record.vertex[pass] = model.vertex[pass];
+            record.pixel[pass] = model.pixel[pass];
+            record.passRegisters[pass].clear();
+        }
+        static const struct RegisterOf
+        {
+            uint16_t reg[ShadowWords];
+            RegisterOf()
+            {
+                uint32_t next = 0;
+                for (const Block& block : Blocks)
+                    for (uint32_t i = 0; i < block.count; i++) reg[next++] = uint16_t(block.first + i);
+            }
+        } registerOf;
+        for (uint16_t at : model.passList)
+            for (uint32_t pass = 0; pass < 2; pass++)
+                if (model.passMask[at] & (1u << pass)) record.passRegisters[pass].emplace_back(registerOf.reg[at], model.passValue[pass][at]);
         g_keys[slot] = key;
         g_byKey[key] = slot;
         g_tally.recorded++;
@@ -315,19 +358,26 @@ namespace
     }
 
     // A register written, in the passes given.
-    void Written(DeviceModel& model, uint32_t reg, uint32_t value, uint32_t passes)
+    inline void Written(DeviceModel& model, uint32_t reg, uint32_t value, uint32_t passes)
     {
+        const uint32_t at = CopyIndex(reg);
+        if (at >= ShadowWords) return;
         if (passes == 3)
         {
-            const uint32_t at = CopyIndex(reg);
-            if (at < ShadowWords) { model.registers[at] = value; model.known[at] = true; }
-            model.passRegisters[0].erase(reg);
-            model.passRegisters[1].erase(reg);
-            if (reg >= 0x4000 && reg < 0x4800) model.constantMemory[(reg - 0x4000) >> 2] = 0;
+            model.registers[at] = value;
+            if (!model.known[at]) { model.known[at] = true; model.unknown--; }
+            model.passMask[at] = 0;
+            if (reg >= 0x4000 && reg < 0x4800)
+            {
+                uint32_t& memory = model.constantMemory[(reg - 0x4000) >> 2];
+                if (memory != 0) { memory = 0; model.fromMemory--; }
+            }
             return;
         }
         for (uint32_t pass = 0; pass < 2; pass++)
-            if (passes & (1u << pass)) model.passRegisters[pass][reg] = value;
+            if (passes & (1u << pass)) model.passValue[pass][at] = value;
+        if (model.passMask[at] == 0) model.passList.push_back(uint16_t(at));
+        model.passMask[at] |= uint8_t(passes & 3);
     }
 
     // The device's packets after model.scanned up to `last` (the last word
@@ -369,7 +419,12 @@ namespace
                     {
                         const uint32_t address = word(0) & ~3u, dwords = word(2) & 0xFFF;
                         for (uint32_t i = 0; i < dwords; i += 4)
-                            if (index + i < 0x4800) model.constantMemory[(index + i - 0x4000) >> 2] = address + i * 4;
+                            if (index + i < 0x4800)
+                            {
+                                uint32_t& memory = model.constantMemory[(index + i - 0x4000) >> 2];
+                                if (memory == 0) model.fromMemory++;
+                                memory = address + i * 4;
+                            }
                     }
                 }
                 else if (opcode == OpImLoad || opcode == OpImLoadImmediate)
