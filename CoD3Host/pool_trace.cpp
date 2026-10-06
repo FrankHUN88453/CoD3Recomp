@@ -152,17 +152,33 @@ PPC_FUNC(sub_822F1E68)
 
 // sub_822F2818(device): the current segment is kicked to the GPU.
 extern "C" PPC_FUNC(__imp__sub_822F2818);
+// With the decompiled code (COD3_HAVE_DECOMP) the kick is its decompiled
+// body, decomp_sub_822F2818.
+#ifdef COD3_HAVE_DECOMP
+PPC_FUNC(decomp_sub_822F2818);
+#define COD3_KICK decomp_sub_822F2818
+#else
+#define COD3_KICK __imp__sub_822F2818
+#endif
 PPC_FUNC(sub_822F2818)
 {
     const uint32_t device = ctx.r3.u32;
     g_kicks.fetch_add(1, std::memory_order_relaxed);
     Timeline::Mark("kick", Guest::Read32(base, device + 40), uint32_t(ctx.lr));
     Line("kick", device, base, uint32_t(ctx.lr), 0);
-    __imp__sub_822F2818(ctx, base);
+    COD3_KICK(ctx, base);
 }
 
 // sub_822F1B78(device, flags, &size): a segment is taken from the pool.
 extern "C" PPC_FUNC(__imp__sub_822F1B78);
+// With the decompiled code (COD3_HAVE_DECOMP) the pool allocation is its decompiled
+// body, decomp_sub_822F1B78.
+#ifdef COD3_HAVE_DECOMP
+PPC_FUNC(decomp_sub_822F1B78);
+#define COD3_POOL_TAKE decomp_sub_822F1B78
+#else
+#define COD3_POOL_TAKE __imp__sub_822F1B78
+#endif
 PPC_FUNC(sub_822F1B78)
 {
     const uint32_t device = ctx.r3.u32;
@@ -171,7 +187,7 @@ PPC_FUNC(sub_822F1B78)
     const uint32_t wanted = Guest::Read32(base, sizeAt);
     Line("alloc", device, base, flags, wanted);
     Timeline::Mark("pool alloc", flags, wanted);
-    __imp__sub_822F1B78(ctx, base);
+    COD3_POOL_TAKE(ctx, base);
     Line("allocated", device, base, ctx.r3.u32, Guest::Read32(base, sizeAt));
     Timeline::Mark("pool got", ctx.r3.u32, Guest::Read32(base, sizeAt));
 }
