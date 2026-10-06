@@ -237,9 +237,11 @@ namespace
         "float4 main() : SV_Target { uint h = flags.w; return float4(float(h & 255u) / 255.0, float((h >> 8) & 255u) / 255.0, float((h >> 16) & 255u) / 255.0, 1.0); }\n";
 
     // The depth only mode's draws, which run no pixel program on the console:
-    // their depth cut to the console's precision as the title's own pixel
-    // programs cut theirs (xenos_hlsl.cpp, COD3_DEPTH24), so a colour pass
-    // tests against a Z pass in the same steps.
+    // with COD3_DEPTHONLYPS=1 their depth is cut to the console's precision
+    // as the title's own pixel programs cut theirs (xenos_hlsl.cpp). Off by
+    // default: the frame came out the same without it (the colour pass does
+    // not test against the Z pass's depth), and at 200% with MSAA 4x the
+    // depth only draws took 0.3 ms a frame more with it.
     std::string DepthOnlySource()
     {
         return std::string(XenosHlsl::Depth20e4Source) +
@@ -284,7 +286,7 @@ namespace
         if (getenv("COD3_D3DFLAT") != nullptr)
             if (ComPtr<ID3DBlob> code = CompileBuiltIn(FlatSource, "main", "ps_5_0", "flat program"))
                 g_device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &g_flatPixelShader);
-        if (XenosHlsl::Depth24())
+        if (XenosHlsl::Depth24() && getenv("COD3_DEPTHONLYPS") != nullptr)
             if (ComPtr<ID3DBlob> code = CompileBuiltIn(DepthOnlySource().c_str(), "main", "ps_5_0", "depth only program"))
                 g_device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &g_depthOnlyPixelShader);
         D3D11_SAMPLER_DESC sampler{};
