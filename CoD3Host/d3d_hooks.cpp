@@ -10,6 +10,7 @@
 #include "kernel.h"
 #include "d3d_hooks.h"
 #include "render_shaders.h"
+#include "native_state.h"
 
 #include <atomic>
 #include <chrono>
@@ -149,25 +150,74 @@ namespace
 // Neither is 822FB4B0 (the shader load), decompiled too, nor the swap
 // countdown (822F4A10) or the draw of nothing (822F6858).
 #ifndef COD3_HAVE_DECOMP
-COD3_OBSERVE(822F3620, DrawIndexed)
-COD3_OBSERVE(822F3EA0, DrawIndexedB)
-COD3_OBSERVE(822F4338, DrawIndexedC)
 COD3_OBSERVE(822EFFF0, RectangleEvent)
 COD3_OBSERVE(822F8590, IndirectB)
-COD3_OBSERVE(822F30F0, DrawD)
 COD3_OBSERVE(822F4A10, SwapCountdown)
 COD3_OBSERVE(822F6858, DrawImmediate)
 #endif
 COD3_OBSERVE(82154930, GameDraw)
-// With the decompiled draw (COD3_HAVE_DECOMP) this record is not kept: that
-// function takes the place this hook would.
-#ifndef COD3_HAVE_DECOMP
-extern "C" PPC_FUNC(__imp__sub_822F3A28);
+
+// The draws, observed in both builds: each one's packets are recorded for
+// the native state's check (native_state.cpp, COD3_NATIVECHECK=1). The body
+// is the decompiled function's with the decompiled library
+// (COD3_HAVE_DECOMP), the recompiled one's without.
+#ifdef COD3_HAVE_DECOMP
+#define COD3_DRAW_BODY(address) decomp_sub_##address
+#define COD3_DRAW_DECLARE(address) PPC_FUNC(decomp_sub_##address)
+#else
+#define COD3_DRAW_BODY(address) __imp__sub_##address
+#define COD3_DRAW_DECLARE(address) extern "C" PPC_FUNC(__imp__sub_##address)
+#endif
+
+#define COD3_DRAW(address, call)                                                       \
+    COD3_DRAW_DECLARE(address);                                                        \
+    PPC_FUNC(sub_##address)                                                            \
+    {                                                                                  \
+        const uint32_t device = ctx.r3.u32;                                            \
+        const uint32_t before = Guest::Read32(base, device + 40);                      \
+        Count(call, device);                                                           \
+        COD3_DRAW_BODY(address)(ctx, base);                                            \
+        NativeState::Recorded(base, device, before, Guest::Read32(base, device + 40)); \
+    }
+
+COD3_DRAW(822F3620, DrawIndexed)
+COD3_DRAW(822F3EA0, DrawIndexedB)
+COD3_DRAW(822F4338, DrawIndexedC)
+
+// BeginVertices: its draw is written but the write pointer it leaves at
+// +13076, for EndVertices to make the device's; none when there was no
+// room for the vertices.
+COD3_DRAW_DECLARE(822F30F0);
+PPC_FUNC(sub_822F30F0)
+{
+    const uint32_t device = ctx.r3.u32;
+    const uint32_t before = Guest::Read32(base, device + 40);
+    Count(DrawD, device);
+    COD3_DRAW_BODY(822F30F0)(ctx, base);
+    if (ctx.r3.u32 != 0) NativeState::Recorded(base, device, before, Guest::Read32(base, device + 13076));
+}
+
+// A new segment of the command buffer (sub_822F2678(device, words), after
+// a kick when the room asked for is more than a segment): the native
+// state goes on from there.
+COD3_DRAW_DECLARE(822F2678);
+PPC_FUNC(sub_822F2678)
+{
+    const uint32_t device = ctx.r3.u32;
+    COD3_DRAW_BODY(822F2678)(ctx, base);
+    NativeState::Kicked(base, device);
+}
+
+// DrawIndexedPrimitive, the most of the draws: with COD3_CALLPS=1 or
+// COD3_D3DHOOKS=1 its programs are kept too, for the first parity check.
+COD3_DRAW_DECLARE(822F3A28);
 PPC_FUNC(sub_822F3A28)
 {
     const uint32_t device = ctx.r3.u32, count = ctx.r7.u32;
+    const uint32_t before = Guest::Read32(base, device + 40);
     Count(DrawE, device);
-    __imp__sub_822F3A28(ctx, base);
+    COD3_DRAW_BODY(822F3A28)(ctx, base);
+    NativeState::Recorded(base, device, before, Guest::Read32(base, device + 40));
     if (!ObservingNow() && StreamPixelPrograms()) return;
     // The device's write pointer stands on the last word written: the
     // draw packet's last.
@@ -182,7 +232,6 @@ PPC_FUNC(sub_822F3A28)
     if (g_records.size() > 200000) g_records.clear();
     g_records[last] = record;
 }
-#endif
 
 bool D3dHooks::Observing() { return ObservingNow(); }
 

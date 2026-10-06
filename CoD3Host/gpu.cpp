@@ -30,6 +30,7 @@
 #include "render.h"
 #include "render_internal.h"
 #include "d3d_hooks.h"
+#include "native_state.h"
 #include "timeline.h"
 #include "window.h"
 
@@ -509,6 +510,12 @@ namespace
 
     // Which path a register write is coming by, for the report below.
     thread_local const char* t_writeSource = "unknown";
+
+    // For the native state's check (native_state.cpp): the packet being
+    // run (its header's physical address, 0 for none), and for each
+    // register the packet that wrote it last.
+    thread_local uint32_t t_packetAt = 0;
+    std::atomic<uint32_t> g_registerWriter[0x5000];
 
     // The display's colour table (the gamma ramp D3D sets), which the
     // console's display controller puts the picture through on its way
@@ -1012,6 +1019,11 @@ uint32_t Gpu::ReadRegister(uint32_t address)
 
 const std::atomic<uint32_t>* Gpu::RegisterFile() { return g_registerFile; }
 
+uint32_t Gpu::RegisterWriter(uint32_t index)
+{
+    return index < 0x5000 ? g_registerWriter[index].load(std::memory_order_relaxed) : 0;
+}
+
 bool Gpu::DisplayGamma(uint32_t table[256], uint64_t& version)
 {
     std::lock_guard<std::mutex> lock(g_lutMutex);
@@ -1071,6 +1083,8 @@ void Gpu::WriteRegister(uint32_t address, uint32_t value)
                 value = override.words[fileIndex - (0x4000 + uint32_t(override.index) * 4)];
         }
         g_registerFile[fileIndex].store(value, std::memory_order_relaxed);
+        if (fileIndex < 0x5000 && NativeState::Checking())
+            g_registerWriter[fileIndex].store(t_writeSource == nullptr || strstr(t_writeSource, "packet") == nullptr ? 0 : t_packetAt, std::memory_order_relaxed);
         if (fileIndex >= 0x4000 && fileIndex < 0x4400) NoteConstantWrite(0, fileIndex - 0x4000);
         else if (fileIndex >= 0x4400 && fileIndex < 0x4800) NoteConstantWrite(1, fileIndex - 0x4400);
         else if (fileIndex >= 0x4900 && fileIndex < 0x4930) NoteConstantWrite(2, fileIndex - 0x4900);
@@ -1262,6 +1276,7 @@ uint32_t Gpu::ProcessRing(uint32_t ringBase, uint32_t ringSizeDwords,
         if ((guard & 0xF) == 0 && OutOfTime()) break;
 
         const uint32_t header = ReadDword(cursor);
+        t_packetAt = ringBase + cursor * 4;
         const uint32_t type = header >> 30;
         uint32_t length = 1;
 
@@ -1339,12 +1354,16 @@ uint32_t Gpu::ProcessRing(uint32_t ringBase, uint32_t ringSizeDwords,
             {
             case OpDrawIndx:
                 local.draws++;
+                if (NativeState::Checking())
+                    NativeState::Check(ringBase + ((cursor + count) % ringSizeDwords) * 4, ReadDword(cursor + 2), ReadDword(cursor + 3));
                 if (TraceConstants()) printf("const: draw indexed vs_%016llx\n", (unsigned long long)Render::CurrentProgramHash(false));
                 DecodeDraw(ReadDword(cursor + 2), ReadDword(cursor + 3),
                            ReadDword(cursor + 4));
                 break;
             case OpDrawIndx2:
                 local.draws++;
+                if (NativeState::Checking())
+                    NativeState::Check(ringBase + ((cursor + count) % ringSizeDwords) * 4, ReadDword(cursor + 1), 0);
                 if (TraceConstants()) printf("const: draw vs_%016llx\n", (unsigned long long)Render::CurrentProgramHash(false));
                 DecodeDraw(ReadDword(cursor + 1));
                 break;
@@ -1562,6 +1581,7 @@ namespace
             ++stepped;
 
             const uint32_t header = Guest::Read32(Guest::Base, base + cursor * 4);
+            t_packetAt = base + cursor * 4;
             const uint32_t type = header >> 30;
             uint32_t length = 1;
 
@@ -1763,6 +1783,9 @@ namespace
                     }
                     if (D3dHooks::Observing())
                         D3dHooks::CheckDraw(lastWord, Render::CurrentProgramHash(false), Render::CurrentProgramHash(true), g_registerFile[0x2208].load(std::memory_order_relaxed));
+                    if (NativeState::Checking())
+                        NativeState::Check(lastWord, Guest::Read32(Guest::Base, base + (cursor + 2) * 4),
+                            cursor + 3 < dwords ? Guest::Read32(Guest::Base, base + (cursor + 3) * 4) : 0);
                     if (TraceConstants()) printf("const: draw indexed vs_%016llx\n", (unsigned long long)Render::CurrentProgramHash(false));
                     DecodeDraw(
                         Guest::Read32(Guest::Base, base + (cursor + 2) * 4),
@@ -1776,6 +1799,7 @@ namespace
                     local.draws++;
                     if (TraceConstants()) printf("const: draw vs_%016llx\n", (unsigned long long)Render::CurrentProgramHash(false));
                     const uint32_t w1 = Guest::Read32(Guest::Base, base + (cursor + 1) * 4);
+                    if (NativeState::Checking()) NativeState::Check(base + (cursor + count) * 4, w1, 0);
                     DumpDraw("DRAW_INDX_2", header, w1,
                         cursor + 2 < dwords ? Guest::Read32(Guest::Base, base + (cursor + 2) * 4) : 0);
                     DecodeDraw(w1);

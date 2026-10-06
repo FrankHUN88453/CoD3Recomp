@@ -13,6 +13,7 @@
 #include "scheduler.h"
 #include "pool_trace.h"
 #include "timeline.h"
+#include "native_state.h"
 
 #include <chrono>
 
@@ -174,7 +175,9 @@ PPC_FUNC(sub_822F2818)
     g_kicks.fetch_add(1, std::memory_order_relaxed);
     Timeline::Mark("kick", Guest::Read32(base, device + 40), uint32_t(ctx.lr));
     Line("kick", device, base, uint32_t(ctx.lr), 0);
+    NativeState::Kicking(base, device);
     COD3_KICK(ctx, base);
+    NativeState::Kicked(base, device);
 }
 
 // sub_822F1B78(device, flags, &size): a segment is taken from the pool.

@@ -1,0 +1,39 @@
+#pragma once
+
+#include <cstdint>
+
+// The native path's draw state (docs/native-d3d11-plan.md, N1): a draw's
+// state as the title's D3D device and its own command stream had it when
+// the draw call was made, not as the register file has it when the command
+// processor gets there.
+//
+// The device keeps a copy of every register it writes (the shadows the
+// dirty masks send out before each draw); what else its stream sets (the
+// title's own material blocks, constants from memory, the Z pass's own
+// state) is read from the stream as it is written (native_state.cpp).
+// Recorded keeps a draw's state by its packet's last word, and Check holds
+// it against the register file when the command processor reaches the
+// packet: the parity that has to hold before the draws can be made from
+// these records alone.
+namespace NativeState
+{
+    // COD3_NATIVECHECK=1: the draws' states are recorded and checked.
+    bool Checking();
+
+    // A draw call on `device` has written its packets after `before` (the
+    // device's write pointer before the call, on the last word written then)
+    // up to `after` (on the last word it wrote).
+    void Recorded(uint8_t* base, uint32_t device, uint32_t before, uint32_t after);
+
+    // The device's segment is about to be kicked (sub_822F2818): what is in
+    // it is read to its end. And it has been, or a new segment has been
+    // started (sub_822F2678): the model goes on from the write pointer in
+    // the next.
+    void Kicking(uint8_t* base, uint32_t device);
+    void Kicked(uint8_t* base, uint32_t device);
+
+    // The command processor reached a draw packet whose last word is at
+    // that physical address: its state from the device, held against the
+    // register file's.
+    void Check(uint32_t lastWordPhysical, uint32_t initiator, uint32_t indexBase);
+}

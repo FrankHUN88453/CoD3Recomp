@@ -40,6 +40,10 @@ namespace Gpu
     // pixel floats, 2 the booleans and loops.
     const std::atomic<uint32_t>* RegisterFile();
 
+    // With COD3_NATIVECHECK=1: the physical address of the packet that last
+    // wrote a register (0 when none did, or the CPU did).
+    uint32_t RegisterWriter(uint32_t index);
+
     // The display's colour table, as the title last wrote it through
     // DC_LUT_RW_INDEX and DC_LUT_30_COLOR: 256 entries of ten bits a
     // channel (blue low, red high), which the console applies to the

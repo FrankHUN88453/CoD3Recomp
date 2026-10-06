@@ -1,6 +1,6 @@
 # Terv: natív D3D11 a játék D3D-hívásainál, Xenos-emuláció nélkül
 
-*2026-09-30. Állapot: F0 (feltérképezés) folyamatban, F1 (megfigyelő horgok) elkezdve.*
+*2026-09-30, frissítve 2026-10-06. Állapot: F0 és F1 kész; a D3D könyvtár visszafejtve (privát CoD3Decomp); N1 (a rajzolás állapota a rajzhíváskor, paritással) kész, következik N2.*
 
 ## Mi a cél
 
@@ -97,6 +97,53 @@ egyszerre, és a sorrendet a visszajátszó szál adja meg. Ezért:
   mélység/szín menetet a rögzített menetjelölés szerint szűrve;
 - a mai végrehajtó (`render_d3d11.cpp`) megmarad, csak regiszterek helyett
   natív listát kap.
+
+## N1 eredménye: a rajzolás állapota a rajzhíváskor (2026-10-06)
+
+A dekompilált D3D könyvtárból ismert az eszköz szerkezete: minden regiszter
+árnyékmásolata, a piszkos maszkok, a konstansok és a shader-objektumok
+helye (`CoD3Host/native_state.cpp` fejléce). Az első kérdés az volt, hogy
+egy rajzolás teljes állapota megvan-e már a rajzhívás pillanatában, vagy
+csak a GPU regiszterfájljából, a végrehajtáskor rakható össze.
+
+**Amit a mérés megmutatott** (`COD3_NATIVECHECK=1`):
+
+- Az árnyékok önmagukban **nem elegendőek**. A játék saját renderelője az
+  anyagok állapotát előre összerakott csomagblokkként maga másolja a
+  parancspufferbe (`sub_821563A8` és társai, a helyet `sub_82156B38` kéri),
+  és törli a megfelelő piszkos biteket; az árnyékok ilyenkor régi értéket
+  tartanak. A modellmátrixok SET_CONSTANT-tal mennek, a D3D által adott, a
+  hívó által kitöltött helyre (`sub_822F8D38`); más konstansok memóriából
+  (LOAD_ALU_CONSTANT).
+- A csempés rögzítésnél a Z-menet saját módot, programvezérlést és
+  csak-pozíciós vertex-programot kap, predikáltan.
+
+**A megoldás:** eszközönként a saját parancsfolyam modellje, sorrendben
+olvasva: minden rajzhívásnál a rajzolásig, minden szegmensváltásnál
+(`sub_822F2818` kick, `sub_822F2678` új szegmens) a szegmens végéig. Ez a
+modell tudja minden regiszter utolsó értékét, float4 konstansonként, hogy
+memóriából jön-e, és menetenként a programokat és a predikált írásokat.
+Minden rajzcsomaghoz rekord készül (a csomag utolsó szava a kulcs), és a
+`gpu.cpp` a végrehajtáskor összeveti a regiszterfájllal.
+
+**Eredmény (Saint-Lô, 75 s):** az indulás első 25 rajzolását kivéve
+minden végrehajtott rajzolásnak van rekordja, és mind a ~2400 regiszterszó
+(állapotblokkok, fetch-, float-, bool- és loop-konstansok), valamint a
+vertex- és a pixelprogram **mindkét menetben egyezik**: kb. 390 000
+rajzolás 5 másodpercenként, **0 eltérés**. Más pufferből nem szivárog át
+állapot; a rögzített folyam önmagában teljes.
+
+**Ami ebből a tervre következik:**
+
+- A játék saját anyagblokkjai PM4-csomagok, ezért egy szűk
+  csomagolvasó (regiszterírások, SET_CONSTANT, LOAD_ALU_CONSTANT, IM_LOAD,
+  bin mask) a rögzítéskor megmarad – ahogy a shaderfordító is. Ez nem
+  GPU-emuláció: nincs benne végrehajtás, kerítés, várakozás, gyűrű.
+- **N2:** a renderelő a rekordból rajzol (`COD3_NATIVE=1`), nem a
+  regiszterfájlból; a kép nem változhat (a paritás miatt).
+- **N3:** a rekordok sorrendje natív listákban (szegmensenként, a
+  visszajátszásnál menetenként), a végrehajtó ezeket futtatja, a PM4-út a
+  rajzolásokhoz már nem kell.
 
 ## Felépítés
 

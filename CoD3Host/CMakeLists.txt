@@ -71,6 +71,7 @@ add_executable(CoD3 WIN32
     "parallel.cpp"
     "title_fixes.cpp"
     "d3d_hooks.cpp"
+    "native_state.cpp"
     "watchdog.cpp"
     "modules.cpp"
     "coroutines.cpp"
