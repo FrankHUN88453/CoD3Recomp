@@ -121,12 +121,20 @@ void PoolTrace::Waited(uint64_t nanoseconds)
 }
 
 // sub_82302A90(queue): the replaying thread's run over its queue, timed.
+// With the decompiled code (COD3_HAVE_DECOMP) the run is its decompiled
+// body, decomp_sub_82302A90.
 extern "C" PPC_FUNC(__imp__sub_82302A90);
+#ifdef COD3_HAVE_DECOMP
+PPC_FUNC(decomp_sub_82302A90);
+#define COD3_REPLAY_RUN decomp_sub_82302A90
+#else
+#define COD3_REPLAY_RUN __imp__sub_82302A90
+#endif
 PPC_FUNC(sub_82302A90)
 {
     const int64_t started = Now();
     Timeline::Mark("replay", ctx.r3.u32, ctx.r4.u32);
-    __imp__sub_82302A90(ctx, base);
+    COD3_REPLAY_RUN(ctx, base);
     Timeline::Mark("replayed", ctx.r3.u32);
     g_replayNanoseconds.fetch_add(uint64_t(Now() - started), std::memory_order_relaxed);
     g_replayRuns.fetch_add(1, std::memory_order_relaxed);
