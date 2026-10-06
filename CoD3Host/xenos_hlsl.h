@@ -54,4 +54,9 @@ namespace XenosHlsl
     // A number that changes whenever the translation would: the disk cache
     // of compiled programs is keyed by it.
     uint64_t Version();
+
+    // Whether pixel depth is cut to the console's 24 bit float precision
+    // (COD3_DEPTH24, on unless 0), and the HLSL function that does it.
+    bool Depth24();
+    extern const char* const Depth20e4Source;
 }

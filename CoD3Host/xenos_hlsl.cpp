@@ -1002,12 +1002,26 @@ namespace
     };
 }
 
+bool XenosHlsl::Depth24()
+{
+    static const bool on = []() { const char* t = getenv("COD3_DEPTH24"); return t == nullptr || t[0] != '0'; }();
+    return on;
+}
+
+const char* const XenosHlsl::Depth20e4Source =
+    "float Depth20e4(float z) {\n"
+    "    uint f = asuint(z);\n"
+    "    if (f < 0x38800000u) return floor(z * 17179869184.0) * (1.0 / 17179869184.0);\n"
+    "    return asfloat(f & 0xFFFFFFF8u);\n"
+    "}\n";
+
 uint64_t XenosHlsl::Version()
 {
     // A number that changes when the translation would, or when one of the
     // environment knobs that shape the HLSL is set: the disk cache keyed by
     // it then starts afresh rather than serving the other translation.
     std::string text = "xenos_hlsl 2026-10-06 bswap packed flat3d fetch offsets alu pairs read first pixel params gradients dx dy depth offset pixel centre";
+    text += Depth24() ? " depth 20e4 centroid" : " depth 32";
     if (const char* lanes = getenv("COD3_SCALARLANES")) { text += " lanes="; text += lanes; }
     if (const char* show = getenv("COD3_D3DSHOW")) { text += " show="; text += show; }
     if (const char* sign = getenv("COD3_D3DSHOWSIGN")) { text += " sign="; text += sign; }
@@ -1102,13 +1116,36 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
             "        adjustComponent(v, (textureAdjustment[slot].x >> 9) & 7u, (textureAdjustment[slot].y >> 6) & 3u));\n"
             "}\n";
 
+    // The depth as the console keeps it: its depth buffer is 24 bit float
+    // (20 bits of mantissa, 4 of exponent, D24FS8), the host's 32 bit. The
+    // title leans on the coarser one: two surfaces it draws nearly on top of
+    // each other (a distant hillside and its lower detail, the Z pass's
+    // programs and the colour pass's, which reach the same position by
+    // other roads) come out the same on the console, and the greater or
+    // equal test lets the later one through; on the host the last bits
+    // decide, and wedges of the wrong surface showed and flickered as the
+    // view moved (the hill behind the tanks in Saint-Lo's opening). So each
+    // pixel's depth is cut to the console's precision: the 32 bit float's
+    // last three mantissa bits dropped, and below 2^-14 (the 24 bit
+    // format's denormals) steps of 2^-34. Cut down, never up, so the
+    // output can be declared no greater than the rasterised depth and the
+    // early depth test keeps working for the title's greater or equal
+    // tests. COD3_DEPTH24=0 leaves the host's precision, to compare.
+    // The draws that run no pixel program (the depth only mode) get the same
+    // cut from a program of their own (render_d3d11.cpp).
+    const bool depth24 = XenosHlsl::Depth24();
     if (pixel)
     {
-        hlsl += "struct Input { float4 position : SV_Position;";
+        const bool cutDepth = depth24 && !out.writesDepth;
+        if (cutDepth) hlsl += XenosHlsl::Depth20e4Source;
+        // A depth declared no greater than the rasterised one needs the
+        // position taken at the covered samples' centroid.
+        hlsl += cutDepth ? "struct Input { noperspective centroid float4 position : SV_Position;" : "struct Input { float4 position : SV_Position;";
         for (uint32_t i = 0; i < 16; i++) hlsl += Format(" float4 o%u : TEXCOORD%u;", i, i);
         hlsl += " bool front : SV_IsFrontFace; };\n";
         hlsl += "struct Output { float4 c0 : SV_Target0; float4 c1 : SV_Target1; float4 c2 : SV_Target2; float4 c3 : SV_Target3;";
         if (out.writesDepth) hlsl += " float depth : SV_Depth;";
+        else if (cutDepth) hlsl += " float depth : SV_DepthLessEqual;";
         hlsl += " };\n";
         hlsl += "Output main(Input input) {\n";
         hlsl += "    float4 r[32];\n";
@@ -1189,6 +1226,7 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
         else if (what != nullptr && what[0] == 'r') hlsl += Format("    oC0 = float4(abs(r[%u].xyz), 1.0);\n", unsigned(strtoul(what + 1, nullptr, 10)) & 31u);
         hlsl += "    output.c0 = oC0; output.c1 = oC1; output.c2 = oC2; output.c3 = oC3;\n";
         if (out.writesDepth) hlsl += "    output.depth = oDepth4.x;\n";
+        else if (depth24) hlsl += "    output.depth = Depth20e4(input.position.z);\n";
         hlsl += "    return output;\n}\n";
     }
     else

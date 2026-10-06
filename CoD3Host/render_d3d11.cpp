@@ -128,6 +128,7 @@ namespace
     ComPtr<ID3D11PixelShader> g_presentPixelShader;  // the frame, linear sampled
     ComPtr<ID3D11PixelShader> g_fxaaPixelShader;
     ComPtr<ID3D11PixelShader> g_flatPixelShader;
+    ComPtr<ID3D11PixelShader> g_depthOnlyPixelShader;   // the depth only mode's draws (COD3_DEPTH24)
     ComPtr<ID3D11SamplerState> g_pointSampler, g_linearSampler;
     ComPtr<ID3D11Buffer> g_quadConstants;
     ComPtr<ID3D11Texture1D> g_gammaTexture;           // the display's colour table (Gpu::DisplayGamma)
@@ -235,6 +236,17 @@ namespace
         "cbuffer DrawConstants : register(b2) { float4 viewportScale; float4 viewportOffset; float4 targetSize; uint4 flags; };\n"
         "float4 main() : SV_Target { uint h = flags.w; return float4(float(h & 255u) / 255.0, float((h >> 8) & 255u) / 255.0, float((h >> 16) & 255u) / 255.0, 1.0); }\n";
 
+    // The depth only mode's draws, which run no pixel program on the console:
+    // their depth cut to the console's precision as the title's own pixel
+    // programs cut theirs (xenos_hlsl.cpp, COD3_DEPTH24), so a colour pass
+    // tests against a Z pass in the same steps.
+    std::string DepthOnlySource()
+    {
+        return std::string(XenosHlsl::Depth20e4Source) +
+            "struct DepthIn { noperspective centroid float4 position : SV_Position; };\n"
+            "float main(DepthIn input) : SV_DepthLessEqual { return Depth20e4(input.position.z); }\n";
+    }
+
     ComPtr<ID3DBlob> CompileBuiltIn(const char* source, const char* entry, const char* profile, const char* what, const D3D_SHADER_MACRO* defines = nullptr)
     {
         ComPtr<ID3DBlob> code, errors;
@@ -272,6 +284,9 @@ namespace
         if (getenv("COD3_D3DFLAT") != nullptr)
             if (ComPtr<ID3DBlob> code = CompileBuiltIn(FlatSource, "main", "ps_5_0", "flat program"))
                 g_device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &g_flatPixelShader);
+        if (XenosHlsl::Depth24())
+            if (ComPtr<ID3DBlob> code = CompileBuiltIn(DepthOnlySource().c_str(), "main", "ps_5_0", "depth only program"))
+                g_device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &g_depthOnlyPixelShader);
         D3D11_SAMPLER_DESC sampler{};
         sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
         sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
@@ -792,7 +807,9 @@ namespace
             const bool flat = g_flatPixelShader && command.opaque;
             if (g_bound.pixelShader != command.pixelShader || g_bound.flat != flat)
             {
-                g_context->PSSetShader(flat ? g_flatPixelShader.Get() : command.ps, nullptr, 0);
+                ID3D11PixelShader* program = flat ? g_flatPixelShader.Get() : command.ps;
+                if (program == nullptr) program = g_depthOnlyPixelShader.Get();
+                g_context->PSSetShader(program, nullptr, 0);
                 g_bound.pixelShader = command.pixelShader;
                 g_bound.flat = flat;
                 RenderStats::Frame().shaderSwitches++;
