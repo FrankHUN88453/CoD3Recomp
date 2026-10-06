@@ -295,6 +295,9 @@ namespace
                     ImGui::Checkbox("Blur while aiming", &g_edit.aimBlur);
                     ImGui::SameLine();
                     ImGui::TextDisabled("(the game's depth of field down the sights)");
+                    ImGui::Checkbox("Console depth precision", &g_edit.consoleDepth);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(no flickering surfaces; costs frame rate with MSAA; after a restart)");
                     ImGui::Checkbox("Vertical sync (VSync)", &g_edit.vsync);
                     ImGui::Checkbox("Unlimited frame rate in levels", &g_edit.unlockFrameRate);
                     ImGui::SameLine();

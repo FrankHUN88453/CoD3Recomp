@@ -1,4 +1,5 @@
 #include "xenos_hlsl.h"
+#include "settings.h"
 
 #include <cctype>
 #include <cstdio>
@@ -1004,7 +1005,12 @@ namespace
 
 bool XenosHlsl::Depth24()
 {
-    static const bool on = []() { const char* t = getenv("COD3_DEPTH24"); return t == nullptr || t[0] != '0'; }();
+    // The setting (console_depth), read once: the programs are translated
+    // and cached for it. COD3_DEPTH24=0|1 overrides it.
+    static const bool on = []() {
+        if (const char* t = getenv("COD3_DEPTH24")) return t[0] != '0';
+        return Settings::Get().consoleDepth;
+    }();
     return on;
 }
 
