@@ -172,6 +172,20 @@ namespace
         }
     }
 
+    // The samples a target is drawn with: the frame's own (a pitch of 640
+    // and more: 1040 in a level, 1280 in the menus) with the chosen MSAA,
+    // the smaller targets with one. Those are the shadow maps (512 in a
+    // 560 pitch), the half size smoke (520 by 312, the same pitch) and the
+    // bloom's steps (256 in a 320 pitch): depth only or soft, MSAA shows
+    // nothing in them and at 200% it cost a shadow map 2585 by 2585 by 4
+    // samples of depth. A draw's colour and depth targets share its pitch,
+    // so they always agree. COD3_SMALLMSAA=1 multisamples them as before.
+    uint32_t SamplesFor(uint32_t pitch)
+    {
+        static const bool all = getenv("COD3_SMALLMSAA") != nullptr;
+        return all || pitch >= 640 ? g_samples : 1;
+    }
+
     void HostSize(uint32_t pitch, uint32_t rows, uint32_t& width, uint32_t& height)
     {
         width = std::max(1u, uint32_t(std::lround(double(pitch) * g_scale)));
@@ -813,7 +827,8 @@ RenderState::Handle RenderResources::ColorTargetFor(uint32_t colorInfo, uint32_t
     desc.MipLevels = 1;
     desc.ArraySize = 1;
     desc.Format = entry.target.format;
-    desc.SampleDesc.Count = g_samples;
+    const uint32_t samples = SamplesFor(pitch);
+    desc.SampleDesc.Count = samples;
     desc.Usage = D3D11_USAGE_DEFAULT;
     desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
     if (FAILED(g_device->CreateTexture2D(&desc, nullptr, &entry.texture))) return handle;
@@ -822,10 +837,10 @@ RenderState::Handle RenderResources::ColorTargetFor(uint32_t colorInfo, uint32_t
     entry.target.texture = entry.texture.Get();
     entry.target.view = entry.view.Get();
     entry.target.resource = entry.resource.Get();
-    entry.target.samples = g_samples;
-    g_resourceBytes += uint64_t(entry.target.width) * entry.target.height * bytesPerSample * g_samples;
+    entry.target.samples = samples;
+    g_resourceBytes += uint64_t(entry.target.width) * entry.target.height * bytesPerSample * samples;
     printf("render: colour target at tile %u, pitch %u, format %u: %ux%u, %u sample%s\n",
-        colorInfo & 0xFFF, pitch, format, entry.target.width, entry.target.height, g_samples, g_samples == 1 ? "" : "s");
+        colorInfo & 0xFFF, pitch, format, entry.target.width, entry.target.height, samples, samples == 1 ? "" : "s");
     fflush(stdout);
     return handle;
 }
@@ -851,25 +866,26 @@ RenderState::Handle RenderResources::DepthTargetFor(uint32_t depthInfo, uint32_t
     desc.MipLevels = 1;
     desc.ArraySize = 1;
     desc.Format = DXGI_FORMAT_R32G8X24_TYPELESS;
-    desc.SampleDesc.Count = g_samples;
+    const uint32_t samples = SamplesFor(pitch);
+    desc.SampleDesc.Count = samples;
     desc.Usage = D3D11_USAGE_DEFAULT;
     desc.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
     if (FAILED(g_device->CreateTexture2D(&desc, nullptr, &entry.texture))) return handle;
     D3D11_DEPTH_STENCIL_VIEW_DESC viewDesc{};
     viewDesc.Format = DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
-    viewDesc.ViewDimension = g_samples > 1 ? D3D11_DSV_DIMENSION_TEXTURE2DMS : D3D11_DSV_DIMENSION_TEXTURE2D;
+    viewDesc.ViewDimension = samples > 1 ? D3D11_DSV_DIMENSION_TEXTURE2DMS : D3D11_DSV_DIMENSION_TEXTURE2D;
     g_device->CreateDepthStencilView(entry.texture.Get(), &viewDesc, &entry.view);
     D3D11_SHADER_RESOURCE_VIEW_DESC resourceDesc{};
     resourceDesc.Format = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
-    resourceDesc.ViewDimension = g_samples > 1 ? D3D11_SRV_DIMENSION_TEXTURE2DMS : D3D11_SRV_DIMENSION_TEXTURE2D;
+    resourceDesc.ViewDimension = samples > 1 ? D3D11_SRV_DIMENSION_TEXTURE2DMS : D3D11_SRV_DIMENSION_TEXTURE2D;
     resourceDesc.Texture2D.MipLevels = 1;
     g_device->CreateShaderResourceView(entry.texture.Get(), &resourceDesc, &entry.resource);
     entry.target.texture = entry.texture.Get();
     entry.target.view = entry.view.Get();
     entry.target.resource = entry.resource.Get();
-    entry.target.samples = g_samples;
-    g_resourceBytes += uint64_t(entry.target.width) * entry.target.height * 8 * g_samples;
-    printf("render: depth target at tile %u, pitch %u: %ux%u, %u sample%s\n", depthInfo & 0xFFF, pitch, entry.target.width, entry.target.height, g_samples, g_samples == 1 ? "" : "s");
+    entry.target.samples = samples;
+    g_resourceBytes += uint64_t(entry.target.width) * entry.target.height * 8 * samples;
+    printf("render: depth target at tile %u, pitch %u: %ux%u, %u sample%s\n", depthInfo & 0xFFF, pitch, entry.target.width, entry.target.height, samples, samples == 1 ? "" : "s");
     fflush(stdout);
     return handle;
 }
