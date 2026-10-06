@@ -204,13 +204,21 @@ PPC_FUNC(sub_822F22C0)
 
 // sub_82302DB0(device) and sub_82302E88(device, ...): a recording begins and ends.
 extern "C" PPC_FUNC(__imp__sub_82302DB0);
+// With the decompiled code (COD3_HAVE_DECOMP) the beginning is its
+// decompiled body, decomp_sub_82302DB0.
+#ifdef COD3_HAVE_DECOMP
+PPC_FUNC(decomp_sub_82302DB0);
+#define COD3_RECORD_BEGIN decomp_sub_82302DB0
+#else
+#define COD3_RECORD_BEGIN __imp__sub_82302DB0
+#endif
 PPC_FUNC(sub_82302DB0)
 {
     const uint32_t device = ctx.r3.u32;
     g_recordings.fetch_add(1, std::memory_order_relaxed);
     Timeline::Mark("record", uint32_t(ctx.lr));
     Line("record", device, base, uint32_t(ctx.lr), 0);
-    __imp__sub_82302DB0(ctx, base);
+    COD3_RECORD_BEGIN(ctx, base);
     Line("recording", device, base, 0, 0);
 }
 
