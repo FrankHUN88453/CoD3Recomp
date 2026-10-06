@@ -145,6 +145,45 @@ rajzolás 5 másodpercenként, **0 eltérés**. Más pufferből nem szivárog á
   visszajátszásnál menetenként), a végrehajtó ezeket futtatja, a PM4-út a
   rajzolásokhoz már nem kell.
 
+## N2 és N3 eredménye: rajzolás a rekordokból, natív listák (2026-10-07)
+
+**N2** (`COD3_NATIVE=1`): a renderelő minden rajzolásnál a rekordot
+használja (`NativeState::Begin`): a regisztereket, a konstansokat és a
+programokat onnan, nem a regiszterfájlból. A kép ugyanaz. A PM4-értelmezés
+közben teljesen lefut, ezért ez önmagában lassabb az alapnál (erdő,
+1080p, MSAA nélkül: 69 fps az alap 91-gyel szemben); átmeneti lépcső.
+
+**N3** (`COD3_NATIVE=2`): a rögzítéskor beolvasott minden csomagról
+feljegyzés készül (a fejléce, és hogy a parancsfeldolgozónak még futtatnia
+kell-e). Nem kell futtatni azt, ami a rekordokban már benne van: a rajzolás
+regisztereibe eső írásokat, a konstansokat (SET_CONSTANT,
+LOAD_ALU_CONSTANT), a programbetöltéseket és a kitöltő csomagokat. Ami
+marad: a rajzolások (a rekordjukból), a várakozások, események,
+megszakítások, swapok, bin maszkok, és a rajzolás állapotán kívüli
+regiszterírások. A `gpu.cpp` egy indirekt puffert csomagról csomagra
+ellenőrizve futtat ebből: amíg a csomagok sorban, változatlanul követik
+egymást, és minden rajzolásnak van rekordja, csak a futtatandókat; a
+maradékot (a kick a beolvasás után még ír egy zárórekordot) a régi úton,
+ha abban nincs rajzolás; különben az egész puffert a régi úton.
+
+Két dolog kellett a sebességhez:
+
+- a csomagfeljegyzések lapos tömbökben vannak (64 KB-os lapok fizikai cím
+  szerint), nem fában: a fa másodpercenként milliónyi beszúrással a
+  játékot 37 fps-re lassította;
+- a rekord nem teljes 9,6 KB-os másolat, hanem 64 szavas darabokból áll:
+  egy rajzolás csak a megváltozott darabokat másolja egy 32 MB-os
+  gyűrűbe, a többin osztozik az előzőkkel; a renderelő is csak a
+  megváltozott darabokat írja át a képébe. A paritás így is teljes
+  (0 eltérés ~358 000 rajzolásban 5 másodpercenként).
+
+**Eredmény (erdő, 1080p, MSAA nélkül, vsync ki):** alap 91 fps, N3
+95–118 fps; a parancsfeldolgozó a csomagok ~15%-át futtatja, a többit a
+rekordok adják. A kép az alapéval azonos. Vigyázat a méréskor: a
+beállításokban `vsync = 1`, és 120 Hz-es kijelzőn a 8,3 ms-nál kicsit
+hosszabb képkockák 60 fps-re kvantálódnak – összehasonlításhoz
+`COD3_VSYNC=0`.
+
 ## Felépítés
 
 1. **Horog-réteg** (`d3d_hooks.cpp`): a könyvtár API-függvényeinek

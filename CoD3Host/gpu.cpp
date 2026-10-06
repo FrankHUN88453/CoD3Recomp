@@ -1569,6 +1569,29 @@ namespace
         // memory as commands.
         if (depth > 4 || base == 0 || dwords == 0 || dwords > (16u << 20)) return;
 
+        // COD3_NATIVE=2: a buffer a device's stream was read over runs from
+        // its native list (native_state.cpp): each packet still to run, on
+        // its own, the state between them left to the draws' records.
+        static thread_local bool t_native = false;
+        static thread_local std::vector<NativeState::Item> t_items;
+        if (!t_native && NativeState::Executing())
+        {
+            std::vector<NativeState::Item> items;
+            items.swap(t_items);
+            uint32_t covered = 0;
+            if (NativeState::NativeRun(base, dwords, items, covered))
+            {
+                t_native = true;
+                for (const NativeState::Item& item : items)
+                    ExecuteBuffer(Guest::PhysicalAlias(item.physical), item.dwords, local, depth);
+                if (covered < dwords) ExecuteBuffer(base + covered * 4, dwords - covered, local, depth);
+                t_native = false;
+                items.swap(t_items);
+                return;
+            }
+            items.swap(t_items);
+        }
+
         static std::atomic<int> announced{ 0 };
         if (announced.fetch_add(1) < 3)
         {
@@ -1792,7 +1815,7 @@ namespace
                     }
                     if (D3dHooks::Observing())
                         D3dHooks::CheckDraw(lastWord, Render::CurrentProgramHash(false), Render::CurrentProgramHash(true), g_registerFile[0x2208].load(std::memory_order_relaxed));
-                    if (NativeState::Checking())
+                    if (NativeState::Checking() && !NativeState::Executing())
                         NativeState::Check(lastWord, Guest::Read32(Guest::Base, base + (cursor + 2) * 4),
                             cursor + 3 < dwords ? Guest::Read32(Guest::Base, base + (cursor + 3) * 4) : 0);
                     if (TraceConstants()) printf("const: draw indexed vs_%016llx\n", (unsigned long long)Render::CurrentProgramHash(false));
@@ -1810,7 +1833,7 @@ namespace
                     local.draws++;
                     if (TraceConstants()) printf("const: draw vs_%016llx\n", (unsigned long long)Render::CurrentProgramHash(false));
                     const uint32_t w1 = Guest::Read32(Guest::Base, base + (cursor + 1) * 4);
-                    if (NativeState::Checking()) NativeState::Check(base + (cursor + count) * 4, w1, 0);
+                    if (NativeState::Checking() && !NativeState::Executing()) NativeState::Check(base + (cursor + count) * 4, w1, 0);
                     DumpDraw("DRAW_INDX_2", header, w1,
                         cursor + 2 < dwords ? Guest::Read32(Guest::Base, base + (cursor + 2) * 4) : 0);
                     const bool native = NativeState::Begin(base + (cursor + count) * 4);

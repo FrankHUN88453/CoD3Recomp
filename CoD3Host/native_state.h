@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <vector>
 
 // The native path's draw state (docs/native-d3d11-plan.md, N1): a draw's
 // state as the title's D3D device and its own command stream had it when
@@ -30,6 +31,22 @@ namespace NativeState
     // programs loaded) until End. False when the register file stays.
     bool Begin(uint32_t lastWordPhysical);
     void End();
+
+    // COD3_NATIVE=2 (N3): the buffers the devices' streams were read over
+    // are run from their native lists: only the packets the command
+    // processor still has to run (the draws, made from their records; the
+    // waits, events, interrupts, swaps, bin masks; register writes outside
+    // a draw's state), none of the state the records already hold.
+    bool Executing();
+
+    // The packets of an indirect buffer at that physical address that are
+    // still to run, in order: as far as its packets follow each other as a
+    // device's stream was read, each still as it was and each draw with its
+    // record. coveredDwords: how far that was; the rest (the end record the
+    // kick writes after what was read) is run as it is, unless it draws.
+    // False: the buffer is run whole.
+    struct Item { uint32_t physical; uint32_t dwords; };
+    bool NativeRun(uint32_t physical, uint32_t dwords, std::vector<Item>& items, uint32_t& coveredDwords);
 
     // A draw call on `device` has written its packets after `before` (the
     // device's write pointer before the call, on the last word written then)
