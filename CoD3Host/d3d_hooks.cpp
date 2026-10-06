@@ -147,7 +147,7 @@ namespace
 // With the decompiled D3D library (COD3_HAVE_DECOMP) its draws are not
 // observed here: the decompiled ones take the place these hooks would.
 // Neither is 822FB4B0 (the shader load), decompiled too, nor the swap
-// countdown (822F4A10).
+// countdown (822F4A10) or the draw of nothing (822F6858).
 #ifndef COD3_HAVE_DECOMP
 COD3_OBSERVE(822F3620, DrawIndexed)
 COD3_OBSERVE(822F3EA0, DrawIndexedB)
@@ -156,8 +156,8 @@ COD3_OBSERVE(822EFFF0, RectangleEvent)
 COD3_OBSERVE(822F8590, IndirectB)
 COD3_OBSERVE(822F30F0, DrawD)
 COD3_OBSERVE(822F4A10, SwapCountdown)
-#endif
 COD3_OBSERVE(822F6858, DrawImmediate)
+#endif
 COD3_OBSERVE(82154930, GameDraw)
 // With the decompiled draw (COD3_HAVE_DECOMP) this record is not kept: that
 // function takes the place this hook would.
