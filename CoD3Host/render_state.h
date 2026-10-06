@@ -59,6 +59,7 @@ namespace RenderState
         BlendControl1 = 0x2209, BlendControl2 = 0x220A, BlendControl3 = 0x220B,
         PointSize = 0x2280,
         PolyOffsetFrontScale = 0x2380, // then front offset, back scale, back offset: floats
+        VertexControl = 0x2302,        // PA_SU_VTX_CNTL: bit 0 where pixel centres are
         CopyControl = 0x2318,          // the resolve
         CopyDestBase = 0x2319, CopyDestPitch = 0x231A, CopyDestInfo = 0x231B,
         CopyDepthClear = 0x231D, CopyColorClear = 0x231E,
@@ -100,6 +101,7 @@ namespace RenderState
         uint32_t minVertexIndex = 0, maxVertexIndex = 0;   // VGT_MIN/MAX_VTX_INDX: the hardware clamps indices into these
         uint32_t resetIndex = 0;
         uint32_t pointSize = 0;
+        uint32_t vertexControl = 0;    // PA_SU_VTX_CNTL: bit 0 clear, pixel centres at whole coordinates (Direct3D 9's)
 
         // Blending.
         uint32_t blendControl[4] = {};

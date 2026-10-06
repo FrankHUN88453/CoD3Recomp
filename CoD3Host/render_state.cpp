@@ -52,6 +52,7 @@ void RenderState::Read(uint32_t initiator, uint32_t indexBase, Snapshot& out)
     out.maxVertexIndex = Reg(MaxVertexIndex);
     out.resetIndex = Reg(ResetIndex);
     out.pointSize = Reg(PointSize);
+    out.vertexControl = Reg(VertexControl);
 
     out.blendControl[0] = Reg(BlendControl0);
     out.blendControl[1] = Reg(BlendControl1);

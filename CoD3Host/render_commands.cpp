@@ -945,7 +945,13 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
     constants.targetSize[1] = float(out.targetHeight) / scaleY;
     constants.targetSize[2] = 1.0f / float(state.pitch);
     constants.targetSize[3] = scaleY / float(out.targetHeight);
-    constants.flags[0] = state.vteControl;
+    // The viewport control, and in bit 16 where the console's pixel centres
+    // are: at whole coordinates (PA_SU_VTX_CNTL bit 0 clear, as this title
+    // has it), half a pixel up and left of the host's, so the vertex program
+    // moves the geometry half a pixel the other way. COD3_NOHALFPIXEL=1 for
+    // the host's centres, to compare.
+    static const bool noHalfPixel = getenv("COD3_NOHALFPIXEL") != nullptr;
+    constants.flags[0] = state.vteControl | (((state.vertexControl & 1) != 0 || noHalfPixel) ? 0x10000u : 0u);
     constants.flags[1] = ((state.colorControl >> 3) & 1) ? (state.colorControl & 7) : 7;   // the alpha test, or always
     constants.flags[2] = state.alphaReference;
     constants.flags[3] = uint32_t(ps->hash);

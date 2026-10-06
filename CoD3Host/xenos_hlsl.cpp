@@ -1007,7 +1007,7 @@ uint64_t XenosHlsl::Version()
     // A number that changes when the translation would, or when one of the
     // environment knobs that shape the HLSL is set: the disk cache keyed by
     // it then starts afresh rather than serving the other translation.
-    std::string text = "xenos_hlsl 2026-09-30 bswap packed flat3d fetch offsets alu pairs read first pixel params gradients dx dy depth offset";
+    std::string text = "xenos_hlsl 2026-10-06 bswap packed flat3d fetch offsets alu pairs read first pixel params gradients dx dy depth offset pixel centre";
     if (const char* lanes = getenv("COD3_SCALARLANES")) { text += " lanes="; text += lanes; }
     if (const char* show = getenv("COD3_D3DSHOW")) { text += " show="; text += show; }
     if (const char* sign = getenv("COD3_D3DSHOWSIGN")) { text += " sign="; text += sign; }
@@ -1036,7 +1036,7 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
             "    float4 viewportScale;    // x, y, z scales\n"
             "    float4 viewportOffset;   // x, y, z offsets\n"
             "    float4 targetSize;       // width, height in the title's pixels, and their reciprocals\n"
-            "    uint4 flags;             // the viewport control word, alpha test function, alpha reference bits, unused\n"
+            "    uint4 flags;             // the viewport control word (bit 16: pixel centres at halves), alpha test function, alpha reference bits, unused\n"
             "    float4 textureSize[32];  // width, height, 1/width, 1/height\n"
             "    uint4 textureAdjustment[32];   // swizzle, sign modes, unused, unused\n"
             "    float4 pixelGen;         // guest pixels per host pixel x and y, the register, on or off\n"
@@ -1196,16 +1196,23 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
         // The viewport, as PA_CL_VTE_CNTL says to apply it, folded into clip
         // space so the host's viewport is the whole target: what the console
         // would have made pixel (px, py) becomes the clip position with the
-        // same w, so the interpolation stays perspective correct.
+        // same w, so the interpolation stays perspective correct. The console
+        // samples a pixel at its whole coordinates (Direct3D 9's centres,
+        // PA_SU_VTX_CNTL bit 0 clear; flags bit 16 says otherwise), the host
+        // half a pixel further on: the geometry moves by that half pixel, so
+        // each host pixel sees what the console's did there. (Without it a
+        // pass that samples another at exact texels, like the half size
+        // smoke's depth-aware composite, picks its texels wrong.)
         hlsl += "    Output output;\n"
                 "    { uint vte = flags.x; float4 p = oPos;\n"
                 "      float ww = (vte & 0x100u) ? 1.0 : p.w;\n"
                 "      float xs = (vte & 0x1u) ? viewportScale.x : 1.0; float xo = (vte & 0x2u) ? viewportOffset.x : 0.0;\n"
                 "      float ys = (vte & 0x4u) ? viewportScale.y : 1.0; float yo = (vte & 0x8u) ? viewportOffset.y : 0.0;\n"
                 "      float zs = (vte & 0x10u) ? viewportScale.z : 1.0; float zo = (vte & 0x20u) ? viewportOffset.z : 0.0;\n"
+                "      float centre = (vte & 0x10000u) ? 0.0 : 0.5;\n"
                 "      float W = targetSize.x, H = targetSize.y;\n"
-                "      float cx = p.x * (2.0 * xs / W) + ww * (2.0 * xo / W - 1.0);\n"
-                "      float cy = -(p.y * (2.0 * ys / H) + ww * (2.0 * yo / H - 1.0));\n"
+                "      float cx = p.x * (2.0 * xs / W) + ww * (2.0 * (xo + centre) / W - 1.0);\n"
+                "      float cy = -(p.y * (2.0 * ys / H) + ww * (2.0 * (yo + centre) / H - 1.0));\n"
                 "      float cz = (vte & 0x200u) ? (p.z * zs + zo) * ww : (p.z * zs + zo * ww);\n"
                 // The polygon offset's constant part, in depth units, as the
                 // console adds it (viewportOffset.w; see render_commands.cpp).
