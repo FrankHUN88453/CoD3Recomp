@@ -225,9 +225,9 @@ void D3dHooks::CheckDraw(uint32_t lastWordPhysical, uint64_t vertexHash, uint64_
         (fresh ? g_fresh : g_stale)[pixelHash == record.pixelHash ? 0 : 1]++;
     }
 }
-COD3_OBSERVE(822F6DF8, DrawF)
-// With the decompiled D3D library (COD3_HAVE_DECOMP) the movie capture's
-// frame is the decompiled one.
+// With the decompiled D3D library (COD3_HAVE_DECOMP) the clear and the
+// movie capture's frame are the decompiled ones.
 #ifndef COD3_HAVE_DECOMP
+COD3_OBSERVE(822F6DF8, DrawF)
 COD3_OBSERVE(82301888, DrawG)
 #endif
