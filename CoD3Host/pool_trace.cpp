@@ -239,12 +239,20 @@ PPC_FUNC(sub_82302DB0)
 }
 
 extern "C" PPC_FUNC(__imp__sub_82302E88);
+// With the decompiled code (COD3_HAVE_DECOMP) the end is its decompiled
+// body, decomp_sub_82302E88.
+#ifdef COD3_HAVE_DECOMP
+PPC_FUNC(decomp_sub_82302E88);
+#define COD3_RECORD_END decomp_sub_82302E88
+#else
+#define COD3_RECORD_END __imp__sub_82302E88
+#endif
 PPC_FUNC(sub_82302E88)
 {
     const uint32_t device = ctx.r3.u32;
     Line("end rec", device, base, uint32_t(ctx.lr), 0);
     Timeline::Mark("end rec", uint32_t(ctx.lr));
-    __imp__sub_82302E88(ctx, base);
+    COD3_RECORD_END(ctx, base);
     Line("recorded", device, base, ctx.r3.u32, 0);
     Timeline::Mark("recorded", ctx.r3.u32);
 }
