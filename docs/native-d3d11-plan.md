@@ -248,6 +248,19 @@ Később ugyanaznap:
   renderelő feladatról lekerült a munka, de a parancsfeldolgozó elé
   várakozás került: erdő 155 → 143 fps. A parancsfeldolgozó
   késleltetése többet számít, mint a renderelő feladat hossza.
+- **Indexek gyorsítótárban** (055e57f, az írásfigyeléssel együtt): egy
+  kétszer változatlanul látott indextartomány saját, konvertált puffert
+  kap (a csíkvégjelzővel együtt), és abból rajzol; amíg a lapjai nincsenek
+  figyelve, minden rajzolás ujjlenyomatot vesz róla, így képkockán belül
+  újraírt tartomány sem rajzolódik régi indexekkel. A dinamikus indexek
+  (minden képkockán új helyen) a gyűrűn maradnak. Erdő: az indexek
+  0,28 → 0,09 µs rajzolásonként, ~155 → 159 fps; hét pályán ~60 millió
+  auditált egyezés, 0 kihagyás.
+- Ezzel a decomp-terv 2. mérföldköve (a renderelő backend: nézetek,
+  menetek, anyagblokkok, és a parancsfeldolgozó munkája) kész. A
+  parancsfeldolgozón maradt: `Begin` ~13% (a változott darabok hideg
+  memóriából), a konstansok írása az írás-kombinált GPU-memóriába, a
+  `NativeRun` ~5%.
 
 ## Felépítés
 
