@@ -11,6 +11,7 @@
 // range was read through by a stream and ran off the end of memory.
 
 #include "kernel.h"
+#include "write_watch.h"
 #include "render.h"
 #include <atomic>
 
@@ -113,6 +114,7 @@ namespace
     void Release(uint32_t address, uint32_t size, bool physical)
     {
         if (size == 0) return;
+        WriteWatch::Forget(address, size);
         DWORD was = 0;
         VirtualProtect(Guest::Ptr(address), size, PAGE_NOACCESS, &was);
         std::map<uint32_t, uint32_t>& list = FreeList(physical);
@@ -156,6 +158,7 @@ namespace
             times[start + size] = freed;
         }
         Regions()[start] = { size, physical };
+        WriteWatch::Forget(start, size);
         DWORD was = 0;
         VirtualProtect(Guest::Ptr(start), size, PAGE_READWRITE, &was);
         Kernel::Stats().bytesAllocated.fetch_add(size, std::memory_order_relaxed);

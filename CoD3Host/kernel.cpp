@@ -1,5 +1,6 @@
 #include "log.h"
 #include "kernel.h"
+#include "write_watch.h"
 #include <unordered_map>
 #include "scheduler.h"
 #include <atomic>
@@ -94,6 +95,12 @@ namespace
     LONG CALLBACK GuestFaultHandler(EXCEPTION_POINTERS* info)
     {
         const auto* record = info->ExceptionRecord;
+
+        // A write to a page the renderer watches (write_watch.cpp): noted,
+        // the page made writable, and the write made again.
+        if (record->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && record->ExceptionInformation[0] == 1 &&
+            WriteWatch::HandleFault(reinterpret_cast<const void*>(record->ExceptionInformation[1])))
+            return EXCEPTION_CONTINUE_EXECUTION;
 
         // COD3_RAWFAULTS=1: every access violation, first thing and to the
         // unbuffered stream, with the host frames exe relative for

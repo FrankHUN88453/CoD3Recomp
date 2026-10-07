@@ -2,6 +2,7 @@
 #include "render_table.h"
 #include "render_stats.h"
 #include "kernel.h"
+#include "write_watch.h"
 
 #include <algorithm>
 #include <atomic>
@@ -328,6 +329,7 @@ namespace
         bool midFrame = false;          // the title rewrites it between the draws of one frame
         uint32_t bytes = 0;             // the buffer's size
         uint32_t seen = 0;              // the largest size a fetch asked for
+        uint64_t watchedSince = 0;      // COD3_WRITEWATCH: its pages watched from this write sequence on, 0 not
         bool live = false;
     };
     std::deque<BufferEntry> g_buffers;
@@ -1168,6 +1170,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
         // from then on. COD3_NOMIDFRAME=1 goes back to once a frame.
         if (entry.checkedFrame == g_frame && entry.seen >= bytes)
         {
+            if (entry.watchedSince != 0 && WriteWatch::Clean(physical, entry.seen, entry.watchedSince)) return handle;
             static const bool once = getenv("COD3_NOMIDFRAME") != nullptr;
             // COD3_VBAUDIT=1 (with COD3_DENSEALL=1): every buffer, whatever
             // its size, looked at by every draw, and the ones found changing
@@ -1200,6 +1203,35 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
         if (!look) return handle;
         entry.checkedFrame = g_frame;
         wanted = std::max(bytes, entry.seen);
+        // COD3_WRITEWATCH=1: a buffer watched since it was last found the
+        // same, and none of its pages written since, is the same still.
+        if (entry.watchedSince != 0)
+        {
+            if (wanted <= entry.seen && WriteWatch::Clean(physical, wanted, entry.watchedSince))
+            {
+                RenderStats::Frame().watchedLooks++;
+                // COD3_WATCHAUDIT=1: hashed anyway, and a change the pages
+                // did not tell named.
+                static const bool audit = getenv("COD3_WATCHAUDIT") != nullptr;
+                if (audit)
+                {
+                    static uint64_t looks = 0, missed = 0;
+                    looks++;
+                    if (Fingerprint(data, wanted, entry.dense) != entry.fingerprint)
+                    {
+                        if (missed++ < 8)
+                            printf("render: watch audit: the vertex buffer at %08X (%u bytes) changed with no write seen\n", physical, wanted);
+                    }
+                    if ((looks & 0xFFFF) == 0)
+                    {
+                        printf("render: watch audit: %llu looks by the pages, %llu missed\n", (unsigned long long)looks, (unsigned long long)missed);
+                        fflush(stdout);
+                    }
+                }
+                return handle;
+            }
+            entry.watchedSince = 0;
+        }
         // As for a texture: compared in the stored kind, the kind changed
         // only when the memory is known to be the same.
         const uint64_t fingerprint = Fingerprint(data, wanted, entry.dense);
@@ -1210,6 +1242,14 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
             const bool wantDense = WantDense(entry.stable, wanted);
             if (wantDense != entry.dense) { if (!wantDense) entry.auditDense = entry.fingerprint; entry.dense = wantDense; entry.fingerprint = Fingerprint(data, wanted, wantDense); }
             if (!entry.midFrame && wanted <= AlwaysDenseBytes) entry.sampled = Fingerprint(data, wanted, false);
+            // Still for long enough: its pages watched from now on, and
+            // looked at once more after they are, for a write in between.
+            if (WriteWatch::Enabled() && entry.stable >= StableLooks && !entry.midFrame)
+            {
+                const uint64_t since = WriteWatch::Sequence();
+                if (WriteWatch::Arm(physical, wanted) && Fingerprint(data, wanted, entry.dense) == entry.fingerprint)
+                    entry.watchedSince = since;
+            }
             return handle;
         }
         entry.stable = 0;

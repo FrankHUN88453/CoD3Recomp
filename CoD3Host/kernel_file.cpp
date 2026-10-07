@@ -6,6 +6,7 @@
 // the executable instead, so nothing ever modifies the installed copy.
 
 #include "kernel.h"
+#include "write_watch.h"
 #include <vector>
 #include "scheduler.h"
 
@@ -555,6 +556,8 @@ PPC_FUNC(__imp__NtReadFile)
         // Straight into guest memory: file data is bytes, so there is no
         // byte order to correct. The guest interprets the big endian
         // contents itself.
+        // The system writes this, not the CPU: a watched page would fail it.
+        WriteWatch::Forget(buffer, length);
         const BOOL ok = ReadFile(file.handle, Guest::Ptr(buffer), length, &read, nullptr);
         if (!ok)
         {
