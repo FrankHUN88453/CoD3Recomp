@@ -1138,17 +1138,20 @@ void Kernel::CountImportOn(const char* name, uint32_t subject)
         history.next++;
     }
 
+    // Each thread keeps where the counters of the names it has called are
+    // (the map's entries never move): the title makes a million of these
+    // calls a second, and a look in the map under its lock was a cost the
+    // size of the call.
+    struct Known { const char* name = nullptr; std::atomic<uint64_t>* counter = nullptr; };
+    thread_local Known known[64];
+    Known& slot = known[(reinterpret_cast<uintptr_t>(name) >> 3) & 63];
+    if (slot.name != name)
     {
-        std::shared_lock<std::shared_mutex> lock(g_importMutex);
-        auto found = g_importCounts.find(name);
-        if (found != g_importCounts.end())
-        {
-            found->second.fetch_add(1, std::memory_order_relaxed);
-            return;
-        }
+        std::unique_lock<std::shared_mutex> lock(g_importMutex);
+        slot.counter = &g_importCounts[name];
+        slot.name = name;
     }
-    std::unique_lock<std::shared_mutex> lock(g_importMutex);
-    g_importCounts[name].fetch_add(1, std::memory_order_relaxed);
+    slot.counter->fetch_add(1, std::memory_order_relaxed);
 }
 
 void Kernel::CountImport(const char* name) { CountImportOn(name, 0); }

@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -126,8 +127,12 @@ namespace
         }
     }
 
+    // DbgHelp is not made for more than one thread at a time.
+    std::recursive_mutex g_symbolsLock;
+
     void LoadSymbols(HANDLE process)
     {
+        std::lock_guard<std::recursive_mutex> lock(g_symbolsLock);
         static bool symbols = false;
         if (!symbols)
         {
@@ -274,6 +279,7 @@ namespace
 
     std::string FunctionName(HANDLE process, DWORD64 start)
     {
+        std::lock_guard<std::recursive_mutex> lock(g_symbolsLock);
         char buffer[sizeof(SYMBOL_INFO) + 256] = {};
         auto* symbol = reinterpret_cast<SYMBOL_INFO*>(buffer);
         symbol->SizeOfStruct = sizeof(SYMBOL_INFO);

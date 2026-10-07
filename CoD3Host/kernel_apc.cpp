@@ -42,6 +42,11 @@ namespace
     std::map<uint32_t, std::deque<Apc>> g_queues;   // host thread id -> pending
     uint64_t g_queued = 0;
     uint64_t g_delivered = 0;
+
+    // A thread queues its completion routines to itself: how many it has,
+    // so the waits (two million a second, most of them the job lock) need
+    // no lock to find there are none.
+    thread_local uint32_t t_pending = 0;
 }
 
 void Kernel::QueueApc(uint32_t routine, uint32_t context, uint32_t statusBlock,
@@ -54,10 +59,12 @@ void Kernel::QueueApc(uint32_t routine, uint32_t context, uint32_t statusBlock,
         { routine, context, statusBlock, status, information,
           std::chrono::steady_clock::now() });
     g_queued++;
+    t_pending++;
 }
 
 void Kernel::DeliverApcs(PPCContext& ctx, bool alertable)
 {
+    if (t_pending == 0) return;
     std::deque<Apc> pending;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -91,6 +98,7 @@ void Kernel::DeliverApcs(PPCContext& ctx, bool alertable)
             return;
         }
         pending.swap(found->second);
+        t_pending = 0;
     }
 
     // Everything the caller still needs. A completion routine is an ordinary

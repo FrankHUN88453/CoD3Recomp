@@ -21,6 +21,7 @@
 #include <mutex>
 #include <string>
 #include <algorithm>
+#include <unordered_map>
 #include <vector>
 
 #include <Windows.h>
@@ -168,10 +169,21 @@ namespace
         return handle;
     }
 
+    // The handles last found, in front of the map (under DispatcherLock):
+    // the job lock's handle is looked up two million times a second. The
+    // map's entries never move; an entry erased is dropped here too.
+    struct Found { uint32_t handle = 0; Object* object = nullptr; };
+    Found g_found[256];
+    Found& FoundSlot(uint32_t handle) { return g_found[(handle >> 2) & 255]; }
+
     Object* Find(uint32_t handle)
     {
+        Found& slot = FoundSlot(handle);
+        if (slot.handle == handle && slot.object != nullptr) return slot.object;
         auto found = Handles().find(handle);
-        return found != Handles().end() ? &found->second : nullptr;
+        if (found == Handles().end()) return nullptr;
+        slot = Found{ handle, &found->second };
+        return slot.object;
     }
 
     // An object that is waited on and never signalled is what a stalled boot
@@ -190,25 +202,20 @@ namespace
         uint32_t object;
         uint32_t from;
     };
-    std::vector<Event> g_events;
     constexpr size_t EventLimit = 64;
+    Event g_events[EventLimit];
 
     // A ring, not a prefix: the interesting events are the last ones before
-    // everything stopped, not the first ones after it started.
-    size_t g_eventCursor = 0;
+    // everything stopped, not the first ones after it started. Written
+    // without a lock (a slot each, by a counter): an event read while it is
+    // written is a report's detail, and a lock here was taken two million
+    // times a second.
+    std::atomic<uint64_t> g_eventNext{ 0 };
 
     void Record(const char* action, uint32_t object, uint32_t from)
     {
-        std::lock_guard<std::mutex> lock(g_trafficMutex);
-        if (g_events.size() < EventLimit)
-        {
-            g_events.push_back({ GetCurrentThreadId(), action, object, from });
-        }
-        else
-        {
-            g_events[g_eventCursor] = { GetCurrentThreadId(), action, object, from };
-            g_eventCursor = (g_eventCursor + 1) % EventLimit;
-        }
+        const uint64_t at = g_eventNext.fetch_add(1, std::memory_order_relaxed);
+        g_events[at % EventLimit] = { GetCurrentThreadId(), action, object, from };
     }
 
     // What each thread is blocked on right now, as opposed to what it has ever
@@ -237,11 +244,24 @@ namespace
         Record("wait  ", object, from);
     }
 
+    // Signals are counted by each thread and added to the totals now and
+    // then: at once for an object the thread has not signalled before (so
+    // the totals know every object signalled), else every few thousand.
     void CountSignal(uint32_t object, uint32_t from)
     {
+        struct Counts { std::unordered_map<uint32_t, uint64_t> signals; uint32_t pending = 0; };
+        thread_local Counts counts;
+        auto [entry, first] = counts.signals.try_emplace(object, 0);
+        entry->second++;
+        if (first || ++counts.pending >= 4096)
         {
             std::lock_guard<std::mutex> lock(g_trafficMutex);
-            g_signals[object]++;
+            for (auto& [signalled, count] : counts.signals)
+            {
+                g_signals[signalled] += count;
+                count = 0;
+            }
+            counts.pending = 0;
         }
         Record("signal", object, from);
     }
@@ -398,6 +418,7 @@ PPC_FUNC(__imp__NtClose)
     auto found = Handles().find(ctx.r3.u32);
     if (found != Handles().end())
     {
+        if (FoundSlot(found->first).handle == found->first) FoundSlot(found->first) = Found{};
         Handles().erase(found);
         ctx.r3.u32 = X_STATUS_SUCCESS;
         return;
@@ -648,10 +669,6 @@ PPC_FUNC(__imp__NtWaitForSingleObjectEx)
     Kernel::CountImportOn("NtWaitForSingleObjectEx", ctx.r3.u32);
     Kernel::DeliverApcs(ctx, ctx.r5.u32 != 0);
     const uint32_t handle = ctx.r3.u32;
-
-    // A file handle is signalled when its last I/O has finished, which every
-    // I/O here has by the time the call returns.
-    if (Kernel::IsFileHandle(handle)) { ctx.r3.u32 = X_STATUS_SUCCESS; return; }
     const uint32_t timeoutPtr = ctx.r6.u32;
 
     std::chrono::steady_clock::time_point deadline;
@@ -678,12 +695,21 @@ PPC_FUNC(__imp__NtWaitForSingleObjectEx)
         ~Blocking() { if (began) { LeaveWait(); Scheduler::Acquire(); Timeline::Mark("unblocked", handle, from); } }
     } blocking{ handle, uint32_t(ctx.lr), infinite };
 
-    // A thread handle is not in the object table: threads keep their own. A
-    // wait on one is a wait for that thread to end, and it completes when the
-    // thread's object in guest memory is signalled.
+    // The object table first: nearly every wait is on one of its objects,
+    // most of them the job lock, taken and given back a million times a
+    // second, and this is one look under one lock for them.
+    std::unique_lock<std::mutex> lock(Kernel::DispatcherLock());
+    if (Find(handle) == nullptr)
     {
-        std::unique_lock<std::mutex> lock(Kernel::DispatcherLock());
-        if (Find(handle) == nullptr)
+        // A file handle is signalled when its last I/O has finished, which
+        // every I/O here has by the time the call returns.
+        lock.unlock();
+        if (Kernel::IsFileHandle(handle)) { ctx.r3.u32 = X_STATUS_SUCCESS; return; }
+        lock.lock();
+
+        // A thread handle is not in the object table: threads keep their
+        // own. A wait on one is a wait for that thread to end, and it
+        // completes when the thread's object in guest memory is signalled.
         {
             const uint32_t threadObject = Kernel::ThreadObjectFor(handle);
             if (threadObject != 0)
@@ -711,8 +737,6 @@ PPC_FUNC(__imp__NtWaitForSingleObjectEx)
             }
         }
     }
-
-    std::unique_lock<std::mutex> lock(Kernel::DispatcherLock());
 
     // A pulse that happens while this wait is in progress releases it.
     uint32_t pulsesAtStart = 0;
@@ -1040,10 +1064,12 @@ void Kernel::ReportWaitTraffic()
     reported = true;
 
     printf("\n");
-    printf("the last %zu synchronisation events, oldest first:\n", g_events.size());
-    for (size_t i = 0; i < g_events.size(); i++)
+    const uint64_t eventsMade = g_eventNext.load();
+    const size_t eventsKept = size_t(std::min<uint64_t>(eventsMade, EventLimit));
+    printf("the last %zu synchronisation events, oldest first:\n", eventsKept);
+    for (size_t i = 0; i < eventsKept; i++)
     {
-        const Event& event = g_events[(g_eventCursor + i) % g_events.size()];
+        const Event& event = g_events[(eventsMade - eventsKept + i) % EventLimit];
         printf("  thread %-5u %s 0x%08X   from 0x%08X\n",
             event.thread, event.action, event.object, event.from);
     }
