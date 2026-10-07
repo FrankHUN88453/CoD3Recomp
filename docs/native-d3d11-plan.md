@@ -232,9 +232,22 @@ Később ugyanaznap:
 - **A konstansfeltöltés nem másolja félre a teljes 4 KB-os fájlt**, csak
   amit a program olvas (a rekordút változásvizsgálatához ennyi kell).
 - Ezekkel a parancsfeldolgozó az erdőben ~80%-on fut a korábbi 90–96%
-  helyett; a játék fő szála és a munkaszálak közti várakozás lett a
-  következő korlát. A parancsfeldolgozón maradt: `Begin` ~12%, a
-  konstansok és indexek írása az írás-kombinált GPU-memóriába ~15%.
+  helyett. A parancsfeldolgozón maradt: `Begin` ~12%, a konstansok és
+  indexek írása az írás-kombinált GPU-memóriába ~15%.
+- **Hol a korlát most:** a fő szál idejének ~40%-a várakozás a képkocka
+  renderelő feladatára (`sub_82130980`, egyszerre egy munkaszálon), az
+  pedig a swapnál megvárja, hogy a parancsfeldolgozó elérje az előző
+  swapot (`VdSwap`, 1 képkocka késleltetés), és kerítésekre is vár. A
+  parancsfeldolgozó így a kritikus úton marad, akkor is, ha nincs 100%-on.
+- **A rekordkészítés olcsóbb** (187dda2): a memóriából töltött konstansok
+  bitmaszkból (nem 512 elem végignézése rajzolásonként), a táblák
+  egyszeri létrehozása zár nélkül, a lapjegyzetek laponként. A `Scan` a
+  munkaszálon 11 → 9%.
+- **Kipróbálva és elvetve:** a csomagolvasás (`Scan`) külön szálon, a
+  kick után, a parancsfeldolgozó minden puffer előtt megvárta. A
+  renderelő feladatról lekerült a munka, de a parancsfeldolgozó elé
+  várakozás került: erdő 155 → 143 fps. A parancsfeldolgozó
+  késleltetése többet számít, mint a renderelő feladat hossza.
 
 ## Felépítés
 
