@@ -122,6 +122,10 @@ def main():
         for assignment in sys.argv[sys.argv.index("--") + 1:]:
             key, _, value = assignment.partition("=")
             env[key] = value
+    # A process started under a debugger gets Windows' debug heap, which
+    # checks every allocation: the host's frame rate measured that way was
+    # a different one from the player's. _NO_DEBUG_HEAP=0 keeps it.
+    env.setdefault("_NO_DEBUG_HEAP", "1")
 
     # The build's executable and its symbols, installed next to the game.
     # A test installs and runs them as CoD3-test.exe, so it never replaces
