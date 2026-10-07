@@ -176,11 +176,15 @@ def main():
     event = DEBUG_EVENT()
     exceptions = 0
     recent = []
+    ending = False
     while True:
+        # Looked at between events as well: a run that raises them all the
+        # time (a sampling profiler's stale stack walks) never waits a second.
+        if not ending and time.time() - started > seconds:
+            print(f"debugrun: {seconds} s elapsed, ending the process")
+            k32.TerminateProcess(pi.hProcess, 0)
+            ending = True
         if not k32.WaitForDebugEvent(ctypes.byref(event), 1000):
-            if time.time() - started > seconds:
-                print(f"debugrun: {seconds} s elapsed, ending the process")
-                k32.TerminateProcess(pi.hProcess, 0)
             continue
         code = event.dwDebugEventCode
         status = DBG_CONTINUE

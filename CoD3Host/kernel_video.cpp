@@ -704,6 +704,11 @@ namespace
                 Kernel::ReportFileReads();
                 Gpu::ReportPolling();
                 if (clockSecond >= 10) Kernel::ReportWaitTraffic();
+                if (Sampler::ThreadTimesWanted() && clockSecond % 5 == 0)
+                    Sampler::ReportThreadTimes({
+                        { GetThreadId(video.commandThread.native_handle()), "command processor" },
+                        { GetThreadId(video.thread.native_handle()), "video" },
+                        { GetCurrentThreadId(), "video" } });
                 const Gpu::Statistics gpu = Gpu::Stats();
                 static uint64_t swapsBefore = 0;
                 const uint64_t swaps = video.swaps.load();
@@ -1039,6 +1044,7 @@ namespace
             return;
         video.thread = std::thread(VideoThread);
         video.commandThread = std::thread(CommandThread);
+        Kernel::ProfileHostThread(GetThreadId(video.commandThread.native_handle()), "command processor");
     }
 }
 

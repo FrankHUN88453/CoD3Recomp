@@ -84,6 +84,7 @@ namespace Kernel
         void* handle = nullptr;
         uint32_t id = 0;
         uint32_t osId = 0;   // so a stack can be matched to a lock owner
+        uint32_t startAddress = 0;
     };
     std::vector<ThreadSample> SampleGuestThreads();
 
@@ -153,6 +154,11 @@ namespace Kernel
     // A thread that prints every host thread's stack once the vertical
     // blank counter has stopped moving: what a hang looks like from inside.
     void StartWatchdog();
+
+    // COD3_HOSTPROFILE=1: a host thread's time by function, from samples of
+    // where it is a thousand times a second, printed every five seconds:
+    // the functions it is in itself, and those on its stack (inclusive).
+    void ProfileHostThread(uint32_t osId, const char* name);
 
     // The host stack behind a set of registers, symbolised: for the fault
     // handler, which has the registers of the thread that faulted.

@@ -16,12 +16,15 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <chrono>
+#include <cstdlib>
 #include <map>
 #include <utility>
 #include <thread>
 #include <vector>
 
 #include <Windows.h>
+#include <TlHelp32.h>
 
 namespace
 {
@@ -243,6 +246,71 @@ namespace
         Kernel::ReportRecentCalls();
         fflush(stdout);
     }
+}
+
+bool Sampler::ThreadTimesWanted()
+{
+    static const bool wanted = getenv("COD3_THREADTIME") != nullptr;
+    return wanted;
+}
+
+void Sampler::ReportThreadTimes(const std::vector<std::pair<uint32_t, const char*>>& named)
+{
+    static std::map<DWORD, uint64_t> previous;   // os id: CPU time, in 100 ns
+    static auto previousWall = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    const double wall = std::chrono::duration<double>(now - previousWall).count();
+    previousWall = now;
+
+    std::map<uint32_t, Kernel::ThreadSample> guest;
+    for (const Kernel::ThreadSample& thread : Kernel::SampleGuestThreads()) guest[thread.osId] = thread;
+
+    struct Row { double percent; DWORD os; };
+    std::vector<Row> rows;
+    std::map<DWORD, uint64_t> current;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return;
+    THREADENTRY32 entry{};
+    entry.dwSize = sizeof(entry);
+    const DWORD process = GetCurrentProcessId();
+    for (BOOL more = Thread32First(snapshot, &entry); more; more = Thread32Next(snapshot, &entry))
+    {
+        if (entry.th32OwnerProcessID != process) continue;
+        HANDLE thread = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ThreadID);
+        if (thread == nullptr) continue;
+        FILETIME created, exited, kernel, user;
+        if (GetThreadTimes(thread, &created, &exited, &kernel, &user))
+        {
+            const uint64_t cpu = (uint64_t(kernel.dwHighDateTime) << 32 | kernel.dwLowDateTime) +
+                                 (uint64_t(user.dwHighDateTime) << 32 | user.dwLowDateTime);
+            current[entry.th32ThreadID] = cpu;
+            auto before = previous.find(entry.th32ThreadID);
+            const uint64_t used = before != previous.end() ? cpu - before->second : 0;
+            if (wall > 0 && before != previous.end()) rows.push_back({ double(used) * 1e-7 / wall * 100.0, entry.th32ThreadID });
+        }
+        CloseHandle(thread);
+    }
+    CloseHandle(snapshot);
+    previous.swap(current);
+    if (rows.empty()) return;
+
+    std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.percent > b.percent; });
+    double total = 0;
+    for (const Row& row : rows) total += row.percent;
+    printf("threads, CPU over %.1f s (%.0f%% of one core in all):", wall, total);
+    for (size_t i = 0; i < rows.size() && i < 12 && rows[i].percent >= 1.0; i++)
+    {
+        const Row& row = rows[i];
+        const char* name = nullptr;
+        for (const auto& [os, text] : named)
+            if (os == row.os) name = text;
+        auto found = guest.find(row.os);
+        if (name != nullptr) printf(" %s %.0f%%,", name, row.percent);
+        else if (found != guest.end()) printf(" guest %u (%08X) %.0f%%,", found->second.id, found->second.startAddress, row.percent);
+        else printf(" host %lu %.0f%%,", (unsigned long)row.os, row.percent);
+    }
+    printf("\n");
+    fflush(stdout);
 }
 
 void Sampler::Start(int intervalSeconds)

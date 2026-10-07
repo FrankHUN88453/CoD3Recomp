@@ -571,7 +571,7 @@ std::vector<Kernel::ThreadSample> Kernel::SampleGuestThreads()
     std::vector<ThreadSample> out;
     out.reserve(g_threads.size());
     for (const auto& entry : g_threads)
-        out.push_back({ entry.second.host, entry.second.id, entry.second.osId });
+        out.push_back({ entry.second.host, entry.second.id, entry.second.osId, entry.second.startAddress });
     return out;
 }
 

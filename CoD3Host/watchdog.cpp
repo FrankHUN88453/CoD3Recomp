@@ -15,7 +15,11 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
+#include <string>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <Windows.h>
@@ -230,6 +234,117 @@ void Kernel::PrintHostStack(void* context)
     WalkFrames(process, GetCurrentThread(), copy);
     printf("\n");
     fflush(stdout);
+}
+
+namespace
+{
+    // The functions on a stack, innermost first, by their start addresses:
+    // a copy of the registers taken while the thread was stopped, unwound
+    // after it runs on (a stale stack costs one wrong sample at worst).
+    void FunctionsOf(CONTEXT* context, DWORD64* starts, int& count, int limit)
+    {
+        __try
+        {
+            for (int depth = 0; depth < 64 && count < limit; depth++)
+            {
+                DWORD64 imageBase = 0;
+                PRUNTIME_FUNCTION entry = RtlLookupFunctionEntry(context->Rip, &imageBase, nullptr);
+                if (entry == nullptr)
+                {
+                    // A leaf without unwind data: its return address is on top.
+                    starts[count++] = context->Rip;
+                    context->Rip = *reinterpret_cast<DWORD64*>(context->Rsp);
+                    context->Rsp += 8;
+                }
+                else
+                {
+                    starts[count++] = imageBase + entry->BeginAddress;
+                    void* handlerData = nullptr;
+                    DWORD64 establisherFrame = 0;
+                    RtlVirtualUnwind(UNW_FLAG_NHANDLER, imageBase, context->Rip, entry,
+                        context, &handlerData, &establisherFrame, nullptr);
+                }
+                if (context->Rip == 0) break;
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+        }
+    }
+
+    std::string FunctionName(HANDLE process, DWORD64 start)
+    {
+        char buffer[sizeof(SYMBOL_INFO) + 256] = {};
+        auto* symbol = reinterpret_cast<SYMBOL_INFO*>(buffer);
+        symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+        symbol->MaxNameLen = 255;
+        DWORD64 displacement = 0;
+        if (SymFromAddr(process, start, &displacement, symbol)) return symbol->Name;
+        char text[64];
+        const DWORD64 module = SymGetModuleBase64(process, start);
+        snprintf(text, sizeof(text), "%llx (+%llx)", (unsigned long long)start, (unsigned long long)(start - module));
+        return text;
+    }
+}
+
+void Kernel::ProfileHostThread(uint32_t osId, const char* name)
+{
+    static const bool wanted = getenv("COD3_HOSTPROFILE") != nullptr;
+    if (!wanted) return;
+    std::thread([osId, name]() {
+        const HANDLE process = GetCurrentProcess();
+        LoadSymbols(process);
+        const HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, osId);
+        if (thread == nullptr) return;
+        std::unordered_map<DWORD64, uint32_t> self, inclusive;
+        uint32_t samples = 0;
+        auto reported = std::chrono::steady_clock::now();
+        for (;;)
+        {
+            CONTEXT context{};
+            context.ContextFlags = CONTEXT_FULL;
+            if (SuspendThread(thread) == DWORD(-1)) break;
+            const BOOL captured = GetThreadContext(thread, &context);
+            ResumeThread(thread);
+            if (captured)
+            {
+                DWORD64 starts[64];
+                int count = 0;
+                Kernel::SetUnwinding(true);
+                FunctionsOf(&context, starts, count, 64);
+                Kernel::SetUnwinding(false);
+                if (count > 0)
+                {
+                    samples++;
+                    self[starts[0]]++;
+                    for (int i = 0; i < count; i++)
+                    {
+                        bool seen = false;
+                        for (int j = 0; j < i && !seen; j++) seen = starts[j] == starts[i];
+                        if (!seen) inclusive[starts[i]]++;
+                    }
+                }
+            }
+            Sleep(1);
+            const auto now = std::chrono::steady_clock::now();
+            if (now - reported < std::chrono::seconds(5) || samples == 0) continue;
+            reported = now;
+            for (int kind = 0; kind < 2; kind++)
+            {
+                std::vector<std::pair<uint32_t, DWORD64>> ordered;
+                for (const auto& [start, hits] : kind == 0 ? self : inclusive) ordered.push_back({ hits, start });
+                std::sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+                printf("profile of the %s, %u samples, %s:\n", name, samples, kind == 0 ? "in the function itself" : "with what it calls");
+                for (size_t i = 0; i < ordered.size() && i < 30; i++)
+                    printf("  %5.1f%% %s\n", 100.0 * ordered[i].first / samples, FunctionName(process, ordered[i].second).c_str());
+            }
+            fflush(stdout);
+            self.clear();
+            inclusive.clear();
+            samples = 0;
+        }
+        CloseHandle(thread);
+    }).detach();
 }
 
 void Kernel::StartWatchdog()
