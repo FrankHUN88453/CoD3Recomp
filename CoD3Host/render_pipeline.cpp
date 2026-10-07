@@ -198,6 +198,14 @@ namespace
         desc.DepthBias = steps == 0.0f ? 0 : int(steps > 0.0f ? std::max(1.0f, std::round(steps)) : std::min(-1.0f, std::round(steps)));
         desc.SlopeScaledDepthBias = scale * (1.0f / 16.0f);
         desc.DepthBiasClamp = 0.0f;
+        // Behind (the Z pass): farther off (towards nought, this title's
+        // far) by sixteen steps of the float depth at the triangle's
+        // nearest, and by two pixels of its slope.
+        if (key & 32)
+        {
+            desc.DepthBias -= 16;
+            desc.SlopeScaledDepthBias -= 2.0f;
+        }
         ComPtr<ID3D11RasterizerState> state;
         g_device->CreateRasterizerState(&desc, &state);
         return state;
@@ -308,7 +316,7 @@ RenderState::Handle RenderPipeline::Depth(uint32_t depthControl, uint32_t stenci
     return g_depth.Insert(key, MakeDepth(depthControl, stencilRefMask));
 }
 
-RenderState::Handle RenderPipeline::Rasterizer(uint32_t suScModeControl, bool scissor, bool cullNone, const float polyOffset[4])
+RenderState::Handle RenderPipeline::Rasterizer(uint32_t suScModeControl, bool scissor, bool cullNone, const float polyOffset[4], bool behind)
 {
     float scale = 0.0f, offset = 0.0f;
     static const bool noOffset = getenv("COD3_NOPOLYOFFSET") != nullptr;   // for a comparison
@@ -317,7 +325,7 @@ RenderState::Handle RenderPipeline::Rasterizer(uint32_t suScModeControl, bool sc
     uint32_t scaleBits, offsetBits;
     memcpy(&scaleBits, &scale, 4);
     memcpy(&offsetBits, &offset, 4);
-    const uint32_t key[3] = { (suScModeControl & 7) | (scissor ? 8u : 0u) | (cullNone ? 16u : 0u), scaleBits, offsetBits };
+    const uint32_t key[3] = { (suScModeControl & 7) | (scissor ? 8u : 0u) | (cullNone ? 16u : 0u) | (behind ? 32u : 0u), scaleBits, offsetBits };
     if (const uint32_t handle = g_rasterizer.Find(key)) return handle;
     // Each new offset once, to see what the title asks for.
     static int announced = 0;

@@ -974,7 +974,23 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
         if ((state.suScModeControl >> 11) & 1) depthOffset = state.polyOffset[1];
         else if ((state.suScModeControl >> 12) & 1) depthOffset = state.polyOffset[3];
     }
-    out.rasterizer = RenderPipeline::Rasterizer(state.suScModeControl, true, out.rectangles, oldOffset ? state.polyOffset : slopeOnly);
+    // The Z pass (the depth only mode with its colour mask left open; the
+    // shadow maps close theirs) is put a little behind. The colour pass
+    // tests against it (greater or equal) and finds its own surfaces there
+    // again, but with MSAA a translated pixel program gives one depth, cut
+    // to the console's steps at the covered samples' centroid, to all of a
+    // pixel's samples, where the Z pass has each sample's own: on steep
+    // ground half a pixel's samples failed and kept an old frame's colour
+    // (dotted lines along the triangles' edges; white speckles everywhere
+    // without MSAA, where the cut alone loses to the Z pass's last bits),
+    // and cutting the Z pass's depth the same way instead left whole
+    // patches of a stale colour where the two passes' triangles cover a
+    // pixel's samples differently. Behind by two pixels of slope and a few
+    // steps, the Z pass still hides what is truly behind and never its own
+    // surface. COD3_ZPASSBEHIND=0 leaves it where it is.
+    static const bool behindOff = []() { const char* t = getenv("COD3_ZPASSBEHIND"); return t != nullptr && t[0] == '0'; }();
+    const bool behind = !behindOff && DepthOnlyMode(state) && state.colorMask != 0;
+    out.rasterizer = RenderPipeline::Rasterizer(state.suScModeControl, true, out.rectangles, oldOffset ? state.polyOffset : slopeOnly, behind);
     out.blend = RenderPipeline::Blend(state.blendControl, state.colorMask);
     out.depth = RenderPipeline::Depth(out.depthView ? state.depthControl : 0, state.stencilRefMask);
     memcpy(out.blendFactor, state.blendFactor, sizeof(out.blendFactor));

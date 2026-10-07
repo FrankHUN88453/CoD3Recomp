@@ -240,9 +240,11 @@ namespace
     // The depth only mode's draws, which run no pixel program on the console:
     // with COD3_DEPTHONLYPS=1 their depth is cut to the console's precision
     // as the title's own pixel programs cut theirs (xenos_hlsl.cpp). Off by
-    // default: the frame came out the same without it (the colour pass does
-    // not test against the Z pass's depth), and at 200% with MSAA 4x the
-    // depth only draws took 0.3 ms a frame more with it.
+    // default: with MSAA the cut gives a pixel's samples one depth, and the
+    // colour pass then lost patches of ground to the Z pass where the two
+    // cover a pixel's samples differently; the Z pass is put a little behind
+    // instead (render_commands.cpp). It also took 0.3 ms a frame at 200%
+    // with MSAA 4x.
     std::string DepthOnlySource()
     {
         return std::string(XenosHlsl::Depth20e4Source) +

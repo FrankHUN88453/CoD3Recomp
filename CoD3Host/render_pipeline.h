@@ -43,8 +43,9 @@ namespace RenderPipeline
     // The polygon offset is the front one when bit 11 of the mode control
     // enables it, else the back one when bit 12 does (Direct3D has one for
     // both faces): its scale in sixteenths of a unit of slope, its offset
-    // in units of the smallest depth step.
-    Handle Rasterizer(uint32_t suScModeControl, bool scissor, bool cullNone, const float polyOffset[4]);
+    // in units of the smallest depth step. `behind` puts the draw's depth
+    // a little farther off than it is (the Z pass's, render_commands.cpp).
+    Handle Rasterizer(uint32_t suScModeControl, bool scissor, bool cullNone, const float polyOffset[4], bool behind = false);
     // Sampler from the fetch constant's clamp, filter and anisotropy fields.
     Handle Sampler(const uint32_t fetch[6]);
 
