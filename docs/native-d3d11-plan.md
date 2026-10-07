@@ -192,6 +192,34 @@ Falaise, filmek, két `map_restart`. A `spmap` egy pályán belülről a régi
 úton is elakad (a betöltés felszabadított memóriát olvas), ez nem az N3
 hibája; a küldetések között a játék amúgy újraindítja magát.
 
+## Gyorsítás N3 után (2026-10-07)
+
+A szálankénti CPU-mérés (`COD3_THREADTIME=1`) és a mintavételező profil
+(`COD3_HOSTPROFILE=cp,main`) szerint az N3 után ezek voltak a fékek:
+
+- **A `NativeState` közös zárja** a parancsfeldolgozó idejének negyede
+  volt (a játék szála minden rajzolásnál fogta). A rekordot most a záron
+  kívül állítja össze, a kulcstábla rögzített méretű, a `Begin` csak a
+  szükséges adatot másolja ki a zár alatt, a `NativeRun` a végén egyszerre
+  ellenőrzi a rajzolásokat.
+- **A kernel-emuláció minden jelzésnél minden alvó szálat felébresztett.**
+  A játék egyetlen mutexet másodpercenként ~50 ezerszer enged el; a fő szál
+  idejének harmada ment el a felesleges ébresztésekre. Most minden várakozó
+  megmondja, mire vár (handle, vendégcím, kritikus szakasz), és csak az
+  ébred. A folyamat CPU-használata 5,4 magról 3,3-ra esett – ez a régi
+  úton is gyorsít.
+- **Diagnosztika a forró úton:** a hívásszámlálók és az eseménynapló
+  minden mutex-hívásnál globális zárat fogott; most szálankéntiek vagy
+  zármentesek.
+- **Írásfigyelés (`COD3_WRITEWATCH=1`, egyelőre kísérleti):** a már
+  változatlan csúcspufferek lapjai írásvédettek; az első írás kivételt
+  vált ki, amit a gazda feljegyez. Így ezeket nem kell minden képkockán
+  végig hash-elni (erdő: 29 → 11 MB/képkocka).
+
+**Erdő, 1080p, MSAA nélkül, vsync ki:** régi út 91 → 95–108 fps, N3
+124 → 135–154 fps. A képkockánkénti rajzolási kép önellenőrzése
+(`COD3_IMAGECHECK=1`) és az N1-paritás továbbra is 0 eltérést mutat.
+
 ## Felépítés
 
 1. **Horog-réteg** (`d3d_hooks.cpp`): a könyvtár API-függvényeinek
