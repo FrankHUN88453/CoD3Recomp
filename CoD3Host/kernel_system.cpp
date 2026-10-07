@@ -381,7 +381,8 @@ PPC_FUNC(__imp__RtlEnterCriticalSection)
             Kernel::LeaveWait();
             return;
         }
-        Kernel::WaitDispatcher(lock, std::chrono::milliseconds(1));
+        const uint64_t key = cs;
+        Kernel::WaitDispatcherOn(lock, &key, 1, std::chrono::steady_clock::now() + std::chrono::milliseconds(1));
 
         // Two seconds on one critical section is a holder that is not
         // coming back: say which, held by whom, from where.
@@ -467,7 +468,7 @@ PPC_FUNC(__imp__RtlLeaveCriticalSection)
     Guest::Write32(base, cs + CS_RECURSION_COUNT, 0);
     Guest::Write32(base, cs + CS_OWNING_THREAD, 0);
     Guest::AtomicAdd32(base, cs + CS_LOCK_COUNT, -1);
-    Kernel::DispatcherChanged().notify_all();
+    Kernel::WakeDispatcherForUnlocked(cs);
 }
 
 // --- Thread local storage --------------------------------------------------

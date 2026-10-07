@@ -113,11 +113,19 @@ namespace Kernel
     void ReportPoolWaits();
 
     std::mutex& DispatcherLock();
-    std::condition_variable& DispatcherChanged();
-    // Sleeping on the dispatcher, and waking the sleepers if there are any.
+    // Sleeping on the dispatcher (DispatcherLock held), and waking the
+    // sleepers. A sleep may say what it waits for, by keys: a guest address
+    // (the object's body, a critical section), or a handle with bit 32 set.
+    // A change to those wakes it and nothing else does; a sleep that names
+    // nothing is woken by every change. WakeDispatcher wakes everyone.
     std::cv_status WaitDispatcher(std::unique_lock<std::mutex>& lock, std::chrono::milliseconds limit);
     std::cv_status WaitDispatcherUntil(std::unique_lock<std::mutex>& lock, std::chrono::steady_clock::time_point deadline);
+    std::cv_status WaitDispatcherOn(std::unique_lock<std::mutex>& lock, const uint64_t* keys, uint32_t count,
+                                    std::chrono::steady_clock::time_point deadline);
     void WakeDispatcher();
+    void WakeDispatcherFor(const uint64_t* keys, uint32_t count);
+    // The same without the lock held: it is taken only when someone sleeps.
+    void WakeDispatcherForUnlocked(uint64_t key);
 
     // A heartbeat, so a run that neither stops nor draws anything still shows
     // whether the title is doing work. Without a picture there is no other way
@@ -155,10 +163,12 @@ namespace Kernel
     // blank counter has stopped moving: what a hang looks like from inside.
     void StartWatchdog();
 
-    // COD3_HOSTPROFILE=1: a host thread's time by function, from samples of
+    // COD3_HOSTPROFILE=tags: a thread's time by function, from samples of
     // where it is a thousand times a second, printed every five seconds:
     // the functions it is in itself, and those on its stack (inclusive).
-    void ProfileHostThread(uint32_t osId, const char* name);
+    // The thread is profiled when its tag is named ("cp" the command
+    // processor, "main" the title's first thread; "1" means "cp").
+    void ProfileHostThread(uint32_t osId, const char* name, const char* tag);
 
     // The host stack behind a set of registers, symbolised: for the fault
     // handler, which has the registers of the thread that faulted.
