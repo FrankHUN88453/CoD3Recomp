@@ -261,6 +261,22 @@ Később ugyanaznap:
   parancsfeldolgozón maradt: `Begin` ~13% (a változott darabok hideg
   memóriából), a konstansok írása az írás-kombinált GPU-memóriába, a
   `NativeRun` ~5%.
+- **A színmenet értékei a regiszterekben** (f384d9d). A soronkénti profil
+  (`COD3_HOSTPROFILE_LINES=1`) szerint a rekordkészítés nagyja a
+  menetenkénti értékek listája volt: a játék egy rajzolás csúcspont-
+  konstansait a színmenetre predikálva írja (az erdőben ~70 szó
+  rajzolásonként), és ezeket minden rekord átmásolta, minden rajzolás a
+  képére tette és visszavette. Most a regiszterek a színmenet nézetét
+  tartják (egy színmenetes írás oda megy, a Z-menet a régi értéket kapja
+  sajátként), és a rekord a Z-menet értékeit csak akkor viszi, ha a
+  rajzolás a Z-menetben is fut. Egy csomag egymás utáni regisztereit a
+  modell egyszerre írja. Erdő: a csomagolvasás egy munkaszálon ~10,5 →
+  ~6%, a `Begin` a parancsfeldolgozón 13 → 7%, **~159 → 182 fps**.
+  Paritás mindkét menetben és a képellenőrzés öt pályán: 0 eltérés.
+- Most a képkocka renderelő feladata a leghosszabb szakasz (egy mag,
+  a négy munkaszál felváltva): ~60%-a a játék saját kódja, ~40%-a még a
+  csomagolvasás (a darabok másolása az arénába, a lapjegyzetek, a
+  shaderek hash-e).
 
 ## Felépítés
 
