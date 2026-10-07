@@ -194,7 +194,7 @@ namespace
         bool known[ShadowWords] = {};
         uint32_t unknown = ShadowWords;      // how many are not known yet
         uint32_t constantMemory[512] = {};   // per float4 (vertex, then pixel): the physical address it is loaded from, 0 none
-        uint32_t fromMemory = 0;             // how many of those are not nought
+        uint64_t fromMemory[8] = {};         // which of those are not nought, a bit each: a draw's record lists them
         Program vertex[2], pixel[2];         // by pass
         // Registers a predicated packet set for one pass: by copy index, the
         // passes (bit 0 colour, 1 Z) and the values; and the indices that
@@ -351,14 +351,24 @@ namespace
     {
         for (const StreamItem& item : items)
         {
+            // The packet's first word marked, the rest of it as no start, a
+            // page's part at a time.
             const uint32_t dwords = PacketDwords(item.header);
-            for (uint32_t i = 0; i < dwords; i++)
+            for (uint32_t i = 0; i < dwords;)
             {
                 const uint32_t at = item.physical + i * 4;
                 StreamPage* page = PageOf(at, true);
                 const uint32_t word = (at & 0xFFFF) >> 2;
-                if (i == 0) page->header[word] = item.header;
-                page->start[word] = i != 0 ? NoStart : item.run ? RunStart : StateStart;
+                const uint32_t here = std::min(dwords - i, 0x4000u - word);
+                if (i == 0)
+                {
+                    page->header[word] = item.header;
+                    page->start[word] = item.run ? RunStart : StateStart;
+                    memset(page->start + word + 1, NoStart, here - 1);
+                }
+                else
+                    memset(page->start + word, NoStart, here);
+                i += here;
             }
         }
     }
@@ -502,15 +512,15 @@ namespace
             for (uint16_t at : model.passList) model.passMask[at] &= 0x7F;
         }
 
-        {
+        // Made once, under the lock the readers hold (not taken again for
+        // every draw: the command processor holds it for each of its own).
+        static std::once_flag made;
+        std::call_once(made, []() {
             std::lock_guard<std::mutex> lock(g_mutex);
-            if (!g_records)
-            {
-                g_records.reset(new Record[RecordCount]);
-                g_keys.assign(RecordCount, 0);
-                g_arena.reset(new uint32_t[ArenaChunks * ChunkWords]);
-            }
-        }
+            g_records.reset(new Record[RecordCount]);
+            g_keys.assign(RecordCount, 0);
+            g_arena.reset(new uint32_t[ArenaChunks * ChunkWords]);
+        });
 
         // The record is made here, the changed chunks going into the arena
         // (one writer: this is under g_modelMutex), and only put into its
@@ -542,10 +552,16 @@ namespace
             staging.oldest = std::min(staging.oldest, model.chunkSerial[c]);
         }
         model.dirty = 0;
+        // The constants from memory, by their bits: nearly every draw has
+        // some (a shader's own literals), and looking at all 512 for them
+        // was a good part of what a record cost.
         staging.constantMemory.clear();
-        if (model.fromMemory != 0)
-            for (uint32_t i = 0; i < 512; i++)
-                if (model.constantMemory[i] != 0) staging.constantMemory.emplace_back(uint16_t(i), model.constantMemory[i]);
+        for (uint32_t w = 0; w < 8; w++)
+            for (uint64_t bits = model.fromMemory[w]; bits != 0; bits &= bits - 1)
+            {
+                const uint32_t i = w * 64 + uint32_t(__builtin_ctzll(bits));
+                staging.constantMemory.emplace_back(uint16_t(i), model.constantMemory[i]);
+            }
         for (uint32_t pass = 0; pass < 2; pass++)
         {
             staging.vertex[pass] = model.vertex[pass];
@@ -597,8 +613,9 @@ namespace
             model.passMask[at] = 0;
             if (reg >= 0x4000 && reg < 0x4800)
             {
-                uint32_t& memory = model.constantMemory[(reg - 0x4000) >> 2];
-                if (memory != 0) { memory = 0; model.fromMemory--; }
+                const uint32_t constant = (reg - 0x4000) >> 2;
+                uint32_t& memory = model.constantMemory[constant];
+                if (memory != 0) { memory = 0; model.fromMemory[constant >> 6] &= ~(1ull << (constant & 63)); }
             }
             return;
         }
@@ -654,9 +671,9 @@ namespace
                         for (uint32_t i = 0; i < dwords; i += 4)
                             if (index + i < 0x4800)
                             {
-                                uint32_t& memory = model.constantMemory[(index + i - 0x4000) >> 2];
-                                if (memory == 0) model.fromMemory++;
-                                memory = address + i * 4;
+                                const uint32_t constant = (index + i - 0x4000) >> 2;
+                                model.constantMemory[constant] = address + i * 4;
+                                model.fromMemory[constant >> 6] |= 1ull << (constant & 63);
                             }
                     }
                 }
