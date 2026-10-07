@@ -43,6 +43,7 @@
 #include "render.h"
 #include "render_shaders.h"
 #include "render_state.h"
+#include "settings.h"
 
 #include <algorithm>
 #include <chrono>
@@ -130,16 +131,21 @@ namespace
         static const bool on = Wanted("COD3_NATIVECHECK");
         return on;
     }
-    bool DrawingNow()
+    // The native path: 0 off, 1 the draws from their records (N2), 2 the
+    // buffers run from their native lists as well (N3). COD3_NATIVE=0|1|2,
+    // else the settings' "Native command lists" (2). Read once: the records
+    // have to be made from the start.
+    int NativeMode()
     {
-        static const bool on = Wanted("COD3_NATIVE");
-        return on;
+        static const int mode = []() {
+            const char* t = getenv("COD3_NATIVE");
+            if (t != nullptr && t[0] != 0) return t[0] == '2' ? 2 : t[0] == '0' ? 0 : 1;
+            return Settings::Get().nativeCommands ? 2 : 0;
+        }();
+        return mode;
     }
-    bool ExecutingNow()
-    {
-        static const bool on = []() { const char* t = getenv("COD3_NATIVE"); return t != nullptr && t[0] == '2'; }();
-        return on;
-    }
+    bool DrawingNow() { return NativeMode() != 0; }
+    bool ExecutingNow() { return NativeMode() == 2; }
     // Whether draws are recorded at all.
     bool RecordingNow()
     {

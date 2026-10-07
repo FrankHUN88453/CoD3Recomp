@@ -184,6 +184,14 @@ beállításokban `vsync = 1`, és 120 Hz-es kijelzőn a 8,3 ms-nál kicsit
 hosszabb képkockák 60 fps-re kvantálódnak – összehasonlításhoz
 `COD3_VSYNC=0`.
 
+**Kipróbálás:** az F11 menüben „Native command lists (experimental)”
+(`native_commands` az ini-ben, újraindítás után érvényes), vagy
+`COD3_NATIVE=2`; a `COD3_NATIVE=0` a menü beállítását is felülírja.
+Tesztelve: Saint-Lô, erdő, Chambois, Laison, Island, Night Drop, Hostage,
+Falaise, filmek, két `map_restart`. A `spmap` egy pályán belülről a régi
+úton is elakad (a betöltés felszabadított memóriát olvas), ez nem az N3
+hibája; a küldetések között a játék amúgy újraindítja magát.
+
 ## Felépítés
 
 1. **Horog-réteg** (`d3d_hooks.cpp`): a könyvtár API-függvényeinek

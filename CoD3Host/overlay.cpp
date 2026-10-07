@@ -298,6 +298,9 @@ namespace
                     ImGui::Checkbox("Console depth precision", &g_edit.consoleDepth);
                     ImGui::SameLine();
                     ImGui::TextDisabled("(no flickering surfaces; costs frame rate with MSAA; after a restart)");
+                    ImGui::Checkbox("Native command lists (experimental)", &g_edit.nativeCommands);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(the draws' state straight from the game's own calls: faster; after a restart)");
                     ImGui::Checkbox("Vertical sync (VSync)", &g_edit.vsync);
                     ImGui::Checkbox("Unlimited frame rate in levels", &g_edit.unlockFrameRate);
                     ImGui::SameLine();
