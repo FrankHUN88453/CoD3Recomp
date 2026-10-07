@@ -292,6 +292,20 @@ namespace
         snprintf(text, sizeof(text), "%llx (+%llx)", (unsigned long long)start, (unsigned long long)(start - module));
         return text;
     }
+
+    // The source line of an address: "file.cpp:123", or "" when unknown.
+    std::string LineOf(HANDLE process, DWORD64 address)
+    {
+        std::lock_guard<std::recursive_mutex> lock(g_symbolsLock);
+        IMAGEHLP_LINE64 line{};
+        line.SizeOfStruct = sizeof(line);
+        DWORD displacement = 0;
+        if (!SymGetLineFromAddr64(process, address, &displacement, &line) || line.FileName == nullptr) return "";
+        const char* file = line.FileName;
+        for (const char* p = line.FileName; *p != 0; p++)
+            if (*p == '\\' || *p == '/') file = p + 1;
+        return std::string(file) + ":" + std::to_string(line.LineNumber);
+    }
 }
 
 void Kernel::ProfileHostThread(uint32_t osId, const char* name, const char* tag)
@@ -306,6 +320,10 @@ void Kernel::ProfileHostThread(uint32_t osId, const char* name, const char* tag)
         std::unordered_map<DWORD64, uint32_t> self, inclusive;
         // For the busiest functions, who called them: (function, caller).
         std::map<std::pair<DWORD64, DWORD64>, uint32_t> callers;
+        // COD3_HOSTPROFILE_LINES=1: where in a function the samples fell,
+        // by the instruction they were at.
+        static const bool byLine = getenv("COD3_HOSTPROFILE_LINES") != nullptr;
+        std::unordered_map<DWORD64, std::unordered_map<DWORD64, uint32_t>> at;
         uint32_t samples = 0;
         auto reported = std::chrono::steady_clock::now();
         for (;;)
@@ -320,12 +338,14 @@ void Kernel::ProfileHostThread(uint32_t osId, const char* name, const char* tag)
                 DWORD64 starts[64];
                 int count = 0;
                 Kernel::SetUnwinding(true);
+                const DWORD64 rip = context.Rip;   // the unwind moves the context on
                 FunctionsOf(&context, starts, count, 64);
                 Kernel::SetUnwinding(false);
                 if (count > 0)
                 {
                     samples++;
                     self[starts[0]]++;
+                    if (byLine) at[starts[0]][rip]++;
                     if (count > 1) callers[{ starts[0], starts[1] }]++;
                     for (int i = 0; i < count; i++)
                     {
@@ -373,6 +393,25 @@ void Kernel::ProfileHostThread(uint32_t osId, const char* name, const char* tag)
                     add("\n");
                 }
             }
+            if (byLine)
+            {
+                // The five busiest functions, by source line.
+                std::vector<std::pair<uint32_t, DWORD64>> busiest;
+                for (const auto& [start, hits] : self) busiest.push_back({ hits, start });
+                std::sort(busiest.begin(), busiest.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+                for (size_t i = 0; i < busiest.size() && i < 5; i++)
+                {
+                    std::map<std::string, uint32_t> lines;
+                    for (const auto& [rip, hits] : at[busiest[i].second]) lines[LineOf(process, rip)] += hits;
+                    std::vector<std::pair<uint32_t, std::string>> ordered;
+                    for (const auto& [line, hits] : lines) ordered.push_back({ hits, line });
+                    std::sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+                    add("profile of the %s, %s by line:", name, FunctionName(process, busiest[i].second).c_str());
+                    for (size_t j = 0; j < ordered.size() && j < 12; j++)
+                        add(" %s %.1f%%", ordered[j].second.empty() ? "?" : ordered[j].second.c_str(), 100.0 * ordered[j].first / samples);
+                    add("\n");
+                }
+            }
             {
                 static std::mutex printing;
                 std::lock_guard<std::mutex> lock(printing);
@@ -381,6 +420,7 @@ void Kernel::ProfileHostThread(uint32_t osId, const char* name, const char* tag)
             }
             self.clear();
             inclusive.clear();
+            at.clear();
             callers.clear();
             samples = 0;
         }
