@@ -339,33 +339,46 @@ void Kernel::ProfileHostThread(uint32_t osId, const char* name, const char* tag)
             const auto now = std::chrono::steady_clock::now();
             if (now - reported < std::chrono::seconds(5) || samples == 0) continue;
             reported = now;
+            // The report made whole, then written at once: several threads
+            // may be profiled, and their lines would interleave.
+            std::string report;
+            auto add = [&report](const char* format, auto... values) {
+                char line[512];
+                snprintf(line, sizeof(line), format, values...);
+                report += line;
+            };
             for (int kind = 0; kind < 2; kind++)
             {
                 std::vector<std::pair<uint32_t, DWORD64>> ordered;
                 for (const auto& [start, hits] : kind == 0 ? self : inclusive) ordered.push_back({ hits, start });
                 std::sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
-                printf("profile of the %s, %u samples, %s:\n", name, samples, kind == 0 ? "in the function itself" : "with what it calls");
-                for (size_t i = 0; i < ordered.size() && i < 30; i++)
-                    printf("  %5.1f%% %s\n", 100.0 * ordered[i].first / samples, FunctionName(process, ordered[i].second).c_str());
+                add("profile of the %s, %u samples, %s:\n", name, samples, kind == 0 ? "in the function itself" : "with what it calls");
+                for (size_t i = 0; i < ordered.size() && i < (kind == 0 ? 30u : 50u); i++)
+                    add("  %5.1f%% %s\n", 100.0 * ordered[i].first / samples, FunctionName(process, ordered[i].second).c_str());
             }
             {
                 std::vector<std::pair<uint32_t, DWORD64>> busiest;
                 for (const auto& [start, hits] : self) busiest.push_back({ hits, start });
                 std::sort(busiest.begin(), busiest.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
-                printf("profile of the %s, who called the busiest:\n", name);
+                add("profile of the %s, who called the busiest:\n", name);
                 for (size_t i = 0; i < busiest.size() && i < 8; i++)
                 {
                     std::vector<std::pair<uint32_t, DWORD64>> from;
                     for (const auto& [pair, hits] : callers)
                         if (pair.first == busiest[i].second) from.push_back({ hits, pair.second });
                     std::sort(from.begin(), from.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
-                    printf("  %s:", FunctionName(process, busiest[i].second).c_str());
+                    add("  %s:", FunctionName(process, busiest[i].second).c_str());
                     for (size_t j = 0; j < from.size() && j < 4; j++)
-                        printf(" %s %.1f%%%s", FunctionName(process, from[j].second).c_str(), 100.0 * from[j].first / samples, j + 1 < from.size() && j < 3 ? "," : "");
-                    printf("\n");
+                        add(" %s %.1f%%%s", FunctionName(process, from[j].second).c_str(), 100.0 * from[j].first / samples, j + 1 < from.size() && j < 3 ? "," : "");
+                    add("\n");
                 }
             }
-            fflush(stdout);
+            {
+                static std::mutex printing;
+                std::lock_guard<std::mutex> lock(printing);
+                fwrite(report.data(), 1, report.size(), stdout);
+                fflush(stdout);
+            }
             self.clear();
             inclusive.clear();
             callers.clear();

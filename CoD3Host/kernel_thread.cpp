@@ -109,6 +109,15 @@ namespace
         Kernel::SetCurrentContext(&ctx);
         Kernel::RecordThreadPointer(GetCurrentThreadId(), threadPointer);
         Kernel::ArmWatchpoints();
+        // COD3_HOSTPROFILE naming a start address (82123DE0, say) profiles
+        // the threads that start there.
+        if (getenv("COD3_HOSTPROFILE") != nullptr)
+        {
+            char tag[16];
+            snprintf(tag, sizeof(tag), "%08X", start.xapiStartup != 0 ? start.startAddress : start.startAddress);
+            const std::string* name = new std::string("guest thread at " + std::string(tag) + " (os " + std::to_string(GetCurrentThreadId()) + ")");
+            Kernel::ProfileHostThread(GetCurrentThreadId(), name->c_str(), (new std::string(tag))->c_str());
+        }
         // The thread that feeds the GPU, the replay of the recorded command
         // lists at sub_82302C80, gets a hardware thread of its own rather
         // than the one the title puts it on, which it shares with a render
