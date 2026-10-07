@@ -97,6 +97,7 @@ namespace
         ID3D11ShaderResourceView* vertexBuffers[96] = {};
         bool indices32 = false;
         bool indexBufferSet = false;
+        ID3D11Buffer* indexBuffer = nullptr;
         uint32_t floatAt[2] = { 0xFFFFFFFFu, 0xFFFFFFFFu };   // the constant ring offsets bound
         uint32_t floatCount[2] = { 0, 0 };
         uint32_t drawAt = 0xFFFFFFFFu;
@@ -849,11 +850,14 @@ namespace
             g_context->IASetPrimitiveTopology(topology);
             g_bound.topology = topology;
         }
-        if (command.indexed && (!g_bound.indexBufferSet || g_bound.indices32 != command.indices32))
+        // The ring, or a buffer of the draw's indices kept converted.
+        ID3D11Buffer* const indexBuffer = command.indexBuffer != nullptr ? command.indexBuffer : RenderResources::IndexRing();
+        if (command.indexed && (!g_bound.indexBufferSet || g_bound.indices32 != command.indices32 || g_bound.indexBuffer != indexBuffer))
         {
-            g_context->IASetIndexBuffer(RenderResources::IndexRing(), command.indices32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT, 0);
+            g_context->IASetIndexBuffer(indexBuffer, command.indices32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT, 0);
             g_bound.indexBufferSet = true;
             g_bound.indices32 = command.indices32;
+            g_bound.indexBuffer = indexBuffer;
         }
 
         RenderStats::Enter(RenderStats::SectionDraw);

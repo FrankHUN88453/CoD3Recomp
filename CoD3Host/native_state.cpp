@@ -813,9 +813,12 @@ namespace
     uint64_t g_imageChunks[Chunks];
     bool g_imageStarted = false;
     // The words the last draw set over its chunks (constants from memory, a
-    // pass's own values), by register: put back from their chunk before the
-    // next draw when that chunk stays, rather than the chunk copied again.
-    std::vector<uint32_t> g_overridden;
+    // pass's own values), by register, with what the chunk had there: put
+    // back before the next draw when that chunk stays, rather than the chunk
+    // copied again (and without reading the chunk again from the arena,
+    // which by then is out of the cache).
+    struct Overridden { uint32_t reg, value; };
+    std::vector<Overridden> g_overridden;
 }
 
 bool NativeState::Begin(uint32_t lastWordPhysical)
@@ -859,10 +862,11 @@ bool NativeState::Begin(uint32_t lastWordPhysical)
         for (uint64_t& chunk : g_imageChunks) chunk = ~0ull;
         g_imageStarted = true;
     }
-    for (const uint32_t reg : g_overridden)
+    // Last first: a word set twice gets the chunk's value back.
+    for (size_t i = g_overridden.size(); i-- > 0;)
     {
-        const uint32_t at = CopyIndex(reg), c = at / ChunkWords;
-        if (g_imageChunks[c] == chunks[c]) g_image[reg] = ArenaAt(chunks[c])[at - c * ChunkWords];
+        const Overridden& o = g_overridden[i];
+        if (g_imageChunks[CopyIndex(o.reg) / ChunkWords] == chunks[CopyIndex(o.reg) / ChunkWords]) g_image[o.reg] = o.value;
     }
     g_overridden.clear();
     for (uint32_t c = 0; c < Chunks; c++)
@@ -887,14 +891,14 @@ bool NativeState::Begin(uint32_t lastWordPhysical)
         const uint32_t reg = 0x4000 + index * 4u;
         for (uint32_t i = 0; i < 4; i++)
         {
+            g_overridden.push_back(Overridden{ reg + i, g_image[reg + i] });
             g_image[reg + i] = Guest::Read32(Guest::Base, Guest::PhysicalAlias(address + i * 4));
-            g_overridden.push_back(reg + i);
         }
     }
     for (const auto& [reg, value] : passRegisters)
     {
+        g_overridden.push_back(Overridden{ reg, g_image[reg] });
         g_image[reg] = value;
-        g_overridden.push_back(reg);
     }
 
     // COD3_IMAGECHECK=1: the image, filled a chunk at a time and put back a

@@ -26,6 +26,7 @@ struct ID3D11DepthStencilView;
 struct ID3D11Texture2D;
 struct ID3D11VertexShader;
 struct ID3D11PixelShader;
+struct ID3D11Buffer;
 
 namespace RenderState
 {
@@ -240,6 +241,7 @@ namespace RenderState
         bool indices32 = false;
         uint32_t indexCount = 0;
         uint32_t indexRingOffset = 0;   // bytes
+        ID3D11Buffer* indexBuffer = nullptr;   // the draw's indices kept converted (from 0), else the ring
         int32_t baseVertex = 0;
         uint32_t triangles = 0;         // for the counters
 

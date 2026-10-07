@@ -156,6 +156,12 @@ namespace RenderResources
     void IndexUnmap();
     ID3D11Buffer* IndexRing();
 
+    // A draw's indices kept converted (COD3_WRITEWATCH): a buffer of them
+    // from its start, 32 bit or not in `indices32`, or null to stream them
+    // through the ring. `reset` is the strip reset index when strips are
+    // reset (PA_SU_SC_MODE_CNTL bit 21), else ~0.
+    ID3D11Buffer* IndexBufferFor(uint32_t physical, uint32_t count, bool wide, uint32_t reset, bool& indices32);
+
     // Constants, the same way, in whole 256 byte units for the offset
     // binding. Reserve first for everything one draw will append: a wrap
     // in the middle of a draw's appends would leave the earlier ones in

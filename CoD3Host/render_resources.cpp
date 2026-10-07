@@ -356,6 +356,37 @@ namespace
     RenderTable::KeyTable<2> g_bufferKeys;
     std::vector<uint32_t> g_freeBuffers;
 
+    // A draw's indices kept converted, by where they are, how many, and how
+    // (COD3_WRITEWATCH: kept only while the pages say they are the same).
+    // A range is a candidate first, its fingerprint noted but nothing
+    // made: one seen again unchanged gets its buffer, so the title's
+    // dynamic indices, at new places every frame, make none.
+    struct IndexEntry
+    {
+        ComPtr<ID3D11Buffer> buffer;     // none while a candidate
+        uint32_t key[4] = {};            // physical, count, bit 0 32 bit, the reset index (~0 none)
+        uint64_t fingerprint = 0;
+        uint64_t watchedSince = 0;       // its pages watched from this write sequence on, 0 not
+        uint64_t usedFrame = 0;
+        uint32_t stable = 0;             // looks in a row that found it the same
+        uint32_t bytes = 0;              // the host buffer's
+        bool live = false;
+    };
+    std::deque<IndexEntry> g_indexEntries;   // by handle less one
+    RenderTable::KeyTable<4> g_indexKeys;
+    std::vector<uint32_t> g_freeIndexEntries;
+    std::vector<uint8_t> g_indexScratch;
+
+    void DropIndexEntry(uint32_t i)
+    {
+        IndexEntry& entry = g_indexEntries[i];
+        g_indexKeys.Erase(entry.key);
+        g_resourceBytes -= entry.bytes;
+        entry.buffer.Reset();
+        entry.live = false;
+        g_freeIndexEntries.push_back(i + 1);
+    }
+
     // The bytes of a texture level as the host wants them: untiled, and
     // the console's byte order undone. `x0`, `y0` are where the level lies
     // in its tile when the levels are packed.
@@ -791,6 +822,13 @@ bool RenderResources::BeginFrame(uint64_t frame)
         g_freeBuffers.push_back(i + 1);
         g_released++;
     }
+    for (uint32_t i = 0; i < g_indexEntries.size(); i++)
+    {
+        IndexEntry& entry = g_indexEntries[i];
+        if (!entry.live || frame - entry.usedFrame < UnusedFrames) continue;
+        if (entry.buffer) g_released++;
+        DropIndexEntry(i);
+    }
     return remade;
 }
 
@@ -822,6 +860,13 @@ bool RenderResources::Forget(uint32_t address, uint32_t size)
         g_freeBuffers.push_back(i + 1);
         g_released++;
         dropped = true;
+    }
+    for (uint32_t i = 0; i < g_indexEntries.size(); i++)
+    {
+        IndexEntry& entry = g_indexEntries[i];
+        if (!entry.live || !inside(entry.key[0])) continue;
+        if (entry.buffer) { g_released++; dropped = true; }
+        DropIndexEntry(i);
     }
     for (uint32_t i = 0; i < g_resolved.size(); i++)
     {
@@ -1362,6 +1407,127 @@ uint8_t* RenderResources::IndexMap(uint32_t bytes, uint32_t& offset)
 void RenderResources::IndexUnmap() { g_indexRing.Unmap(); }
 
 ID3D11Buffer* RenderResources::IndexRing() { return g_indexRing.buffer.Get(); }
+
+namespace
+{
+    // The guest's indices as the host draws them (as RenderCommands'
+    // Indices turns them round into the ring), into g_indexScratch.
+    const uint8_t* ConvertIndices(const uint8_t* data, uint32_t count, bool wide, uint32_t reset, bool indices32)
+    {
+        g_indexScratch.resize(size_t(count) * (indices32 ? 4 : 2));
+        const bool resetting = reset != ~0u;
+        if (wide)
+        {
+            uint32_t* to = reinterpret_cast<uint32_t*>(g_indexScratch.data());
+            for (uint32_t i = 0; i < count; i++)
+            {
+                uint32_t w;
+                memcpy(&w, data + i * 4, 4);
+                w = _byteswap_ulong(w);
+                to[i] = resetting && (w & 0xFFFFFFu) == reset ? 0xFFFFFFFFu : w;
+            }
+        }
+        else if (indices32)
+        {
+            // Widened, so the cut index can be the host's.
+            uint32_t* to = reinterpret_cast<uint32_t*>(g_indexScratch.data());
+            for (uint32_t i = 0; i < count; i++)
+            {
+                uint16_t h;
+                memcpy(&h, data + i * 2, 2);
+                const uint32_t index = _byteswap_ushort(h);
+                to[i] = index == reset ? 0xFFFFFFFFu : index;
+            }
+        }
+        else
+        {
+            uint16_t* to = reinterpret_cast<uint16_t*>(g_indexScratch.data());
+            for (uint32_t i = 0; i < count; i++)
+            {
+                uint16_t h;
+                memcpy(&h, data + i * 2, 2);
+                to[i] = _byteswap_ushort(h);
+            }
+        }
+        return g_indexScratch.data();
+    }
+}
+
+ID3D11Buffer* RenderResources::IndexBufferFor(uint32_t physical, uint32_t count, bool wide, uint32_t reset, bool& indices32)
+{
+    if (!WriteWatch::Enabled() || count == 0 || count > (1u << 22)) return nullptr;
+    t_fingerprintKind = "index";
+    // Sixteen bit indices with a reset index that is not all ones are
+    // widened, so the cut can be the host's.
+    indices32 = wide || (reset != ~0u && reset != 0xFFFFu);
+    const uint32_t guestBytes = count * (wide ? 4 : 2);
+    const uint32_t key[4] = { physical & 0x1FFFFFFFu, count, wide ? 1u : 0u, reset };
+    const uint8_t* data = Guest::Base + Guest::PhysicalAlias(physical);
+    Handle handle = g_indexKeys.Find(key);
+    if (handle == 0)
+    {
+        // A candidate: noted, streamed this time.
+        if (!g_freeIndexEntries.empty()) { handle = g_freeIndexEntries.back(); g_freeIndexEntries.pop_back(); }
+        else { g_indexEntries.emplace_back(); handle = Handle(g_indexEntries.size()); }
+        IndexEntry& entry = g_indexEntries[handle - 1];
+        entry = IndexEntry();
+        memcpy(entry.key, key, sizeof(entry.key));
+        entry.fingerprint = Fingerprint(data, guestBytes, true);
+        entry.usedFrame = g_frame;
+        entry.live = true;
+        g_indexKeys.Insert(key, handle);
+        return nullptr;
+    }
+    IndexEntry& entry = g_indexEntries[handle - 1];
+    entry.usedFrame = g_frame;
+    if (entry.watchedSince != 0)
+    {
+        if (WriteWatch::Clean(physical, guestBytes, entry.watchedSince))
+        {
+            RenderStats::Frame().watchedLooks++;
+            WatchAudit("index buffer", physical, data, guestBytes, true, entry.fingerprint);
+            return entry.buffer.Get();
+        }
+        entry.watchedSince = 0;
+    }
+    // Not watched (yet): looked at by every draw, so a range the title
+    // writes again within a frame is never drawn with what it held before.
+    const uint64_t fingerprint = Fingerprint(data, guestBytes, true);
+    if (fingerprint != entry.fingerprint)
+    {
+        entry.fingerprint = fingerprint;
+        entry.stable = 0;
+        if (!entry.buffer) return nullptr;
+        g_context->UpdateSubresource(entry.buffer.Get(), 0, nullptr, ConvertIndices(data, count, wide, reset, indices32), 0, 0);
+        RenderStats::Frame().bufferUploads++;
+        RenderStats::Frame().uploadBytes += entry.bytes;
+        return entry.buffer.Get();
+    }
+    if (entry.stable < StableLooks) entry.stable++;
+    if (!entry.buffer)
+    {
+        // Seen again the same: made.
+        D3D11_BUFFER_DESC desc{};
+        desc.ByteWidth = count * (indices32 ? 4 : 2);
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_INDEX_BUFFER;
+        D3D11_SUBRESOURCE_DATA initial{ ConvertIndices(data, count, wide, reset, indices32), 0, 0 };
+        if (FAILED(g_device->CreateBuffer(&desc, &initial, &entry.buffer))) return nullptr;
+        entry.bytes = desc.ByteWidth;
+        g_resourceBytes += entry.bytes;
+        RenderStats::Frame().bufferUploads++;
+        RenderStats::Frame().uploadBytes += entry.bytes;
+    }
+    if (entry.stable >= StableLooks)
+    {
+        // Still for long enough: its pages watched from now on, and looked
+        // at once more after they are, for a write in between.
+        const uint64_t since = WriteWatch::Sequence();
+        if (WriteWatch::Arm(physical, guestBytes) && Fingerprint(data, guestBytes, true) == entry.fingerprint)
+            entry.watchedSince = since;
+    }
+    return entry.buffer.Get();
+}
 
 bool RenderResources::ConstantReserve(uint32_t bytes)
 {

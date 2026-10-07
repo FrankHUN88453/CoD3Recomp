@@ -652,6 +652,21 @@ namespace
         const bool convert = convertQuads || convertFan;
         if (state.sourceSelect == 0 && !convert)
         {
+            // Kept converted, while their pages say they are the same
+            // (COD3_WRITEWATCH): nothing to turn round or stream.
+            {
+                const uint32_t reset = resetEnabled ? state.resetIndex & (state.wideIndices ? 0xFFFFFFu : 0xFFFFu) : ~0u;
+                bool indices32 = false;
+                if (ID3D11Buffer* kept = RenderResources::IndexBufferFor(state.indexBase, indexCount, state.wideIndices, reset, indices32))
+                {
+                    out.indexBuffer = kept;
+                    out.indexRingOffset = 0;
+                    out.indices32 = indices32;
+                    out.indexed = true;
+                    out.indexCount = indexCount;
+                    return true;
+                }
+            }
             // The common case: turned round straight into the ring.
             const uint8_t* data = Guest::Base + Guest::PhysicalAlias(state.indexBase);
             if (state.wideIndices)
