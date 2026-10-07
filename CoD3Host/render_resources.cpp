@@ -10,7 +10,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <chrono>
+#include <map>
 #include <set>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 #include <d3d11_1.h>
 #include <wrl/client.h>
@@ -99,8 +104,41 @@ namespace
     // sixty four words across the range plus the ends, for one that has
     // been still, where a change is a rare and large thing (the memory
     // reused for something else).
+    // COD3_FPAUDIT=1: what the dense looks are spent on, every five
+    // seconds: by memory, how many bytes and looks, and which kind.
+    thread_local const char* t_fingerprintKind = "other";
+    void AuditFingerprint(const uint8_t* data, size_t bytes)
+    {
+        struct Use { uint64_t bytes = 0, looks = 0; size_t size = 0; const char* kind = ""; };
+        static std::unordered_map<const uint8_t*, Use> uses;
+        static auto reported = std::chrono::steady_clock::now();
+        Use& use = uses[data];
+        use.bytes += bytes; use.looks++; use.size = bytes; use.kind = t_fingerprintKind;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - reported < std::chrono::seconds(5)) return;
+        reported = now;
+        std::vector<std::pair<const uint8_t*, Use>> ordered(uses.begin(), uses.end());
+        std::sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) { return a.second.bytes > b.second.bytes; });
+        std::map<std::string, std::pair<uint64_t, uint64_t>> byKind;   // kind and size class: bytes, resources
+        for (const auto& [at, u] : ordered)
+        {
+            auto& k = byKind[std::string(u.kind) + (u.size <= (256u << 10) ? " small" : " large")];
+            k.first += u.bytes; k.second++;
+        }
+        printf("fingerprints, five seconds:");
+        for (const auto& [kind, k] : byKind) printf(" %s %.1f MB over %llu,", kind.c_str(), k.first / 1048576.0, (unsigned long long)k.second);
+        printf("\n");
+        for (size_t i = 0; i < ordered.size() && i < 12; i++)
+            printf("  %s %08llx: %u bytes, %llu looks, %.1f MB\n", ordered[i].second.kind, (unsigned long long)(ordered[i].first - Guest::Base),
+                unsigned(ordered[i].second.size), (unsigned long long)ordered[i].second.looks, ordered[i].second.bytes / 1048576.0);
+        fflush(stdout);
+        uses.clear();
+    }
+
     uint64_t Fingerprint(const uint8_t* data, size_t bytes, bool dense)
     {
+        static const bool audit = getenv("COD3_FPAUDIT") != nullptr;
+        if (audit && dense) AuditFingerprint(data, bytes);
         RenderStats::Frame().fingerprints++;
         RenderStats::Frame().fingerprintBytes += dense ? bytes : std::min<size_t>(bytes, 65 * 64);
         constexpr uint64_t K = 1099511628211ull;
@@ -998,6 +1036,7 @@ const char* RenderResources::WhiteReason() { return g_whiteReason; }
 
 RenderState::Handle RenderResources::TextureFor(const uint32_t fetch[6], uint32_t& width, uint32_t& height, bool& resolved)
 {
+    t_fingerprintKind = "texture";
     const uint32_t format = fetch[1] & 0x3F;
     const uint32_t base = fetch[1] & 0xFFFFF000u;
     width = (fetch[2] & 0x1FFF) + 1;
@@ -1103,6 +1142,7 @@ ID3D11ShaderResourceView* RenderResources::TextureView(Handle handle, uint32_t d
 
 RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t bytes, uint32_t endian)
 {
+    t_fingerprintKind = "vertex";
     if (bytes == 0 || bytes > (128u << 20)) return 0;
     const uint32_t key[2] = { physical & 0x1FFFFFFFu, endian };
     Handle handle = g_bufferKeys.Find(key);

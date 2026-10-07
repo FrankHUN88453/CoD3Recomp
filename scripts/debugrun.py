@@ -131,7 +131,29 @@ def main():
     # A test installs and runs them as CoD3-test.exe, so it never replaces
     # the player's CoD3.exe nor touches their saves; DEBUGRUN_EXE=CoD3.exe
     # installs the build as the game itself.
-    exe = os.path.join(r"D:\Games\x360", os.environ.get("DEBUGRUN_EXE", "CoD3-test.exe"))
+    game_dir = r"D:\Games\x360"
+    name = os.environ.get("DEBUGRUN_EXE", "CoD3-test.exe")
+    stem = os.path.splitext(name)[0]
+    keeps = stem.lower() in ("cod3", "cod3-test")
+    # A probe (any other name) runs from a folder of its own on the system
+    # drive: the game's drive was found full, and a probe there could not
+    # even be copied. game.path sends it to the game; the player's settings
+    # are copied beside it (so a probe that changes them changes its copy),
+    # and the sound decoder's libraries too.
+    import shutil
+    if keeps:
+        install_dir = game_dir
+    else:
+        install_dir = os.path.join(os.environ.get("TEMP", "."), "claude", "debugrun-game", "bin")
+        os.makedirs(install_dir, exist_ok=True)
+        with open(os.path.join(install_dir, "game.path"), "w") as f:
+            f.write(os.path.join(game_dir, "game") + "\n")
+        for extra in ("CoD3Recomp.ini", "avcodec-62.dll", "avutil-60.dll", "swresample-6.dll"):
+            source = os.path.join(game_dir, extra)
+            target = os.path.join(install_dir, extra)
+            if os.path.exists(source) and (extra.endswith(".ini") or not os.path.exists(target)):
+                shutil.copy2(source, target)
+    exe = os.path.join(install_dir, name)
     # A run under another name is a test beside the installed game: its
     # saves and its log go to a folder of their own, so the player's saves
     # and CoD3.log are left alone (COD3_SAVES / COD3_LOG given override it).
@@ -140,14 +162,10 @@ def main():
         os.makedirs(scratch, exist_ok=True)
         env.setdefault("COD3_SAVES", os.path.join(scratch, "saves"))
         env.setdefault("COD3_LOG", os.path.join(scratch, "CoD3.log"))
-    import shutil
     build = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "build", "CoD3Host")
-    stem = os.path.splitext(os.path.basename(exe))[0]
     # The symbols go with an install that stays (CoD3.exe, CoD3-test.exe);
-    # a probe under another name finds them where the build left them, by
-    # the path inside the executable, and half a gigabyte less is copied to
-    # a drive that may not have it.
-    keeps = stem.lower() in ("cod3", "cod3-test")
+    # a probe finds them where the build left them, by the path inside the
+    # executable.
     for name, target in (("CoD3.exe", stem + ".exe"), ("CoD3.pdb", stem + ".pdb")):
         source = os.path.join(build, name)
         if name.endswith(".pdb") and not keeps:
