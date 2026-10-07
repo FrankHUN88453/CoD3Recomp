@@ -269,6 +269,25 @@ namespace
         auditDense = whole;
     }
 
+    // COD3_WATCHAUDIT=1: a resource found the same by its pages
+    // (COD3_WRITEWATCH) is hashed anyway, and a change the pages did not
+    // tell is named.
+    void WatchAudit(const char* kind, uint32_t physical, const uint8_t* data, size_t bytes, bool dense, uint64_t fingerprint)
+    {
+        static const bool audit = getenv("COD3_WATCHAUDIT") != nullptr;
+        if (!audit) return;
+        static std::atomic<uint64_t> looks{ 0 }, missed{ 0 };
+        const uint64_t look = looks.fetch_add(1) + 1;
+        if (Fingerprint(data, bytes, dense) != fingerprint && missed.fetch_add(1) < 8)
+            printf("render: watch audit: the %s at %08X (%zu bytes) changed with no write seen\n", kind, physical, bytes);
+        if ((look & 0xFFFF) == 0)
+        {
+            printf("render: watch audit: %llu looks by the pages, %llu missed\n", (unsigned long long)look,
+                (unsigned long long)missed.load());
+            fflush(stdout);
+        }
+    }
+
     bool WantDense(uint32_t stable, size_t bytes)
     {
         // COD3_DENSEALL=1: everything whole, whatever it costs, for
@@ -290,6 +309,7 @@ namespace
         uint64_t usedFrame = 0;
         uint32_t stable = StableLooks;  // checks in a row that found no change; a texture starts as still
         bool dense = false;             // the fingerprint is of every byte
+        uint64_t watchedSince = 0;      // COD3_WRITEWATCH: its pages watched from this write sequence on, 0 not
         uint32_t width = 0, height = 0, levels = 0;
         uint64_t bytes = 0;
         bool live = false;
@@ -1096,10 +1116,24 @@ RenderState::Handle RenderResources::TextureFor(const uint32_t fetch[6], uint32_
         entry.usedFrame = g_frame;
         if (!look) return handle;
         entry.checkedFrame = g_frame;
+        const size_t span = std::min(SourceBytes(fetch), size_t(64u << 20));
+        // COD3_WRITEWATCH=1: as for a vertex buffer, a texture still for
+        // long enough has its pages watched, and none written since is the
+        // same texture without a byte of it read. The small ones (the HUD's,
+        // hashed whole every frame) are most of what the looks cost.
+        if (entry.watchedSince != 0)
+        {
+            if (WriteWatch::Clean(base, uint32_t(span), entry.watchedSince))
+            {
+                RenderStats::Frame().watchedLooks++;
+                WatchAudit("texture", base, data, span, entry.dense, entry.fingerprint);
+                return handle;
+            }
+            entry.watchedSince = 0;
+        }
         // Compared in the kind the stored fingerprint is; the kind changes
         // only once the memory is known to be the same, so no change is
         // lost in the switch.
-        const size_t span = std::min(SourceBytes(fetch), size_t(64u << 20));
         const uint64_t fingerprint = Fingerprint(data, span, entry.dense);
         if (fingerprint == entry.fingerprint)
         {
@@ -1107,6 +1141,12 @@ RenderState::Handle RenderResources::TextureFor(const uint32_t fetch[6], uint32_
             if (entry.stable < StableLooks) entry.stable++;
             const bool wantDense = WantDense(entry.stable, span);
             if (wantDense != entry.dense) { if (!wantDense) entry.auditDense = entry.fingerprint; entry.dense = wantDense; entry.fingerprint = Fingerprint(data, span, wantDense); }
+            if (WriteWatch::Enabled() && entry.stable >= StableLooks)
+            {
+                const uint64_t since = WriteWatch::Sequence();
+                if (WriteWatch::Arm(base, uint32_t(span)) && Fingerprint(data, span, entry.dense) == entry.fingerprint)
+                    entry.watchedSince = since;
+            }
             return handle;
         }
         entry.stable = 0;
@@ -1210,24 +1250,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
             if (wanted <= entry.seen && WriteWatch::Clean(physical, wanted, entry.watchedSince))
             {
                 RenderStats::Frame().watchedLooks++;
-                // COD3_WATCHAUDIT=1: hashed anyway, and a change the pages
-                // did not tell named.
-                static const bool audit = getenv("COD3_WATCHAUDIT") != nullptr;
-                if (audit)
-                {
-                    static uint64_t looks = 0, missed = 0;
-                    looks++;
-                    if (Fingerprint(data, wanted, entry.dense) != entry.fingerprint)
-                    {
-                        if (missed++ < 8)
-                            printf("render: watch audit: the vertex buffer at %08X (%u bytes) changed with no write seen\n", physical, wanted);
-                    }
-                    if ((looks & 0xFFFF) == 0)
-                    {
-                        printf("render: watch audit: %llu looks by the pages, %llu missed\n", (unsigned long long)looks, (unsigned long long)missed);
-                        fflush(stdout);
-                    }
-                }
+                WatchAudit("vertex buffer", physical, data, wanted, entry.dense, entry.fingerprint);
                 return handle;
             }
             entry.watchedSince = 0;
