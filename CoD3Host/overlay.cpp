@@ -301,6 +301,9 @@ namespace
                     ImGui::Checkbox("Native command lists (experimental)", &g_edit.nativeCommands);
                     ImGui::SameLine();
                     ImGui::TextDisabled("(the draws' state straight from the game's own calls: faster; after a restart)");
+                    ImGui::Checkbox("Watch memory writes (experimental)", &g_edit.watchWrites);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(still textures and buffers not looked at again until written: faster; after a restart)");
                     ImGui::Checkbox("Vertical sync (VSync)", &g_edit.vsync);
                     ImGui::Checkbox("Unlimited frame rate in levels", &g_edit.unlockFrameRate);
                     ImGui::SameLine();

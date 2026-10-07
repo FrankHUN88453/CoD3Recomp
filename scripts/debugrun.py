@@ -148,8 +148,10 @@ def main():
         os.makedirs(install_dir, exist_ok=True)
         with open(os.path.join(install_dir, "game.path"), "w") as f:
             f.write(os.path.join(game_dir, "game") + "\n")
+        # DEBUGRUN_INI: settings of the test's own instead of the player's.
+        settings = os.environ.get("DEBUGRUN_INI")
         for extra in ("CoD3Recomp.ini", "avcodec-62.dll", "avutil-60.dll", "swresample-6.dll"):
-            source = os.path.join(game_dir, extra)
+            source = settings if extra.endswith(".ini") and settings else os.path.join(game_dir, extra)
             target = os.path.join(install_dir, extra)
             if os.path.exists(source) and (extra.endswith(".ini") or not os.path.exists(target)):
                 shutil.copy2(source, target)

@@ -220,6 +220,22 @@ A szálankénti CPU-mérés (`COD3_THREADTIME=1`) és a mintavételező profil
 124 → 135–154 fps. A képkockánkénti rajzolási kép önellenőrzése
 (`COD3_IMAGECHECK=1`) és az N1-paritás továbbra is 0 eltérést mutat.
 
+Később ugyanaznap:
+
+- **Az írásfigyelés a textúrákra is kiterjed.** A kis textúrákat (a HUD-ét)
+  eddig minden képkockán végig kellett hash-elni; ez adta az ujjlenyomatok
+  nagyját. Erdő, N3: 11 → 2,4 MB hash-elés képkockánként, a textúrák
+  0,41 → 0,15 µs rajzolásonként. A `COD3_WATCHAUDIT=1` négy pályán ~19
+  millió lapok szerinti egyezésben 0 kihagyott változást talált. Az F11
+  menüben „Watch memory writes (experimental)” (`watch_writes` az
+  ini-ben, újraindítás után), vagy `COD3_WRITEWATCH=1`.
+- **A konstansfeltöltés nem másolja félre a teljes 4 KB-os fájlt**, csak
+  amit a program olvas (a rekordút változásvizsgálatához ennyi kell).
+- Ezekkel a parancsfeldolgozó az erdőben ~80%-on fut a korábbi 90–96%
+  helyett; a játék fő szála és a munkaszálak közti várakozás lett a
+  következő korlát. A parancsfeldolgozón maradt: `Begin` ~12%, a
+  konstansok és indexek írása az írás-kombinált GPU-memóriába ~15%.
+
 ## Felépítés
 
 1. **Horog-réteg** (`d3d_hooks.cpp`): a könyvtár API-függvényeinek

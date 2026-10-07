@@ -1,5 +1,6 @@
 #include "write_watch.h"
 #include "kernel.h"
+#include "settings.h"
 
 #include <atomic>
 #include <cstdlib>
@@ -69,9 +70,15 @@ namespace
     }
 }
 
+// COD3_WRITEWATCH=0|1, else the settings' "Watch memory writes". Read once,
+// after the settings are loaded (the first caller is the guest's own start).
 bool WriteWatch::Enabled()
 {
-    static const bool enabled = []() { const char* t = getenv("COD3_WRITEWATCH"); return t != nullptr && t[0] != 0 && t[0] != '0'; }();
+    static const bool enabled = []() {
+        const char* t = getenv("COD3_WRITEWATCH");
+        if (t != nullptr && t[0] != 0) return t[0] != '0';
+        return Settings::Get().watchWrites;
+    }();
     return enabled;
 }
 
