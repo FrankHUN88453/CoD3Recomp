@@ -791,10 +791,14 @@ namespace
     // The registers of the draw being made, by register number: only the
     // draw's own (the blocks above) are filled, each draw.
     uint32_t g_image[0x5000];
-    // The chunk each part of it was last filled from; ~0 when it has been
-    // changed since (a pass's own value, a constant from memory).
+    // The chunk each part of it was last filled from; ~0 when it is not
+    // known to be one.
     uint64_t g_imageChunks[Chunks];
     bool g_imageStarted = false;
+    // The words the last draw set over its chunks (constants from memory, a
+    // pass's own values), by register: put back from their chunk before the
+    // next draw when that chunk stays, rather than the chunk copied again.
+    std::vector<uint32_t> g_overridden;
 }
 
 bool NativeState::Begin(uint32_t lastWordPhysical)
@@ -828,6 +832,12 @@ bool NativeState::Begin(uint32_t lastWordPhysical)
         for (uint64_t& chunk : g_imageChunks) chunk = ~0ull;
         g_imageStarted = true;
     }
+    for (const uint32_t reg : g_overridden)
+    {
+        const uint32_t at = CopyIndex(reg), c = at / ChunkWords;
+        if (g_imageChunks[c] == chunks[c]) g_image[reg] = ArenaAt(chunks[c])[at - c * ChunkWords];
+    }
+    g_overridden.clear();
     for (uint32_t c = 0; c < Chunks; c++)
     {
         if (g_imageChunks[c] == chunks[c]) continue;
@@ -848,13 +858,41 @@ bool NativeState::Begin(uint32_t lastWordPhysical)
     for (const auto& [index, address] : memory)
     {
         const uint32_t reg = 0x4000 + index * 4u;
-        for (uint32_t i = 0; i < 4; i++) g_image[reg + i] = Guest::Read32(Guest::Base, Guest::PhysicalAlias(address + i * 4));
-        g_imageChunks[CopyIndex(reg) / ChunkWords] = ~0ull;
+        for (uint32_t i = 0; i < 4; i++)
+        {
+            g_image[reg + i] = Guest::Read32(Guest::Base, Guest::PhysicalAlias(address + i * 4));
+            g_overridden.push_back(reg + i);
+        }
     }
     for (const auto& [reg, value] : passRegisters)
     {
         g_image[reg] = value;
-        g_imageChunks[CopyIndex(reg) / ChunkWords] = ~0ull;
+        g_overridden.push_back(reg);
+    }
+
+    // COD3_IMAGECHECK=1: the image, filled a chunk at a time and put back a
+    // word at a time, held against one made whole from the record.
+    static const bool imageCheck = getenv("COD3_IMAGECHECK") != nullptr;
+    if (imageCheck)
+    {
+        static uint64_t checked = 0, wrong = 0;
+        static auto reported = std::chrono::steady_clock::now();
+        uint32_t whole[ShadowWords];
+        for (uint32_t c = 0; c < Chunks; c++) memcpy(whole + c * ChunkWords, ArenaAt(chunks[c]), ChunkLength(c) * 4);
+        for (const auto& [index, address] : memory)
+            for (uint32_t i = 0; i < 4; i++) whole[CopyIndex(0x4000 + index * 4u + i)] = Guest::Read32(Guest::Base, Guest::PhysicalAlias(address + i * 4));
+        for (const auto& [reg, value] : passRegisters) whole[CopyIndex(reg)] = value;
+        bool same = true;
+        for (uint32_t at = 0; at < ShadowWords && same; at++) same = whole[at] == g_image[g_copy.reg[at]];
+        checked++;
+        if (!same) wrong++;
+        if (std::chrono::steady_clock::now() - reported > std::chrono::seconds(5))
+        {
+            printf("native image: %llu draws, %llu not as the record says\n", (unsigned long long)checked, (unsigned long long)wrong);
+            fflush(stdout);
+            checked = wrong = 0;
+            reported = std::chrono::steady_clock::now();
+        }
     }
     if (vertex.dwords != 0) Render::UseProgram(false, Guest::PhysicalAlias(vertex.address), vertex.dwords, vertex.hash);
     if (pixel.dwords != 0) Render::UseProgram(true, Guest::PhysicalAlias(pixel.address), pixel.dwords, pixel.hash);

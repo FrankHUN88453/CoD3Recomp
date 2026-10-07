@@ -143,8 +143,18 @@ def main():
     import shutil
     build = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "build", "CoD3Host")
     stem = os.path.splitext(os.path.basename(exe))[0]
+    # The symbols go with an install that stays (CoD3.exe, CoD3-test.exe);
+    # a probe under another name finds them where the build left them, by
+    # the path inside the executable, and half a gigabyte less is copied to
+    # a drive that may not have it.
+    keeps = stem.lower() in ("cod3", "cod3-test")
     for name, target in (("CoD3.exe", stem + ".exe"), ("CoD3.pdb", stem + ".pdb")):
         source = os.path.join(build, name)
+        if name.endswith(".pdb") and not keeps:
+            stale = os.path.join(os.path.dirname(exe), target)
+            if os.path.exists(stale):
+                os.remove(stale)
+            continue
         if os.path.exists(source):
             shutil.copy2(source, os.path.join(os.path.dirname(exe), target))
     out_path = os.path.join(os.environ.get("TEMP", "."), "claude", "debugrun.out")

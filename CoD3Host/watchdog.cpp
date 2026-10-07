@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -303,6 +304,8 @@ void Kernel::ProfileHostThread(uint32_t osId, const char* name, const char* tag)
         const HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, osId);
         if (thread == nullptr) return;
         std::unordered_map<DWORD64, uint32_t> self, inclusive;
+        // For the busiest functions, who called them: (function, caller).
+        std::map<std::pair<DWORD64, DWORD64>, uint32_t> callers;
         uint32_t samples = 0;
         auto reported = std::chrono::steady_clock::now();
         for (;;)
@@ -323,6 +326,7 @@ void Kernel::ProfileHostThread(uint32_t osId, const char* name, const char* tag)
                 {
                     samples++;
                     self[starts[0]]++;
+                    if (count > 1) callers[{ starts[0], starts[1] }]++;
                     for (int i = 0; i < count; i++)
                     {
                         bool seen = false;
@@ -344,9 +348,27 @@ void Kernel::ProfileHostThread(uint32_t osId, const char* name, const char* tag)
                 for (size_t i = 0; i < ordered.size() && i < 30; i++)
                     printf("  %5.1f%% %s\n", 100.0 * ordered[i].first / samples, FunctionName(process, ordered[i].second).c_str());
             }
+            {
+                std::vector<std::pair<uint32_t, DWORD64>> busiest;
+                for (const auto& [start, hits] : self) busiest.push_back({ hits, start });
+                std::sort(busiest.begin(), busiest.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+                printf("profile of the %s, who called the busiest:\n", name);
+                for (size_t i = 0; i < busiest.size() && i < 8; i++)
+                {
+                    std::vector<std::pair<uint32_t, DWORD64>> from;
+                    for (const auto& [pair, hits] : callers)
+                        if (pair.first == busiest[i].second) from.push_back({ hits, pair.second });
+                    std::sort(from.begin(), from.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+                    printf("  %s:", FunctionName(process, busiest[i].second).c_str());
+                    for (size_t j = 0; j < from.size() && j < 4; j++)
+                        printf(" %s %.1f%%%s", FunctionName(process, from[j].second).c_str(), 100.0 * from[j].first / samples, j + 1 < from.size() && j < 3 ? "," : "");
+                    printf("\n");
+                }
+            }
             fflush(stdout);
             self.clear();
             inclusive.clear();
+            callers.clear();
             samples = 0;
         }
         CloseHandle(thread);
