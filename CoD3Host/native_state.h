@@ -32,6 +32,10 @@ namespace NativeState
     bool Begin(uint32_t lastWordPhysical);
     void End();
 
+    // Between Begin and End: every register of the draw's image that is
+    // not the register file's, told one by one; how many.
+    int DiffImage(void (*tell)(uint32_t reg, uint32_t mine, uint32_t file));
+
     // COD3_NATIVE=2 (N3): the buffers the devices' streams were read over
     // are run from their native lists: only the packets the command
     // processor still has to run (the draws, made from their records; the

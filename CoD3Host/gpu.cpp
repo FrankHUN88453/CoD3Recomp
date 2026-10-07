@@ -435,6 +435,22 @@ namespace
         // in copy mode. It is the only draw in the stream that this runtime can
         // carry out completely, because it moves pixels rather than making them.
         const uint32_t mode = RenderState::Register(0x2208) & 7;
+        // COD3_NATIVEDIFF=1 (with COD3_NATIVE=1, which keeps the register
+        // file whole): a draw made from its record whose image is not the
+        // register file, register by register, the first few.
+        static const bool nativeDiff = getenv("COD3_NATIVEDIFF") != nullptr;
+        if (nativeDiff && RenderState::UsingRecord())
+        {
+            static std::atomic<int> told{ 0 };
+            static thread_local uint64_t pixel;
+            pixel = Render::CurrentProgramHash(true);
+            if (told.load() < 80)
+                NativeState::DiffImage([](uint32_t reg, uint32_t mine, uint32_t file) {
+                    if (told.fetch_add(1) < 80)
+                        printf("native: a draw (ps %016llx) has %04X = %08X from its record, %08X in the register file\n",
+                            (unsigned long long)pixel, reg, mine, file);
+                });
+        }
         if (primitive == 8 && mode == 6) Render::Resolve();
         else Render::Draw(initiator, indexBase, indexWord);
     }

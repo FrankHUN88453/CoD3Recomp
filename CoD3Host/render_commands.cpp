@@ -19,9 +19,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <map>
+#include <tuple>
 #include <vector>
 
 #include <d3d11_1.h>
@@ -110,6 +113,8 @@ namespace
     // From a draw's record: the file as it was when it last went up, by
     // stage, and whether a program's constants differ from it now.
     uint32_t g_sentFile[2][1024];
+    // COD3_CONSTCHECK: what each stage's last upload packed.
+    std::vector<uint32_t> g_packedShadow[2];
     bool RecordChanged(uint32_t stage, const std::vector<uint16_t>& map, const uint32_t* file)
     {
         const uint32_t* now = file + (stage == 0 ? 0x4000 : 0x4400);
@@ -461,6 +466,31 @@ namespace
             const uint32_t readFirst = map.empty() ? 0 : map.front(), readEnd = map.empty() ? 256 : map.back() + 1u;
             const bool dirty = record ? RecordChanged(stage, map, file) : g_pendingFirst[stage] < readEnd && g_pendingEnd[stage] > readFirst;
             upload[stage] = g_uploaded.floatAt[stage] == 0xFFFFFFFFu || g_uploaded.floatProgram[stage] != handles[stage] || dirty;
+            // COD3_CONSTCHECK=1: a stage whose upload is skipped held against
+            // what the upload before it packed: a constant that differs is
+            // one the skip got wrong.
+            static const bool constCheck = getenv("COD3_CONSTCHECK") != nullptr;
+            if (constCheck && !upload[stage] && g_packedShadow[stage].size() == size_t(need[stage]) * 4)
+            {
+                const uint32_t* from = file + (stage == 0 ? 0x4000 : 0x4400);
+                const size_t count = map.empty() ? 256 : map.size();
+                for (size_t i = 0; i < count; i++)
+                {
+                    const uint32_t constant = map.empty() ? uint32_t(i) : map[i];
+                    if (memcmp(&g_packedShadow[stage][i * 4], from + constant * 4, 16) == 0) continue;
+                    static int told = 0;
+                    if (told++ < 30)
+                    {
+                        printf("render: constant check: %s %016llx c%u was uploaded as %08X %08X %08X %08X, is %08X %08X %08X %08X now, the sent file says %08X; record %d\n",
+                            stage == 0 ? "vs" : "ps", (unsigned long long)programs[stage]->hash, constant,
+                            g_packedShadow[stage][i * 4], g_packedShadow[stage][i * 4 + 1], g_packedShadow[stage][i * 4 + 2], g_packedShadow[stage][i * 4 + 3],
+                            from[constant * 4], from[constant * 4 + 1], from[constant * 4 + 2], from[constant * 4 + 3],
+                            g_sentFile[stage][constant * 4], record ? 1 : 0);
+                        fflush(stdout);
+                    }
+                    break;
+                }
+            }
             if (upload[stage]) bytes += need[stage] * 16;
         }
         bool drawUpload = drawChanged || g_uploaded.drawAt == 0xFFFFFFFFu;
@@ -528,6 +558,8 @@ namespace
                     }
                 }
                 memcpy(g_sentFile[stage], from, 4096);
+                static const bool constCheck = getenv("COD3_CONSTCHECK") != nullptr;
+                if (constCheck) g_packedShadow[stage].assign(words, words + need[stage] * 4);
                 g_uploaded.floatAt[stage] = base + at;
                 g_uploaded.floatCount[stage] = need[stage];
                 g_uploaded.floatProgram[stage] = handles[stage];
@@ -1033,6 +1065,24 @@ bool RenderCommands::PrepareResolve(ResolveCommand& out)
     if (RenderInternal::FrameLogged())
         printf("frame: resolve control %08X to %08X, %u,%u-%u,%u, pitch %u, clears %d%d, colour %08X depth %08X\n",
             state.control, state.destBase, x0, y0, x1, y1, state.pitch, colorClear ? 1 : 0, depthClear ? 1 : 0, state.colorInfo[0], state.depthInfo);
+    // COD3_RESOLVELOG=1: every five seconds, how many resolves went where.
+    static const bool resolveLog = getenv("COD3_RESOLVELOG") != nullptr;
+    if (resolveLog)
+    {
+        static std::map<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>, uint64_t> where;
+        static auto told = std::chrono::steady_clock::now();
+        where[{ state.control, state.destBase, width, height }]++;
+        if (std::chrono::steady_clock::now() - told > std::chrono::seconds(5))
+        {
+            told = std::chrono::steady_clock::now();
+            printf("resolves, five seconds:");
+            for (const auto& [key, count] : where)
+                printf(" %08X>%08X %ux%u x%llu;", std::get<0>(key), std::get<1>(key), std::get<2>(key), std::get<3>(key), (unsigned long long)count);
+            printf("\n");
+            fflush(stdout);
+            where.clear();
+        }
+    }
 
     if (command != 3 && state.destBase != 0)
     {

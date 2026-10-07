@@ -827,6 +827,16 @@ bool NativeState::Begin(uint32_t lastWordPhysical)
         vertex = record.vertex[pass];
         pixel = record.pixel[pass];
     }
+    // COD3_NATIVESKIPPS=hex: the draws of pixel programs whose hash starts
+    // so are made from the register file (with COD3_NATIVE=1, which keeps
+    // it whole), for telling a record's fault from the program's.
+    static const char* const skipPixel = getenv("COD3_NATIVESKIPPS");
+    if (skipPixel != nullptr)
+    {
+        char name[24];
+        snprintf(name, sizeof(name), "%016llx", (unsigned long long)pixel.hash);
+        if (strncmp(name, skipPixel, strlen(skipPixel)) == 0) return false;
+    }
     if (!g_imageStarted)
     {
         for (uint64_t& chunk : g_imageChunks) chunk = ~0ull;
@@ -901,6 +911,21 @@ bool NativeState::Begin(uint32_t lastWordPhysical)
 }
 
 void NativeState::End() { RenderState::UseRegisters(nullptr); }
+
+int NativeState::DiffImage(void (*tell)(uint32_t reg, uint32_t mine, uint32_t file))
+{
+    const std::atomic<uint32_t>* file = Gpu::RegisterFile();
+    int differ = 0;
+    for (uint32_t at = 0; at < ShadowWords; at++)
+    {
+        const uint32_t reg = g_copy.reg[at];
+        const uint32_t value = file[reg].load(std::memory_order_relaxed);
+        if (g_image[reg] == value) continue;
+        differ++;
+        tell(reg, g_image[reg], value);
+    }
+    return differ;
+}
 
 void NativeState::Recorded(uint8_t* base, uint32_t device, uint32_t before, uint32_t after)
 {
