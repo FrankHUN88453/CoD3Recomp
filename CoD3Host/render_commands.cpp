@@ -516,7 +516,16 @@ namespace
                 const std::vector<uint16_t>& map = programs[stage]->constantMap;
                 // The file's words are written by this thread: plain copies.
                 const uint32_t* from = reinterpret_cast<const uint32_t*>(file + first);
-                if (map.empty()) memcpy(words, from, 4096);
+                // What was sent is kept for RecordChanged, which compares
+                // only the constants this program reads: a change of program
+                // uploads anyway, so the rest of the file need not be kept
+                // (a whole 4 KB a draw was most of the command processor's
+                // copying).
+                if (map.empty())
+                {
+                    memcpy(words, from, 4096);
+                    memcpy(g_sentFile[stage], from, 4096);
+                }
                 else
                 {
                     // Runs of consecutive constants go as one copy.
@@ -526,6 +535,7 @@ namespace
                         size_t run = 1;
                         while (i + run < map.size() && map[i + run] == map[i] + run) run++;
                         memcpy(words + i * 4, from + map[i] * 4u, run * 16);
+                        memcpy(g_sentFile[stage] + map[i] * 4u, from + map[i] * 4u, run * 16);
                         i += run;
                     }
                 }
@@ -557,7 +567,6 @@ namespace
                         fflush(stdout);
                     }
                 }
-                memcpy(g_sentFile[stage], from, 4096);
                 static const bool constCheck = getenv("COD3_CONSTCHECK") != nullptr;
                 if (constCheck) g_packedShadow[stage].assign(words, words + need[stage] * 4);
                 g_uploaded.floatAt[stage] = base + at;
