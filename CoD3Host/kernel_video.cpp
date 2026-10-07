@@ -805,6 +805,18 @@ namespace
                     for (size_t i = 0; i < pending.size(); i++)
                         if (long(clockSecond) == pending[i].first) { Kernel::QueueConsoleCommand(pending[i].second); pending.erase(pending.begin() + i); break; }
                 }
+                // COD3_PICTURES=second: what the screenshot key does, at that
+                // second: the next frames logged in full and the next one's
+                // draws pictured one by one (screenshots beside the exe).
+                {
+                    static const char* const picturesAt = getenv("COD3_PICTURES");
+                    static bool pictured = false;
+                    if (picturesAt != nullptr && !pictured && long(clockSecond) == strtol(picturesAt, nullptr, 10))
+                    {
+                        pictured = true;
+                        Render::LogNextFrame();
+                    }
+                }
                 // COD3_WIN="second:level": the mission won at that second, as
                 // the level script's missionsuccess (table slot 0x4A4,
                 // sub_824A4F38) marks it in the game state at 0x82A4E790:

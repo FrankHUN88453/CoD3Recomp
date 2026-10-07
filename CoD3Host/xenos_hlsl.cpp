@@ -1035,6 +1035,7 @@ uint64_t XenosHlsl::Version()
     if (getenv("COD3_OLDALUPAIR")) text += " write first";
     if (getenv("COD3_OLDGRADIENTS")) text += " old gradients";
     if (getenv("COD3_NOPIXELGEN")) text += " no pixel params";
+    if (getenv("COD3_NANSHOW")) text += " nan show";
     uint64_t hash = 14695981039346656037ull;
     for (unsigned char c : text) { hash ^= c; hash *= 1099511628211ull; }
     return hash;
@@ -1230,6 +1231,10 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
         else if (what != nullptr && translator.ShowAt() >= 0) hlsl += "    oC0 = float4(abs(shown.xyz), 1.0);\n";
         else if (what != nullptr && what[0] == 'o') hlsl += Format("    oC0 = float4(abs(input.%s.xyz), 1.0);\n", what);
         else if (what != nullptr && what[0] == 'r') hlsl += Format("    oC0 = float4(abs(r[%u].xyz), 1.0);\n", unsigned(strtoul(what + 1, nullptr, 10)) & 31u);
+        // COD3_NANSHOW=1: a colour that is not a number, or infinite, put
+        // out as magenta, for finding where one comes from.
+        static const bool nanShow = getenv("COD3_NANSHOW") != nullptr;
+        if (nanShow) hlsl += "    if (any(isnan(oC0)) || any(isinf(oC0))) oC0 = float4(1.0, 0.0, 1.0, 1.0);\n";
         hlsl += "    output.c0 = oC0; output.c1 = oC1; output.c2 = oC2; output.c3 = oC3;\n";
         if (out.writesDepth) hlsl += "    output.depth = oDepth4.x;\n";
         else if (depth24) hlsl += "    output.depth = Depth20e4(input.position.z);\n";
