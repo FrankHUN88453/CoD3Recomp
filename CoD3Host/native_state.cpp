@@ -72,16 +72,23 @@ namespace
     struct CopyIndexTable
     {
         uint16_t at[0x5000];
+        // How many registers from this one on are in the copy one after
+        // another (a packet's run of them is then one run of the copy).
+        uint16_t run[0x5000];
         CopyIndexTable()
         {
             for (uint32_t reg = 0; reg < 0x5000; reg++) at[reg] = uint16_t(ShadowWords);
             uint32_t next = 0;
             for (const Block& block : Blocks)
                 for (uint32_t i = 0; i < block.count; i++) at[block.first + i] = uint16_t(next++);
+            for (uint32_t reg = 0x5000; reg-- > 0;)
+                run[reg] = at[reg] >= ShadowWords ? 0
+                         : reg + 1 < 0x5000 && at[reg + 1] == at[reg] + 1 ? uint16_t(run[reg + 1] + 1) : 1;
         }
     };
     const CopyIndexTable g_copyIndex;
     inline uint32_t CopyIndex(uint32_t reg) { return reg < 0x5000 ? g_copyIndex.at[reg] : ShadowWords; }
+    inline uint32_t RunFrom(uint32_t reg) { return reg < 0x5000 ? g_copyIndex.run[reg] : 0; }
 
     // And the other way: a copy's register, and its shadow in the device.
     struct CopyTable
@@ -196,12 +203,16 @@ namespace
         uint32_t constantMemory[512] = {};   // per float4 (vertex, then pixel): the physical address it is loaded from, 0 none
         uint64_t fromMemory[8] = {};         // which of those are not nought, a bit each: a draw's record lists them
         Program vertex[2], pixel[2];         // by pass
-        // Registers a predicated packet set for one pass: by copy index, the
-        // passes (bit 0 colour, 1 Z) and the values; and the indices that
-        // have any, perhaps more than once and some cleared since.
+        // Registers whose value in a pass is not the registers' own: by copy
+        // index, the passes (bit 0 colour, 1 Z) and the values; the indices
+        // that have any, perhaps more than once once some were cleared
+        // (`passListStale`); how many have each. The registers hold what the
+        // colour pass sees, so most of these are the Z pass's.
         uint8_t passMask[ShadowWords] = {};
         uint32_t passValue[2][ShadowWords];
         std::vector<uint16_t> passList;
+        uint32_t passCount[2] = {};
+        bool passListStale = false;
         // The chunks changed since the last record, where each one's content
         // went last (an arena serial), and how many words of each are not
         // known yet.
@@ -389,6 +400,7 @@ namespace
         {
             const uint32_t first = header & 0x7FFF;
             const bool one = (header & 0x8000) != 0;
+            if (RunFrom(first) >= (one ? 1 : count)) return false;
             for (uint32_t i = 0; i < (one ? 1 : count); i++)
                 if (CopyIndex(first + i) >= ShadowWords) return true;
             return false;
@@ -400,6 +412,7 @@ namespace
         {
             uint32_t index;
             if (!ConstantIndex(Guest::Read32(base, at + 4), index)) return true;
+            if (RunFrom(index) + 1 >= count) return false;
             for (uint32_t i = 0; i + 1 < count; i++)
                 if (CopyIndex(index + i) >= ShadowWords) return true;
             return false;
@@ -495,11 +508,13 @@ namespace
 
     // A record for one draw packet, from the device's model as it is at the
     // packet, the shadows standing in for what it does not know.
-    void Keep(uint8_t* base, uint32_t device, uint32_t lastWord, uint32_t initiator, DeviceModel& model)
+    // (`passes`: the passes the draw packet runs in, by its predicate.)
+    void Keep(uint8_t* base, uint32_t device, uint32_t lastWord, uint32_t initiator, uint32_t passes, DeviceModel& model)
     {
         const uint32_t key = Physical(lastWord);
-        // The pass overrides still in force, the list kept short.
-        if (!model.passList.empty())
+        // The pass values still in force, the list kept short: gone through
+        // only when some were cleared since.
+        if (model.passListStale)
         {
             size_t kept = 0;
             for (uint16_t at : model.passList)
@@ -510,6 +525,7 @@ namespace
                 }
             model.passList.resize(kept);
             for (uint16_t at : model.passList) model.passMask[at] &= 0x7F;
+            model.passListStale = false;
         }
 
         // Made once, under the lock the readers hold (not taken again for
@@ -568,9 +584,18 @@ namespace
             staging.pixel[pass] = model.pixel[pass];
             staging.passRegisters[pass].clear();
         }
-        for (uint16_t at : model.passList)
-            for (uint32_t pass = 0; pass < 2; pass++)
-                if (model.passMask[at] & (1u << pass)) staging.passRegisters[pass].emplace_back(g_copy.reg[at], model.passValue[pass][at]);
+        // The Z pass's values only for a draw that runs in the Z pass: one
+        // predicated to the colour pass alone never does (the command
+        // processor runs it only when the bin select shares a bit with its
+        // mask, and then picks the colour pass).
+        const bool colour = model.passCount[ColourPass] != 0;
+        const bool z = (passes & 2) != 0 && model.passCount[ZPass] != 0;
+        if (colour || z)
+            for (uint16_t at : model.passList)
+            {
+                if (colour && (model.passMask[at] & 1) != 0) staging.passRegisters[ColourPass].emplace_back(g_copy.reg[at], model.passValue[ColourPass][at]);
+                if (z && (model.passMask[at] & 2) != 0) staging.passRegisters[ZPass].emplace_back(g_copy.reg[at], model.passValue[ZPass][at]);
+            }
 
         std::lock_guard<std::mutex> lock(g_mutex);
         const uint32_t slot = g_next++ % RecordCount;
@@ -600,6 +625,31 @@ namespace
         return ((binMask & ColourBins) != 0 ? 1u : 0u) | ((binMask & ZBins) != 0 ? 2u : 0u);
     }
 
+    // A pass's own value for a register, and one taken back.
+    inline void SetPassValue(DeviceModel& model, uint32_t at, uint32_t pass, uint32_t value)
+    {
+        model.passValue[pass][at] = value;
+        const uint8_t bit = uint8_t(1u << pass);
+        if ((model.passMask[at] & bit) != 0) return;
+        if ((model.passMask[at] & 3) == 0) model.passList.push_back(uint16_t(at));
+        model.passMask[at] |= bit;
+        model.passCount[pass]++;
+    }
+    inline void ClearPassValue(DeviceModel& model, uint32_t at, uint32_t pass)
+    {
+        const uint8_t bit = uint8_t(1u << pass);
+        if ((model.passMask[at] & bit) == 0) return;
+        model.passMask[at] &= uint8_t(~bit);
+        model.passCount[pass]--;
+        if ((model.passMask[at] & 3) == 0) model.passListStale = true;
+    }
+
+    // Whether a float constant is loaded from memory at the draw.
+    inline bool FromMemory(const DeviceModel& model, uint32_t reg)
+    {
+        return reg >= 0x4000 && reg < 0x4800 && model.constantMemory[(reg - 0x4000) >> 2] != 0;
+    }
+
     // A register written, in the passes given.
     inline void Written(DeviceModel& model, uint32_t reg, uint32_t value, uint32_t passes)
     {
@@ -610,7 +660,7 @@ namespace
             model.registers[at] = value;
             model.dirty |= 1ull << (at / ChunkWords);
             if (!model.known[at]) { model.known[at] = true; model.unknown--; model.unknownIn[at / ChunkWords]--; }
-            model.passMask[at] = 0;
+            if (model.passMask[at] != 0) { ClearPassValue(model, at, ColourPass); ClearPassValue(model, at, ZPass); }
             if (reg >= 0x4000 && reg < 0x4800)
             {
                 const uint32_t constant = (reg - 0x4000) >> 2;
@@ -619,10 +669,72 @@ namespace
             }
             return;
         }
+        // A write for the colour pass alone goes into the registers, which
+        // hold what that pass sees, the Z pass keeping the value it had as
+        // its own: the title writes a draw's vertex constants so (some
+        // seventy words a draw in the forest), and as pass values every
+        // draw's record copied them all and every draw put them over its
+        // image. Not when the old value is not known yet, or the constant
+        // comes from memory (put over the registers at the draw): then it
+        // is the colour pass's own value.
+        if (passes == 1 && model.known[at] && !FromMemory(model, reg))
+        {
+            if ((model.passMask[at] & 2) == 0) SetPassValue(model, at, ZPass, model.registers[at]);
+            ClearPassValue(model, at, ColourPass);
+            model.registers[at] = value;
+            model.dirty |= 1ull << (at / ChunkWords);
+            return;
+        }
         for (uint32_t pass = 0; pass < 2; pass++)
-            if (passes & (1u << pass)) model.passValue[pass][at] = value;
-        if (model.passMask[at] == 0) model.passList.push_back(uint16_t(at));
-        model.passMask[at] |= uint8_t(passes & 3);
+            if (passes & (1u << pass)) SetPassValue(model, at, pass, value);
+    }
+
+    // A packet's run of `n` registers from `reg` (its words at `words`, in
+    // guest order), as Written does them one by one, a run at a time: the
+    // common case, every register known and the run one run of the copy.
+    // False when it is not that case.
+    bool WrittenRun(DeviceModel& model, uint32_t reg, const uint8_t* words, uint32_t n, uint32_t passes)
+    {
+        if (n == 0) return true;
+        if ((passes != 3 && passes != 1) || model.unknown != 0 || RunFrom(reg) < n) return false;
+        const uint32_t at = CopyIndex(reg);
+        const uint32_t firstChunk = at / ChunkWords, lastChunk = (at + n - 1) / ChunkWords;
+        const uint64_t chunks = (lastChunk - firstChunk == 63 ? ~0ull : (1ull << (lastChunk - firstChunk + 1)) - 1) << firstChunk;
+        if (passes == 3)
+        {
+            for (uint32_t i = 0; i < n; i++)
+            {
+                uint32_t w;
+                memcpy(&w, words + i * 4, 4);
+                model.registers[at + i] = __builtin_bswap32(w);
+            }
+            if (model.passCount[ColourPass] + model.passCount[ZPass] != 0)
+                for (uint32_t i = 0; i < n; i++)
+                    if (model.passMask[at + i] != 0) { ClearPassValue(model, at + i, ColourPass); ClearPassValue(model, at + i, ZPass); }
+            if (reg < 0x4800 && reg + n > 0x4000)
+            {
+                const uint32_t first = (std::max(reg, 0x4000u) - 0x4000) >> 2, last = (std::min(reg + n, 0x4800u) - 1 - 0x4000) >> 2;
+                for (uint32_t constant = first; constant <= last; constant++)
+                    if (model.constantMemory[constant] != 0)
+                    {
+                        model.constantMemory[constant] = 0;
+                        model.fromMemory[constant >> 6] &= ~(1ull << (constant & 63));
+                    }
+            }
+        }
+        else
+            for (uint32_t i = 0; i < n; i++)
+            {
+                uint32_t w;
+                memcpy(&w, words + i * 4, 4);
+                const uint32_t value = __builtin_bswap32(w);
+                if (FromMemory(model, reg + i)) { SetPassValue(model, at + i, ColourPass, value); continue; }
+                if ((model.passMask[at + i] & 2) == 0) SetPassValue(model, at + i, ZPass, model.registers[at + i]);
+                ClearPassValue(model, at + i, ColourPass);
+                model.registers[at + i] = value;
+            }
+        model.dirty |= chunks;
+        return true;
     }
 
     // The device's packets after model.scanned up to `last` (the last word
@@ -643,8 +755,11 @@ namespace
             if (type == 0)
             {
                 const bool one = (header & 0x8000) != 0;
-                for (uint32_t i = 0; i < count && at + 4 + i * 4 <= last; i++)
-                    Written(model, (header & 0x7FFF) + (one ? 0 : i), Guest::Read32(base, at + 4 + i * 4), 3);
+                // The words up to the last one to read.
+                const uint32_t words = last >= at + 4 ? std::min(count, (last - at) / 4) : 0;
+                if (one || !WrittenRun(model, header & 0x7FFF, base + at + 4, words, 3))
+                    for (uint32_t i = 0; i < words; i++)
+                        Written(model, (header & 0x7FFF) + (one ? 0 : i), Guest::Read32(base, at + 4 + i * 4), 3);
                 length = 1 + count;
             }
             else if (type == 1) length = 3;
@@ -659,7 +774,7 @@ namespace
                 else if (opcode == OpSetConstant)
                 {
                     uint32_t index;
-                    if (ConstantIndex(word(0), index))
+                    if (ConstantIndex(word(0), index) && !WrittenRun(model, index, base + at + 8, count - 1, passes))
                         for (uint32_t i = 0; i + 1 < count; i++) Written(model, index + i, word(1 + i), passes);
                 }
                 else if (opcode == OpLoadAluConstant)
@@ -674,6 +789,18 @@ namespace
                                 const uint32_t constant = (index + i - 0x4000) >> 2;
                                 model.constantMemory[constant] = address + i * 4;
                                 model.fromMemory[constant >> 6] |= 1ull << (constant & 63);
+                                // Loaded in both passes: what either pass had
+                                // of its own is gone.
+                                if (passes == 3)
+                                    for (uint32_t k = 0; k < 4; k++)
+                                    {
+                                        const uint32_t at = CopyIndex(index + i + k);
+                                        if (at < ShadowWords && model.passMask[at] != 0)
+                                        {
+                                            ClearPassValue(model, at, ColourPass);
+                                            ClearPassValue(model, at, ZPass);
+                                        }
+                                    }
                             }
                     }
                 }
@@ -687,7 +814,7 @@ namespace
                         if (passes & (1u << pass)) (pixel ? model.pixel : model.vertex)[pass] = program;
                 }
                 else if (opcode == OpDrawIndx || opcode == OpDrawIndx2)
-                    Keep(base, device, at + count * 4, word(opcode == OpDrawIndx ? 1 : 0), model);
+                    Keep(base, device, at + count * 4, word(opcode == OpDrawIndx ? 1 : 0), passes, model);
             }
             at += length * 4;
         }
