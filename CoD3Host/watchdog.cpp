@@ -287,10 +287,10 @@ namespace
     }
 }
 
-void Kernel::ProfileHostThread(uint32_t osId, const char* name)
+void Kernel::ProfileHostThread(uint32_t osId, const char* name, const char* tag)
 {
-    static const bool wanted = getenv("COD3_HOSTPROFILE") != nullptr;
-    if (!wanted) return;
+    const char* wanted = getenv("COD3_HOSTPROFILE");
+    if (wanted == nullptr || !(strstr(wanted, tag) != nullptr || (strcmp(wanted, "1") == 0 && strcmp(tag, "cp") == 0))) return;
     std::thread([osId, name]() {
         const HANDLE process = GetCurrentProcess();
         LoadSymbols(process);

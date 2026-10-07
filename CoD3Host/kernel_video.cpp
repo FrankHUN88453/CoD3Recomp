@@ -1044,7 +1044,7 @@ namespace
             return;
         video.thread = std::thread(VideoThread);
         video.commandThread = std::thread(CommandThread);
-        Kernel::ProfileHostThread(GetThreadId(video.commandThread.native_handle()), "command processor");
+        Kernel::ProfileHostThread(GetThreadId(video.commandThread.native_handle()), "command processor", "cp");
     }
 }
 

@@ -559,6 +559,7 @@ void Kernel::RegisterEntryThread()
     GuestThread thread;
     thread.host = duplicate;
     thread.id = 0;   // zero marks the thread the title started on
+    Kernel::ProfileHostThread(GetCurrentThreadId(), "title's first thread", "main");
     thread.osId = GetCurrentThreadId();
 
     std::lock_guard<std::mutex> lock(g_threadsMutex);
@@ -591,7 +592,7 @@ void Kernel::SignalThreadExit(uint32_t osId)
 
     std::lock_guard<std::mutex> lock(Kernel::DispatcherLock());
     Guest::Write32(Guest::Base, object + DispatchSignalState, 1);
-    Kernel::DispatcherChanged().notify_all();
+    Kernel::WakeDispatcher();
 }
 
 uint32_t Kernel::ThreadObjectFor(uint32_t handle)
