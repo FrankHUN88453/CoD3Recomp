@@ -79,7 +79,8 @@ their 30), a frame counter and the renderer's statistics, the mouse
 sensitivity and whether the mouse is read raw, the title's aim assist,
 the pad, and the keys; on its Gameplay page the subtitles (the title's
 `cg_subtitles`) and the console, and on its Experimental page the native
-command lists and the memory write watch. It is drawn
+command lists and the memory write watch (both on by default; the draws
+come from the game's own D3D calls rather than from its GPU command stream). It is drawn
 in the colours of the title's own menus. It keeps its values in `CoD3Recomp.ini` beside the
 executable. Everything the game prints goes to `CoD3.log` beside the
 executable as well as to its console, and the run before is kept as

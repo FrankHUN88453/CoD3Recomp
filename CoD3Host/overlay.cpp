@@ -388,7 +388,8 @@ namespace
                 }
                 if (ImGui::BeginTabItem("Experimental"))
                 {
-                    ImGui::TextDisabled("Faster, still being tested; each takes effect after a restart.");
+                    ImGui::TextDisabled("On by default: the game runs faster with them. Turn one off if something");
+                    ImGui::TextDisabled("looks wrong, and tell what; each takes effect after a restart.");
                     ImGui::Checkbox("Native command lists", &g_edit.nativeCommands);
                     ImGui::SameLine();
                     ImGui::TextDisabled("(the draws' state straight from the game's own calls)");

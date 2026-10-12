@@ -40,8 +40,8 @@ namespace Settings
         int modelDetail = 1;          // 0 the title's own level of detail (r_lodscale 1), 1 the most detailed models at every distance (r_lodscale 0)
         bool aimBlur = true;          // the title's depth of field while aiming down the sights
         bool consoleDepth = true;     // depth cut to the console's 24 bit float precision (no flickering surfaces; costs with MSAA)
-        bool nativeCommands = false;  // the draws' state taken from the game's own D3D calls, the command stream run only for what the GPU still does (docs/native-d3d11-plan.md, N3; experimental, after a restart)
-        bool watchWrites = false;     // still textures and vertex buffers known unchanged by their pages, not hashed every frame (write_watch.h; experimental, after a restart)
+        bool nativeCommands = true;   // the draws' state taken from the game's own D3D calls, the command stream run only for what the GPU still does (docs/native-d3d11-plan.md, N3-N4; on by default since all fifteen levels ran on it; after a restart)
+        bool watchWrites = true;      // still textures and vertex buffers known unchanged by their pages, not hashed every frame (write_watch.h; on by default; after a restart)
         int windowMode = 0;           // 0 windowed, 1 borderless full screen
         bool fpsOverlay = false;
         bool statsOverlay = false;    // the renderer's counters over the picture
