@@ -420,6 +420,47 @@ namespace
         return true;
     }
 
+    // COD3_NATIVECENSUS=1: what the command processor still runs of a
+    // native list, every five seconds: the type 3 packets by opcode, the
+    // register writes by their first register. What is left here is what a
+    // stream without packets has to do some other way.
+    struct CensusTally { uint64_t opcodes[128] = {}; std::map<uint32_t, uint64_t> registers; uint64_t type1 = 0; };
+    CensusTally g_census;
+    std::chrono::steady_clock::time_point g_censusReported = std::chrono::steady_clock::now();
+    void Census(uint8_t*, uint32_t, uint32_t header)
+    {
+        static const bool on = getenv("COD3_NATIVECENSUS") != nullptr;
+        if (!on) return;
+        const uint32_t type = header >> 30;
+        if (type == 3) g_census.opcodes[(header >> 8) & 0x7F]++;
+        else if (type == 0) g_census.registers[header & 0x7FFF]++;
+        else if (type == 1) g_census.type1++;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - g_censusReported < std::chrono::seconds(5)) return;
+        g_censusReported = now;
+        std::string text = "native census, five seconds:";
+        for (uint32_t op = 0; op < 128; op++)
+            if (g_census.opcodes[op] != 0)
+            {
+                char item[64];
+                snprintf(item, sizeof(item), " %02X x%llu", op, (unsigned long long)g_census.opcodes[op]);
+                text += item;
+            }
+        text += "; registers:";
+        for (const auto& [reg, n] : g_census.registers)
+        {
+            char item[64];
+            snprintf(item, sizeof(item), " %04X x%llu", reg, (unsigned long long)n);
+            text += item;
+        }
+        char tail[64];
+        snprintf(tail, sizeof(tail), "; type 1 x%llu", (unsigned long long)g_census.type1);
+        text += tail;
+        printf("%s\n", text.c_str());
+        fflush(stdout);
+        g_census = CensusTally{};
+    }
+
     // What the check found, since the last report.
     struct Mismatch { uint64_t count = 0; uint32_t native = 0, file = 0, writer = 0, pass = 0, draw = 0; uint32_t around[48] = {}; };
     struct Tally
@@ -748,7 +789,12 @@ namespace
         while (at <= last)
         {
             const uint32_t header = Guest::Read32(base, at);
-            if (ExecutingNow()) items.push_back(StreamItem{ Physical(at), header, StillRun(base, at, header) });
+            if (ExecutingNow())
+            {
+                const bool run = StillRun(base, at, header);
+                items.push_back(StreamItem{ Physical(at), header, run });
+                if (run) Census(base, at, header);
+            }
             const uint32_t type = header >> 30;
             const uint32_t count = ((header >> 16) & 0x3FFF) + 1;
             uint32_t length = 1;
