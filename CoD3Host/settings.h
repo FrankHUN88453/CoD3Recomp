@@ -46,6 +46,8 @@ namespace Settings
         bool fpsOverlay = false;
         bool statsOverlay = false;    // the renderer's counters over the picture
         bool aimAssist = true;        // the title's own, through its config
+        bool subtitles = true;        // the title's cg_subtitles (on by default there too)
+        bool console = false;         // the key left of 1 opens the console (the host's: the title's own was left out of this build)
         bool controller = true;       // read a pad when one is there
         float mouseSensitivity = 1.0f;   // both axes, 0.1 .. 3
         bool rawMouse = true;            // the mouse's own counts, not the pointer's travel
@@ -75,7 +77,7 @@ namespace Settings
     void Save();
 
     // The console commands the settings ask of the title (the field of
-    // view, the model detail, the aim assist), for its command buffer: at
+    // view, the model detail, the aim assist, the subtitles), for its command buffer: at
     // the first ask whatever differs from the title's own values, then
     // what changed since the last ask. Empty when there is nothing to say.
     std::string TitleCommandsChanged();

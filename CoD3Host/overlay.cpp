@@ -96,35 +96,67 @@ namespace
         Kernel::QueueConsoleCommand(line);
     }
 
+    double g_consoleOpenedAt = -1.0;   // when it began to come down; below nought: at the next frame
+
+    // The console as the Call of Duty engines draw theirs: a dark band that
+    // drops from the top of the screen, the log above a "]" prompt, an
+    // amber line under it.
     void DrawConsole(int width, int height)
     {
-        ImGui::SetNextWindowPos(ImVec2(0, 0));
-        ImGui::SetNextWindowSize(ImVec2(float(width), float(height) * 0.45f));
-        ImGui::SetNextWindowBgAlpha(0.85f);
-        if (!ImGui::Begin("Console", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings))
+        const double now = ImGui::GetTime();
+        if (g_consoleOpenedAt < 0.0) g_consoleOpenedAt = now;
+        const float shown = float(std::min(1.0, (now - g_consoleOpenedAt) / 0.12));
+        const float drop = 1.0f - (1.0f - shown) * (1.0f - shown);
+        const float full = float(height) * 0.45f;
+        ImGui::SetNextWindowPos(ImVec2(0, full * (drop - 1.0f)));
+        ImGui::SetNextWindowSize(ImVec2(float(width), full));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.04f, 0.05f, 0.07f, 0.90f));
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.86f, 0.86f, 0.82f, 1.0f));
+        const bool visible = ImGui::Begin("Console", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
+                                                               ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar);
+        if (visible)
         {
-            ImGui::End();
-            return;
-        }
-        const float inputHeight = ImGui::GetFrameHeightWithSpacing() + 4.0f;
-        if (ImGui::BeginChild("log", ImVec2(0, -inputHeight), false, ImGuiWindowFlags_HorizontalScrollbar))
-        {
-            if (g_consoleLines.empty()) ImGui::TextDisabled("Console. Type \"help\" for examples.");
-            for (const std::string& line : g_consoleLines) ImGui::TextUnformatted(line.c_str());
-            if (g_consoleScroll) { ImGui::SetScrollHereY(1.0f); g_consoleScroll = false; }
-        }
-        ImGui::EndChild();
-        ImGui::Separator();
-        ImGui::SetNextItemWidth(-1.0f);
-        if (g_consoleFocus) { ImGui::SetKeyboardFocusHere(); g_consoleFocus = false; }
-        const ImGuiInputTextFlags flags = ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackHistory;
-        if (ImGui::InputText("##input", g_consoleInput, sizeof(g_consoleInput), flags, ConsoleInputCallback))
-        {
-            RunConsoleLine(g_consoleInput);
-            g_consoleInput[0] = 0;
-            g_consoleFocus = true;
+            const float inputHeight = ImGui::GetFrameHeightWithSpacing() + 6.0f;
+            if (ImGui::BeginChild("log", ImVec2(0, -inputHeight), false, ImGuiWindowFlags_HorizontalScrollbar))
+            {
+                if (g_consoleLines.empty()) ImGui::TextDisabled("Type \"help\" for examples.");
+                for (const std::string& line : g_consoleLines)
+                {
+                    const bool typed = line.size() >= 2 && line[0] == ']' && line[1] == ' ';
+                    if (typed) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+                    ImGui::TextUnformatted(line.c_str());
+                    if (typed) ImGui::PopStyleColor();
+                }
+                if (g_consoleScroll) { ImGui::SetScrollHereY(1.0f); g_consoleScroll = false; }
+            }
+            ImGui::EndChild();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted("]");
+            ImGui::SameLine(0.0f, 4.0f);
+            ImGui::SetNextItemWidth(-1.0f);
+            if (g_consoleFocus) { ImGui::SetKeyboardFocusHere(); g_consoleFocus = false; }
+            const ImGuiInputTextFlags flags = ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackHistory;
+            if (ImGui::InputText("##input", g_consoleInput, sizeof(g_consoleInput), flags, ConsoleInputCallback))
+            {
+                RunConsoleLine(g_consoleInput);
+                g_consoleInput[0] = 0;
+                g_consoleFocus = true;
+            }
+            // The amber line along its bottom edge, and the build's name.
+            const ImVec2 at = ImGui::GetWindowPos(), size = ImGui::GetWindowSize();
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            draw->AddRectFilled(ImVec2(at.x, at.y + size.y - 2.0f), ImVec2(at.x + size.x, at.y + size.y), IM_COL32(214, 160, 64, 255));
+            const char* name = "Call of Duty 3 recompiled";
+            const ImVec2 nameSize = ImGui::CalcTextSize(name);
+            draw->AddText(ImVec2(at.x + size.x - nameSize.x - 10.0f, at.y + 6.0f), IM_COL32(150, 150, 140, 200), name);
         }
         ImGui::End();
+        ImGui::PopStyleColor(3);
+        ImGui::PopStyleVar(3);
     }
 
     std::atomic<bool> g_ready{ false };
@@ -298,18 +330,24 @@ namespace
                     ImGui::Checkbox("Console depth precision", &g_edit.consoleDepth);
                     ImGui::SameLine();
                     ImGui::TextDisabled("(no flickering surfaces; costs frame rate with MSAA; after a restart)");
-                    ImGui::Checkbox("Native command lists (experimental)", &g_edit.nativeCommands);
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("(the draws' state straight from the game's own calls: faster; after a restart)");
-                    ImGui::Checkbox("Watch memory writes (experimental)", &g_edit.watchWrites);
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("(still textures and buffers not looked at again until written: faster; after a restart)");
                     ImGui::Checkbox("Vertical sync (VSync)", &g_edit.vsync);
                     ImGui::Checkbox("Unlimited frame rate in levels", &g_edit.unlockFrameRate);
                     ImGui::SameLine();
                     ImGui::TextDisabled("(the menus and films keep the console's 60)");
                     ImGui::Checkbox("Show FPS", &g_edit.fpsOverlay);
                     ImGui::Checkbox("Renderer statistics", &g_edit.statsOverlay);
+                    ImGui::EndTabItem();
+                }
+                if (ImGui::BeginTabItem("Gameplay"))
+                {
+                    ImGui::Checkbox("Subtitles", &g_edit.subtitles);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(the game's own, as on its Gameplay page)");
+                    ImGui::Checkbox("Console", &g_edit.console);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(opened with the key left of 1)");
+                    ImGui::TextDisabled("The game's own console was left out of its Xbox 360 release; this one sends");
+                    ImGui::TextDisabled("its commands to the game's command buffer, as the game's own did.");
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Controls"))
@@ -348,6 +386,17 @@ namespace
                     }
                     ImGui::EndTabItem();
                 }
+                if (ImGui::BeginTabItem("Experimental"))
+                {
+                    ImGui::TextDisabled("Faster, still being tested; each takes effect after a restart.");
+                    ImGui::Checkbox("Native command lists", &g_edit.nativeCommands);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(the draws' state straight from the game's own calls)");
+                    ImGui::Checkbox("Watch memory writes", &g_edit.watchWrites);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(still textures and buffers not looked at again until written)");
+                    ImGui::EndTabItem();
+                }
                 ImGui::EndTabBar();
             }
             ImGui::Separator();
@@ -369,7 +418,8 @@ namespace
             ImGui::SameLine();
             if (ImGui::Button("Close", ImVec2(140 * g_fontScale, 0))) open = false;
             if (dirty) { ImGui::SameLine(); ImGui::TextDisabled("(unapplied changes)"); }
-            ImGui::TextDisabled("F11: this menu   F12: screenshot   ` (left of 1): console   Esc: back to the game");
+            ImGui::TextDisabled(applied.console ? "F11: this menu   F12: screenshot   ` (left of 1): console   Esc: back to the game"
+                                                : "F11: this menu   F12: screenshot   Esc: back to the game");
         }
         ImGui::End();
         (void)changed;
@@ -512,7 +562,7 @@ void Overlay::ToggleConsole()
 {
     const bool open = !g_console.load();
     g_console.store(open);
-    if (open) { g_consoleFocus = true; g_consoleInput[0] = 0; }
+    if (open) { g_consoleFocus = true; g_consoleInput[0] = 0; g_consoleOpenedAt = -1.0; }
 }
 
 void Overlay::ConsolePrint(const std::string& line)
@@ -534,8 +584,9 @@ bool Overlay::HandleMessage(void* hwnd, uint32_t message, uint64_t wParam, int64
         if (wParam == VK_F12) { RequestScreenshot(); Render::LogNextFrame(); return true; }
         // The key left of 1 (scan code 0x29: ` and ~ on a US keyboard, 0
         // on a Hungarian one): the console, as the title's own configs
-        // bind it. By scan code, so it is that key on every layout.
-        if (((lParam >> 16) & 0xFF) == 0x29 && !g_open.load()) { ToggleConsole(); return true; }
+        // bind it, when the Gameplay page turns it on. By scan code, so it
+        // is that key on every layout.
+        if (((lParam >> 16) & 0xFF) == 0x29 && !g_open.load() && (Settings::Get().console || g_console.load())) { ToggleConsole(); return true; }
         if (wParam == VK_ESCAPE && g_console.load() && !g_open.load()) { g_console.store(false); return true; }
     }
     // The character that key makes must not land in the console's input.

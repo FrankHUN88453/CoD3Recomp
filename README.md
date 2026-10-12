@@ -60,7 +60,7 @@ turns that off for anyone who wants the pointer's travel back.
 | Enter, arrows | the menus |
 | F11 | settings menu |
 | F12 | screenshot into `screenshots/`, the next two frames' draws into `CoD3.log`, and a small picture after each draw of the next frame (`screenshots/*-draws.bin`): press it when something looks wrong |
-| ` (the key left of 1) | the console |
+| ` (the key left of 1) | the console, when the settings' Gameplay page turns it on |
 
 The settings menu (F11, and it opens by itself when OPTIONS is chosen in
 the title's main menu, over the title's own options page) has the window
@@ -77,7 +77,9 @@ is played at what the machine can do, around a hundred frames a second
 where the console had sixty, while the menus keep 60 and the films
 their 30), a frame counter and the renderer's statistics, the mouse
 sensitivity and whether the mouse is read raw, the title's aim assist,
-the pad, and the keys. It is drawn
+the pad, and the keys; on its Gameplay page the subtitles (the title's
+`cg_subtitles`) and the console, and on its Experimental page the native
+command lists and the memory write watch. It is drawn
 in the colours of the title's own menus. It keeps its values in `CoD3Recomp.ini` beside the
 executable. Everything the game prints goes to `CoD3.log` beside the
 executable as well as to its console, and the run before is kept as
@@ -91,7 +93,8 @@ from the environment for a run: `COD3_SCALE`, `COD3_TEXTURE_FILTER`,
 `COD3_RENDER_PROFILE=1` where a draw's microseconds go.
 
 The console (the key left of 1, which the title's own configs bind to
-`toggleconsole`) takes the title's console commands and puts them on its
+`toggleconsole`; off until the Gameplay page turns it on) drops from the
+top of the screen as the Call of Duty engines' own does, and takes the title's console commands and puts them on its
 command buffer, the way the chapter select starts a level: `spmap forest`,
 `map_restart`, `cg_fov 80`, `timescale 0.5`, `god`, `noclip`, `give all`,
 `seta com_maxfps 60`. The title's own console was stripped from this build

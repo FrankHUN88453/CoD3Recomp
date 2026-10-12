@@ -158,6 +158,8 @@ void Settings::Load(const std::filesystem::path& exeDirectory)
             else if (key == "fps_overlay") v.fpsOverlay = atoi(value.c_str()) != 0;
             else if (key == "stats_overlay") v.statsOverlay = atoi(value.c_str()) != 0;
             else if (key == "aim_assist") v.aimAssist = atoi(value.c_str()) != 0;
+            else if (key == "subtitles") v.subtitles = atoi(value.c_str()) != 0;
+            else if (key == "console") v.console = atoi(value.c_str()) != 0;
             else if (key == "controller") v.controller = atoi(value.c_str()) != 0;
             else if (key == "mouse_sensitivity") v.mouseSensitivity = float(atof(value.c_str()));
             else if (key == "raw_mouse") v.rawMouse = atoi(value.c_str()) != 0;
@@ -196,7 +198,8 @@ void Settings::Save()
         else snprintf(resolution, sizeof(resolution), "desktop");
         fprintf(file, "[graphics]\nrenderer = %d\nresolution = %s\nresolution_scale = %d\ntexture_filter = %d\nanisotropy = %d\nvsync = %d\nunlock_frame_rate = %d\nantialiasing = %d\ntexture_quality = %d\nfov = %d\nmodel_detail = %d\naim_blur = %d\nconsole_depth = %d\nnative_commands = %d\nwatch_writes = %d\nwindow_mode = %d\nfps_overlay = %d\nstats_overlay = %d\n",
             v.renderer, resolution, v.resolutionScale, v.textureFilter, v.anisotropy, v.vsync ? 1 : 0, v.unlockFrameRate ? 1 : 0, v.antialiasing, v.textureQuality, v.fov, v.modelDetail, v.aimBlur ? 1 : 0, v.consoleDepth ? 1 : 0, v.nativeCommands ? 1 : 0, v.watchWrites ? 1 : 0, v.windowMode, v.fpsOverlay ? 1 : 0, v.statsOverlay ? 1 : 0);
-        fprintf(file, "[game]\naim_assist = %d\ncontroller = %d\nmouse_sensitivity = %.2f\nraw_mouse = %d\n", v.aimAssist ? 1 : 0, v.controller ? 1 : 0, v.mouseSensitivity, v.rawMouse ? 1 : 0);
+        fprintf(file, "[game]\naim_assist = %d\nsubtitles = %d\nconsole = %d\ncontroller = %d\nmouse_sensitivity = %.2f\nraw_mouse = %d\n", v.aimAssist ? 1 : 0,
+            v.subtitles ? 1 : 0, v.console ? 1 : 0, v.controller ? 1 : 0, v.mouseSensitivity, v.rawMouse ? 1 : 0);
         fprintf(file, "[keys]\n");
         for (int i = 0; i < ActionCount; i++) fprintf(file, "key_%s = %d\n", ActionKeys[i], v.keys[i]);
         fclose(file);
@@ -269,7 +272,7 @@ std::string Settings::TitleCommandsChanged()
     // default.cfg (it only checks the file is there), so lines added to
     // it did nothing.
     static int appliedFov = 65, appliedDetail = 0;
-    static bool appliedAimAssist = true;
+    static bool appliedAimAssist = true, appliedSubtitles = true;
     const Values v = Get();
     std::string commands;
     if (v.fov != appliedFov)
@@ -291,6 +294,13 @@ std::string Settings::TitleCommandsChanged()
         appliedAimAssist = v.aimAssist;
         const char* on = v.aimAssist ? "1" : "0";
         commands += std::string("set aim_slowdown_enabled ") + on + "\nset aim_lockon_enabled " + on + "\nset aim_autoaim_enabled " + on + "\n";
+    }
+    // The subtitles: the title's cg_subtitles (its dvar table at 0x825CE180
+    // gives it "1"), the same switch as its own Gameplay page.
+    if (v.subtitles != appliedSubtitles)
+    {
+        appliedSubtitles = v.subtitles;
+        commands += std::string("set cg_subtitles ") + (v.subtitles ? "1" : "0") + "\n";
     }
     if (!commands.empty()) commands.pop_back();   // the last line's end: the queue adds its own
     return commands;
