@@ -120,7 +120,8 @@ namespace
     constexpr uint32_t DeviceWrite = 40, DeviceSegmentEnd = 44;
 
     constexpr uint32_t OpDrawIndx = 0x22, OpDrawIndx2 = 0x36, OpImLoad = 0x27, OpImLoadImmediate = 0x2B;
-    constexpr uint32_t OpSetConstant = 0x2D, OpLoadAluConstant = 0x2F, OpSetBinMaskLow = 0x60;
+    constexpr uint32_t OpSetConstant = 0x2D, OpLoadAluConstant = 0x2F, OpSetBinMaskLow = 0x60, OpSetBinMaskHigh = 0x61;
+    constexpr uint32_t OpInvalidateState = 0x3B, OpNop = 0x10;
 
     // The two passes of a device drawing in bins: the replay selects bins
     // 0 and 31 for the Z pass, bin 1 for the colour pass (Gpu::BinSelect).
@@ -197,6 +198,7 @@ namespace
         uint32_t scanned = 0;                // the last word read
         uint32_t segmentEnd = 0;             // the end of the segment it is in (device+44)
         uint32_t binMask = ~0u;              // SET_BIN_MASK_LO's last
+        uint32_t binMaskHigh = ~0u;          // SET_BIN_MASK_HI's
         uint32_t registers[ShadowWords];
         bool known[ShadowWords] = {};
         uint32_t unknown = ShadowWords;      // how many are not known yet
@@ -332,7 +334,7 @@ namespace
     // 64 KB, made as the streams reach them: written by the scan before the
     // kick, read by the command processor after it.
     enum : uint8_t { NoStart = 0, StateStart = 1, RunStart = 2 };
-    struct StreamPage { uint32_t header[0x4000]; uint8_t start[0x4000]; };
+    struct StreamPage { uint32_t header[0x4000]; uint8_t start[0x4000]; uint64_t mask[0x4000]; };
     std::atomic<StreamPage*> g_streamPages[0x20000000 >> 16];
 
     StreamPage* PageOf(uint32_t physical, bool make)
@@ -352,7 +354,7 @@ namespace
         return type == 0 || type == 3 ? ((header >> 16) & 0x3FFF) + 2 : type == 1 ? 3 : 1;
     }
 
-    struct StreamItem { uint32_t physical; uint32_t header; bool run; };
+    struct StreamItem { uint32_t physical; uint32_t header; bool run; uint64_t mask; };
     struct RunTally { uint64_t native = 0, uncovered = 0, unrecorded = 0, items = 0, skipped = 0, tails = 0, drawTails = 0; };
     RunTally g_runs;   // the command processor's
     std::chrono::steady_clock::time_point g_runsReported = std::chrono::steady_clock::now();
@@ -374,6 +376,7 @@ namespace
                 if (i == 0)
                 {
                     page->header[word] = item.header;
+                    page->mask[word] = item.mask;
                     page->start[word] = item.run ? RunStart : StateStart;
                     memset(page->start + word + 1, NoStart, here - 1);
                 }
@@ -400,6 +403,8 @@ namespace
         {
             const uint32_t first = header & 0x7FFF;
             const bool one = (header & 0x8000) != 0;
+            // The texture fetch cache flush (0x5000 .. 0x5002): the host has none.
+            if (first >= 0x5000 && first + (one ? 1 : count) <= 0x5003) return false;
             if (RunFrom(first) >= (one ? 1 : count)) return false;
             for (uint32_t i = 0; i < (one ? 1 : count); i++)
                 if (CopyIndex(first + i) >= ShadowWords) return true;
@@ -408,6 +413,10 @@ namespace
         if (type != 3) return true;
         const uint32_t opcode = (header >> 8) & 0x7F;
         if (opcode == OpLoadAluConstant || opcode == OpImLoad || opcode == OpImLoadImmediate) return false;
+        // The bin masks go with each packet that is predicated (Item::mask);
+        // a state invalidation and a filler do nothing here.
+        if (opcode == OpInvalidateState || opcode == OpNop) return false;
+        if ((opcode == OpSetBinMaskLow || opcode == OpSetBinMaskHigh) && !Gpu::KeepBinMaskPackets()) return false;
         if (opcode == OpSetConstant)
         {
             uint32_t index;
@@ -792,7 +801,7 @@ namespace
             if (ExecutingNow())
             {
                 const bool run = StillRun(base, at, header);
-                items.push_back(StreamItem{ Physical(at), header, run });
+                items.push_back(StreamItem{ Physical(at), header, run, (uint64_t(model.binMaskHigh) << 32) | model.binMask });
                 if (run) Census(base, at, header);
             }
             const uint32_t type = header >> 30;
@@ -817,6 +826,7 @@ namespace
                 length = 1 + count;
                 auto word = [&](uint32_t i) { return Guest::Read32(base, at + 4 + i * 4); };
                 if (opcode == OpSetBinMaskLow) model.binMask = word(0);
+                else if (opcode == OpSetBinMaskHigh) model.binMaskHigh = word(0);
                 else if (opcode == OpSetConstant)
                 {
                     uint32_t index;
@@ -923,11 +933,36 @@ bool NativeState::NativeRun(uint32_t physical, uint32_t dwords, std::vector<Item
             if (at + dwords * 4 > last + 4) break;
             const uint32_t type = header >> 30, opcode = (header >> 8) & 0x7F;
             if (type == 3 && (opcode == OpDrawIndx || opcode == OpDrawIndx2)) draws.push_back(at + (dwords - 1) * 4);
-            if (start == RunStart) items.push_back(Item{ at, dwords });
+            if (start == RunStart) items.push_back(Item{ at, dwords, page->mask[word] });
             else skipped++;
             at += dwords * 4;
         }
-        if (at == first) { g_runs.uncovered++; return; }
+        if (at == first)
+        {
+            g_runs.uncovered++;
+            // COD3_NATIVEUNREAD=n: the first n buffers no device stream read,
+            // packet by packet, to see what they are.
+            static int shown = []() { const char* t = getenv("COD3_NATIVEUNREAD"); return t ? atoi(t) : 0; }();
+            if (shown > 0)
+            {
+                shown--;
+                std::string text;
+                for (uint32_t i = 0, tail = first; i < 24 && tail <= last; i++)
+                {
+                    const uint32_t header = Guest::Read32(Guest::Base, Guest::PhysicalAlias(tail));
+                    char item[48];
+                    const uint32_t type = header >> 30;
+                    if (type == 3) snprintf(item, sizeof(item), " op%02X/%u", (header >> 8) & 0x7F, ((header >> 16) & 0x3FFF) + 1);
+                    else if (type == 0) snprintf(item, sizeof(item), " r%04X/%u", header & 0x7FFF, ((header >> 16) & 0x3FFF) + 1);
+                    else snprintf(item, sizeof(item), " t%u", type);
+                    text += item;
+                    tail += PacketDwords(header) * 4;
+                }
+                printf("native unread: %08X, %u dwords:%s\n", first, dwords, text.c_str());
+                fflush(stdout);
+            }
+            return;
+        }
         {
             std::lock_guard<std::mutex> lock(g_mutex);
             for (const uint32_t key : draws)

@@ -213,6 +213,28 @@ namespace
         g_predicatedOut.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
+    // The mask a native list's predicated item carries: the mask itself, or
+    // with COD3_MASKCHECK=1 compared with the one the packets set.
+    bool MaskCheckWanted()
+    {
+        static const bool on = getenv("COD3_MASKCHECK") != nullptr;
+        return on;
+    }
+    void MaskForItem(uint64_t mask)
+    {
+        if (!MaskCheckWanted() && Gpu::KeepBinMaskPackets()) return;
+        if (!MaskCheckWanted()) { g_binMask.store(mask, std::memory_order_relaxed); return; }
+        static std::atomic<uint64_t> checked{ 0 }, differed{ 0 };
+        const uint64_t now = g_binMask.load(std::memory_order_relaxed);
+        if (now != mask && differed.fetch_add(1) < 10)
+            printf("gpu: a native item's bin mask %016llX, the packets set %016llX\n", (unsigned long long)mask, (unsigned long long)now);
+        if (((checked.fetch_add(1) + 1) & 0x3FFFF) == 0)
+        {
+            printf("gpu: native items' bin masks: %llu checked, %llu differed\n", (unsigned long long)checked.load(), (unsigned long long)differed.load());
+            fflush(stdout);
+        }
+    }
+
     void SetBin(uint32_t opcode, uint32_t value)
     {
         std::atomic<uint64_t>& target = (opcode == 0x60 || opcode == 0x61) ? g_binMask : g_binSelect;
@@ -1072,6 +1094,12 @@ namespace
     std::map<uint32_t, uint64_t> g_registerWrites;   // under g_registerMutex
 }
 
+bool Gpu::KeepBinMaskPackets()
+{
+    static const bool keep = getenv("COD3_NATIVEMASKS") != nullptr || getenv("COD3_MASKCHECK") != nullptr;
+    return keep;
+}
+
 void Gpu::WriteRegister(uint32_t address, uint32_t value)
 {
     uint32_t mirrorTo = 0;
@@ -1599,7 +1627,15 @@ namespace
             {
                 t_native = true;
                 for (const NativeState::Item& item : items)
+                {
+                    // A predicated packet runs by the bin mask the stream had
+                    // set when it reached it: the lists leave the mask
+                    // packets out. COD3_MASKCHECK=1 runs them still and
+                    // compares.
+                    const uint32_t header = Guest::Read32(Guest::Base, Guest::PhysicalAlias(item.physical));
+                    if ((header >> 30) == 3 && (header & 1) != 0) MaskForItem(item.mask);
                     ExecuteBuffer(Guest::PhysicalAlias(item.physical), item.dwords, local, depth);
+                }
                 if (covered < dwords) ExecuteBuffer(base + covered * 4, dwords - covered, local, depth);
                 t_native = false;
                 items.swap(t_items);
