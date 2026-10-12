@@ -87,6 +87,7 @@ namespace RenderState
 
         // The surface.
         uint32_t pitch = 0;
+        uint32_t surfaceInfo = 0;      // RB_SURFACE_INFO whole: bits 16, 17 the console's MSAA
         uint32_t colorInfo[4] = {};
         uint32_t depthInfo = 0;
         uint32_t modeControl = 0;      // 0x2208 & 7

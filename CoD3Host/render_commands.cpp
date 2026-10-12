@@ -886,12 +886,12 @@ namespace
         }
         const uint32_t indexBytes = out.indexed ? state.indexCount * 4 : 0;
         char line[512];
-        const int n = snprintf(line, sizeof(line), "%llu %u %llx %016llx %016llx p%u n%u %c vb %08X %u %016llx ib %016llx c %016llx d %08X b %08X m %X t %u pc %016llx tx %016llx vs %016llx %u\n",
+        const int n = snprintf(line, sizeof(line), "%llu %u %llx %016llx %016llx p%u n%u %c vb %08X %u %016llx ib %016llx c %016llx d %08X b %08X m %X t %u pc %016llx tx %016llx vs %016llx %u s %08X z %08X sc %08X\n",
             (unsigned long long)swap, number++, (unsigned long long)Gpu::BinSelect(), (unsigned long long)vs->hash, (unsigned long long)ps->hash,
             state.primitive, state.indexCount, out.indexed ? 'i' : 'p', vb, vbBytes, (unsigned long long)SampleHash(vb, vbBytes),
             (unsigned long long)(out.indexed ? SampleHash(state.indexBase, indexBytes) : 0), (unsigned long long)vsConstants,
             state.depthControl, state.blendControl[0], state.colorMask, out.targetCount, (unsigned long long)psConstants, (unsigned long long)textures,
-            (unsigned long long)streams, unsigned(vs->vertexFetches.size()));
+            (unsigned long long)streams, unsigned(vs->vertexFetches.size()), state.surfaceInfo, state.depthInfo, state.scissorBottomRight);
         if (n > 0) lines.append(line, size_t(n));
         // COD3_DRAWLOG_PSDUMP=hash: the first draw of a frame with that pixel
         // program adds its 256 pixel constants, every word, to the log.

@@ -31,6 +31,7 @@ void RenderState::Read(uint32_t initiator, uint32_t indexBase, Snapshot& out)
     out.wideIndices = ((initiator >> 11) & 1) != 0;
     out.indexBase = indexBase;
 
+    out.surfaceInfo = Reg(SurfaceInfo);
     out.pitch = Reg(SurfaceInfo) & 0x3FFF;
     out.colorInfo[0] = Reg(ColorInfo0);
     out.colorInfo[1] = Reg(ColorInfo1);

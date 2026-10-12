@@ -787,6 +787,51 @@ namespace
         return true;
     }
 
+    // COD3_SCANCENSUS=1: what the scan reads, every five seconds, by kind
+    // and by who wrote it: the draw call being recorded (its own packets,
+    // after `t_callBefore`) or something between two draws (the title's
+    // blocks, constants, the kick). In packets and words.
+    thread_local uint32_t t_callBefore = 0;
+    struct ScanTally { uint64_t packets[2][8] = {}, words[2][8] = {}; };
+    ScanTally g_scanTally;
+    std::chrono::steady_clock::time_point g_scanReported = std::chrono::steady_clock::now();
+    void ScanCensus(uint32_t at, uint32_t header, uint32_t length)
+    {
+        static const bool on = getenv("COD3_SCANCENSUS") != nullptr;
+        if (!on) return;
+        const uint32_t type = header >> 30, opcode = (header >> 8) & 0x7F;
+        uint32_t kind = 7;
+        if (type == 0)
+        {
+            const uint32_t reg = header & 0x7FFF;
+            kind = reg >= 0x4000 && reg < 0x4900 ? 1 : reg >= 0x4900 && reg < 0x4A00 ? 2 : reg >= 0x2000 && reg < 0x2400 ? 0 : 7;
+        }
+        else if (type == 3)
+            kind = opcode == OpSetConstant ? 3 : opcode == OpLoadAluConstant ? 4 : (opcode == OpImLoad || opcode == OpImLoadImmediate) ? 5
+                 : (opcode == OpDrawIndx || opcode == OpDrawIndx2) ? 6 : 7;
+        const uint32_t who = (t_callBefore != 0 && at > t_callBefore) ? 0 : 1;
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_scanTally.packets[who][kind]++;
+        g_scanTally.words[who][kind] += length;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - g_scanReported < std::chrono::seconds(5)) return;
+        g_scanReported = now;
+        const char* names[8] = { "registers", "type0 constants", "bool/loop", "SET_CONSTANT", "LOAD_ALU", "program", "draw", "other" };
+        for (uint32_t w = 0; w < 2; w++)
+        {
+            std::string text = w == 0 ? "scan census, the draw calls' own:" : "scan census, between draws:";
+            for (uint32_t k = 0; k < 8; k++)
+            {
+                char item[96];
+                snprintf(item, sizeof(item), " %s %llu (%llu words)", names[k], (unsigned long long)g_scanTally.packets[w][k], (unsigned long long)g_scanTally.words[w][k]);
+                text += item;
+            }
+            printf("%s\n", text.c_str());
+        }
+        fflush(stdout);
+        g_scanTally = ScanTally{};
+    }
+
     // The device's packets after model.scanned up to `last` (the last word
     // to read), into the model; a record at each draw.
     void Scan(uint8_t* base, uint32_t device, DeviceModel& model, uint32_t last)
@@ -872,6 +917,7 @@ namespace
                 else if (opcode == OpDrawIndx || opcode == OpDrawIndx2)
                     Keep(base, device, at + count * 4, word(opcode == OpDrawIndx ? 1 : 0), passes, model);
             }
+            ScanCensus(at, header, length);
             at += length * 4;
         }
         if (at != last + 4)
@@ -1172,7 +1218,9 @@ void NativeState::Recorded(uint8_t* base, uint32_t device, uint32_t before, uint
         Restart(base, device, model, before);
         if (after < before || after - before > 0x10000) { model.scanned = after; return; }
     }
+    t_callBefore = before;
     Scan(base, device, model, after);
+    t_callBefore = 0;
 }
 
 void NativeState::Kicking(uint8_t* base, uint32_t device)

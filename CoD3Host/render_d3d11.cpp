@@ -1009,7 +1009,10 @@ namespace
 
     void ExecuteResolve(const RenderState::ResolveCommand& command)
     {
-        struct ResolveStamp { ~ResolveStamp() { RenderStats::DrawTimed(1); } } resolveStamp;
+        // Timed as a resolve, by its size, samples and kind (COD3_GPU_DRAWS).
+        struct ResolveStamp { uint64_t key; ~ResolveStamp() { RenderStats::DrawTimed(key); } } resolveStamp{
+            (uint64_t(command.width) << 48) | (uint64_t(command.height) << 32) | (uint64_t(command.sourceSamples) << 8) | (command.fromDepth ? 0x1000u : 0u) |
+            (command.copy ? 0x2000u : 0u) | (command.colorClear || command.depthClear ? 0x4000u : 0u) | 4u };
         if (command.bindingsLost) ForgetBindings();
         if (command.copy)
         {
