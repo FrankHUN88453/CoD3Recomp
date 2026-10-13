@@ -354,6 +354,8 @@ namespace
         return type == 0 || type == 3 ? ((header >> 16) & 0x3FFF) + 2 : type == 1 ? 3 : 1;
     }
 
+    // A packet the command processor runs (its bin mask), or the head of a
+    // stretch it steps over (the mask word: the stretch's hash and length).
     struct StreamItem { uint32_t physical; uint32_t header; bool run; uint64_t mask; };
     struct RunTally { uint64_t native = 0, uncovered = 0, unrecorded = 0, items = 0, skipped = 0, tails = 0, drawTails = 0; };
     RunTally g_runs;   // the command processor's
@@ -379,26 +381,7 @@ namespace
     }
     void Spanned(const std::vector<StreamItem>& items)
     {
-        size_t i = 0;
-        while (i < items.size())
-        {
-            const StreamItem& item = items[i];
-            if (item.run)
-            {
-                Note(item.physical, item.header, RunStart, item.mask);
-                i++;
-                continue;
-            }
-            uint32_t dwords = 0, hash = 2166136261u;
-            size_t j = i;
-            for (; j < items.size() && !items[j].run && dwords < 0x100000; j++)
-            {
-                dwords += PacketDwords(items[j].header);
-                hash = HeaderHash(hash, items[j].header);
-            }
-            Note(item.physical, item.header, RangeStart, (uint64_t(hash) << 32) | dwords);
-            i = j;
-        }
+        for (const StreamItem& item : items) Note(item.physical, item.header, item.run ? RunStart : RangeStart, item.mask);
     }
 
     // Whether a packet still has to be run by the command processor when
@@ -854,14 +837,31 @@ namespace
         const uint32_t first = at;
         static std::vector<StreamItem> items;   // under g_modelMutex
         items.clear();
+        StreamItem stretch{ 0, 0, false, 0 };      // the stretch being gathered, physical 0 for none
+        uint32_t stretchHash = 0, stretchDwords = 0;
         while (at <= last)
         {
             const uint32_t header = Guest::Read32(base, at);
             if (ExecutingNow())
             {
-                const bool run = StillRun(base, at, header);
-                items.push_back(StreamItem{ Physical(at), header, run, (uint64_t(model.binMaskHigh) << 32) | model.binMask });
-                if (run) Census(base, at, header);
+                if (StillRun(base, at, header))
+                {
+                    if (stretch.physical != 0) { stretch.mask = (uint64_t(stretchHash) << 32) | stretchDwords; items.push_back(stretch); stretch.physical = 0; }
+                    items.push_back(StreamItem{ Physical(at), header, true, (uint64_t(model.binMaskHigh) << 32) | model.binMask });
+                    Census(base, at, header);
+                }
+                else
+                {
+                    if (stretch.physical == 0 || stretchDwords >= 0x100000)
+                    {
+                        if (stretch.physical != 0) { stretch.mask = (uint64_t(stretchHash) << 32) | stretchDwords; items.push_back(stretch); }
+                        stretch = StreamItem{ Physical(at), header, false, 0 };
+                        stretchHash = 2166136261u;
+                        stretchDwords = 0;
+                    }
+                    stretchHash = HeaderHash(stretchHash, header);
+                    stretchDwords += PacketDwords(header);
+                }
             }
             const uint32_t type = header >> 30;
             const uint32_t count = ((header >> 16) & 0x3FFF) + 1;
@@ -939,7 +939,11 @@ namespace
             std::lock_guard<std::mutex> lock(g_mutex);
             g_tally.unparsed++;
         }
-        else if (ExecutingNow()) Spanned(items);
+        else if (ExecutingNow())
+        {
+            if (stretch.physical != 0) { stretch.mask = (uint64_t(stretchHash) << 32) | stretchDwords; items.push_back(stretch); }
+            Spanned(items);
+        }
         model.scanned = last;
     }
 
