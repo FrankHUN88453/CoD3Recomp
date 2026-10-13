@@ -326,6 +326,34 @@ visszahozható, ahogy eddig):
 Ami marad: a shaderek fordítása (a mikrokódnak nincs forrása; fordítás,
 nem emuláció) és a textúrák átalakítása betöltéskor.
 
+
+### Állás 2026-10-13
+
+- **N4 első lépése kész** (efa78d0): a natív listák viszik a menetmaszkjukat;
+  a maszkcsomagok, a fetch-gyorsítótár ürítése, az INVALIDATE_STATE és a NOP
+  kimarad. A parancsfeldolgozó csomagjai ~45%-kal kevesebbek.
+- **A natív út az alapértelmezett** (92c0668): a játékos beállításaival
+  (2560×1440, 200%, MSAA 4x + FXAA) az erdő mérőjelenete 101 → 114 fps; mind a
+  15 pálya hibátlan.
+- **N6 első lépése** (dde71b3): MSAA csak ott, ahol a konzol is használta
+  (RB_SURFACE_INFO 16–17. bit: a jelenet 2x, minden más 1x), a felületek ezzel
+  az osztállyal együtt különülnek el. Az erdő 1024-es árnyékkaszkádja már nem
+  4x-es, a jelenet felülete nem nő 1024 sorra; 113,7 → 116,1 fps.
+- **Olcsóbb beolvasás**: az állapotcsomagok szakaszonként egy jegyzetet kapnak
+  (fejléc-hash-sel ellenőrizve), a programhash memóban (cb01e24, 1029fb3,
+  f7d260e). 1080p-n 186 → ~190 fps.
+- **Hol a korlát most:** 1080p-n a parancsfeldolgozó szála (~90%): a
+  rajzolásonkénti előkészítés (PrepareDraw ~40%, a rekord képe ~22%, a
+  konstansfeltöltés). A játékos beállításain a GPU: ott a konzolos
+  mélységpontosság a legnagyobb tétel (bekapcsolva ~115, kikapcsolva
+  ~152 fps a mérőjeleneten), mert a pixel shader mélységírása kikapcsolja a
+  mélységtömörítést. A vibrálás egyik oka (Z-menet ↔ színmenet) azóta
+  natívan megoldott (79a7435); a „távoli domboldal a saját alacsonyabb
+  részletessége fölött” esetet a játékosnak kell kipróbálnia nélküle.
+- A resolve-ok a GPU-idő 14–19%-a; a hardveres `ResolveSubresource`
+  kipróbálva lassabb volt (a teljes forrást oldja fel), ezért maradt a
+  shaderes másolás.
+
 ## Felépítés
 
 1. **Horog-réteg** (`d3d_hooks.cpp`): a könyvtár API-függvényeinek
