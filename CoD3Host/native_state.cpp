@@ -333,7 +333,7 @@ namespace
     // as far as its packets follow each other here unchanged. In pages of
     // 64 KB, made as the streams reach them: written by the scan before the
     // kick, read by the command processor after it.
-    enum : uint8_t { NoStart = 0, StateStart = 1, RunStart = 2 };
+    enum : uint8_t { NoStart = 0, StateStart = 1, RunStart = 2, RangeStart = 3 };
     struct StreamPage { uint32_t header[0x4000]; uint8_t start[0x4000]; uint64_t mask[0x4000]; };
     std::atomic<StreamPage*> g_streamPages[0x20000000 >> 16];
 
@@ -359,31 +359,45 @@ namespace
     RunTally g_runs;   // the command processor's
     std::chrono::steady_clock::time_point g_runsReported = std::chrono::steady_clock::now();
 
-    // The packets read, in order, over what they cover.
+    // The packets read, in order, over what they cover. A packet the command
+    // processor runs gets its own note (its header and bin mask); a stretch
+    // of the rest, which it only steps over, one note at the stretch's first
+    // packet: its header, and in the mask word the stretch's length in words
+    // and a hash of its headers, which the command processor checks against
+    // the headers it finds there. A note per packet, and the words inside
+    // each marked as no start, were a good part of what a draw cost the
+    // render job; the command processor never looks inside a packet or a
+    // stretch.
+    inline uint32_t HeaderHash(uint32_t hash, uint32_t header) { return (hash ^ header) * 16777619u; }
+    void Note(uint32_t physical, uint32_t header, uint8_t start, uint64_t mask)
+    {
+        StreamPage* page = PageOf(physical, true);
+        const uint32_t word = (physical & 0xFFFF) >> 2;
+        page->header[word] = header;
+        page->mask[word] = mask;
+        page->start[word] = start;
+    }
     void Spanned(const std::vector<StreamItem>& items)
     {
-        for (const StreamItem& item : items)
+        size_t i = 0;
+        while (i < items.size())
         {
-            // The packet's first word marked, the rest of it as no start, a
-            // page's part at a time.
-            const uint32_t dwords = PacketDwords(item.header);
-            for (uint32_t i = 0; i < dwords;)
+            const StreamItem& item = items[i];
+            if (item.run)
             {
-                const uint32_t at = item.physical + i * 4;
-                StreamPage* page = PageOf(at, true);
-                const uint32_t word = (at & 0xFFFF) >> 2;
-                const uint32_t here = std::min(dwords - i, 0x4000u - word);
-                if (i == 0)
-                {
-                    page->header[word] = item.header;
-                    page->mask[word] = item.mask;
-                    page->start[word] = item.run ? RunStart : StateStart;
-                    memset(page->start + word + 1, NoStart, here - 1);
-                }
-                else
-                    memset(page->start + word, NoStart, here);
-                i += here;
+                Note(item.physical, item.header, RunStart, item.mask);
+                i++;
+                continue;
             }
+            uint32_t dwords = 0, hash = 2166136261u;
+            size_t j = i;
+            for (; j < items.size() && !items[j].run && dwords < 0x100000; j++)
+            {
+                dwords += PacketDwords(items[j].header);
+                hash = HeaderHash(hash, items[j].header);
+            }
+            Note(item.physical, item.header, RangeStart, (uint64_t(hash) << 32) | dwords);
+            i = j;
         }
     }
 
@@ -975,6 +989,26 @@ bool NativeState::NativeRun(uint32_t physical, uint32_t dwords, std::vector<Item
             const uint8_t start = page->start[word];
             const uint32_t header = page->header[word];
             if (start == NoStart || Guest::Read32(Guest::Base, Guest::PhysicalAlias(at)) != header) break;
+            if (start == RangeStart)
+            {
+                // A stretch the list steps over, as it was read: its headers
+                // hashed again from memory.
+                const uint32_t length = uint32_t(page->mask[word]), wanted = uint32_t(page->mask[word] >> 32);
+                const uint32_t end = at + length * 4;
+                if (length == 0 || end > last + 4) break;
+                uint32_t hash = 2166136261u, packets = 0, there = at;
+                while (there < end)
+                {
+                    const uint32_t h = Guest::Read32(Guest::Base, Guest::PhysicalAlias(there));
+                    hash = HeaderHash(hash, h);
+                    there += PacketDwords(h) * 4;
+                    packets++;
+                }
+                if (there != end || hash != wanted) break;
+                skipped += packets;
+                at = end;
+                continue;
+            }
             const uint32_t dwords = PacketDwords(header);
             if (at + dwords * 4 > last + 4) break;
             const uint32_t type = header >> 30, opcode = (header >> 8) & 0x7F;
