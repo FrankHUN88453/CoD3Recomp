@@ -184,10 +184,52 @@ namespace
 
     struct Program { uint32_t address = 0, dwords = 0; uint64_t hash = 0; };
 
+    // The program hash (byte by byte, as the program cache and the disk
+    // cache name them) kept by where the microcode is and how long, behind
+    // a sum of its words taken eight bytes at a time: some five hundred
+    // program loads a frame, most of them the same microcode at the same
+    // place, and hashing each byte was a percent of the render job's
+    // thread. Only the scan uses this (under g_modelMutex).
+    uint64_t WordSum(const uint8_t* bytes, uint32_t dwords)
+    {
+        uint64_t sum = 0x9E3779B97F4A7C15ull ^ dwords;
+        uint32_t i = 0;
+        for (; i + 2 <= dwords; i += 2)
+        {
+            uint64_t w;
+            memcpy(&w, bytes + i * 4, 8);
+            sum = (sum ^ w) * 0xFF51AFD7ED558CCDull;
+            sum ^= sum >> 32;
+        }
+        if (i < dwords)
+        {
+            uint32_t w;
+            memcpy(&w, bytes + i * 4, 4);
+            sum = (sum ^ w) * 0xC4CEB9FE1A85EC53ull;
+            sum ^= sum >> 29;
+        }
+        return sum;
+    }
+    struct ProgramMemo { uint32_t physical = 0, dwords = 0; uint64_t sum = 0, hash = 0; };
+    ProgramMemo g_programMemo[4096];
+
     Program LoadedProgram(uint8_t* base, uint32_t physical, uint32_t dwords)
     {
         Program program{ physical, dwords, 0 };
-        if (dwords != 0 && dwords <= 0x4000) program.hash = RenderShaders::HashMicrocode(base + Guest::PhysicalAlias(physical), dwords);
+        if (dwords == 0 || dwords > 0x4000) return program;
+        const uint8_t* bytes = base + Guest::PhysicalAlias(physical);
+        const uint64_t sum = WordSum(bytes, dwords);
+        ProgramMemo& memo = g_programMemo[(physical >> 2) & 4095];
+        if (memo.physical == physical && memo.dwords == dwords && memo.sum == sum)
+        {
+            program.hash = memo.hash;
+            return program;
+        }
+        program.hash = RenderShaders::HashMicrocode(bytes, dwords);
+        memo.physical = physical;
+        memo.dwords = dwords;
+        memo.sum = sum;
+        memo.hash = program.hash;
         return program;
     }
 
