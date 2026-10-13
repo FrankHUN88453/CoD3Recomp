@@ -87,20 +87,24 @@ namespace RenderResources
         uint32_t pitch = 0, rows = 0;
         uint32_t samples = 1;
     };
-    Handle ColorTargetFor(uint32_t colorInfo, uint32_t pitch);
-    Handle DepthTargetFor(uint32_t depthInfo, uint32_t pitch);
+    // A surface is given by its RB_SURFACE_INFO whole: the pitch (bits 0 ..
+    // 13) and the console's own MSAA (bits 16, 17). The host draws with its
+    // chosen MSAA only what the console drew with some, and keeps such a
+    // surface apart from a single sampled one at the same tile and pitch.
+    Handle ColorTargetFor(uint32_t colorInfo, uint32_t surface);
+    Handle DepthTargetFor(uint32_t depthInfo, uint32_t surface);
 
     // The surfaces of a pitch must reach this many of the title's rows: a
     // draw or a resolve is about to use them. The targets of that pitch
     // are made again taller when they do not, colour and depth alike so
     // they stay the same size, and true says so: what was bound is gone.
-    bool EnsureRows(uint32_t pitch, uint32_t rows);
+    bool EnsureRows(uint32_t surface, uint32_t rows);
     const ColorTarget* ColorTargetOf(Handle handle);
     const DepthTarget* DepthTargetOf(Handle handle);
 
     // A target's host size for a pitch, and the scales that map the title's
     // pixels to it: the size is whole pixels, so they are not quite Scale().
-    void TargetSize(uint32_t pitch, uint32_t bytesPerSample, uint32_t& width, uint32_t& height, float& scaleX, float& scaleY);
+    void TargetSize(uint32_t surface, uint32_t bytesPerSample, uint32_t& width, uint32_t& height, float& scaleX, float& scaleY);
 
     // --- resolved surfaces ---------------------------------------------------------------
 

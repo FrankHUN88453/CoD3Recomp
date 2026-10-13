@@ -231,7 +231,7 @@ namespace
             const uint32_t tl = state.scissorTopLeft, br = state.scissorBottomRight;
             const int32_t offsetY = (tl & 0x80000000u) ? 0 : (int32_t(state.windowOffset << 1) >> 17);
             const int32_t bottom = int32_t((br >> 16) & 0x7FFF) + offsetY;
-            if (bottom > 0 && RenderResources::EnsureRows(state.pitch, uint32_t(bottom))) out.bindingsLost = true;
+            if (bottom > 0 && RenderResources::EnsureRows(state.surfaceInfo, uint32_t(bottom))) out.bindingsLost = true;
         }
 
         // Only the targets the pixel program writes, each once: the title
@@ -242,7 +242,7 @@ namespace
         {
             if (((ps->colourTargets >> i) & 1) == 0) continue;
             if (((state.colorMask >> (i * 4)) & 0xF) == 0) continue;
-            const RenderResources::ColorTarget* target = RenderResources::ColorTargetOf(RenderResources::ColorTargetFor(state.colorInfo[i], state.pitch));
+            const RenderResources::ColorTarget* target = RenderResources::ColorTargetOf(RenderResources::ColorTargetFor(state.colorInfo[i], state.surfaceInfo));
             if (target == nullptr) continue;
             bool duplicate = false;
             for (uint32_t j = 0; j < i; j++) if (out.targets[j] == target->view) duplicate = true;
@@ -254,7 +254,7 @@ namespace
         }
         if ((state.depthControl & 3) != 0)
         {
-            if (const RenderResources::DepthTarget* depth = RenderResources::DepthTargetOf(RenderResources::DepthTargetFor(state.depthInfo, state.pitch)))
+            if (const RenderResources::DepthTarget* depth = RenderResources::DepthTargetOf(RenderResources::DepthTargetFor(state.depthInfo, state.surfaceInfo)))
             {
                 out.depthView = depth->view;
                 out.depthResource = depth->resource;
@@ -280,7 +280,7 @@ namespace
         // The target's host size, and the scissor in it. Bit 31 of the
         // scissor says the window offset does not apply.
         float scaleX;
-        RenderResources::TargetSize(state.pitch, 4, out.targetWidth, out.targetHeight, scaleX, scaleY);
+        RenderResources::TargetSize(state.surfaceInfo, 4, out.targetWidth, out.targetHeight, scaleX, scaleY);
         {
             const uint32_t tl = state.scissorTopLeft, br = state.scissorBottomRight;
             const int32_t offsetX = (tl & 0x80000000u) ? 0 : (int32_t(state.windowOffset << 17) >> 17);
@@ -1035,7 +1035,7 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
     {
         uint32_t hostWidth, hostHeight;
         float scaleX, scaleYAgain;
-        RenderResources::TargetSize(state.pitch, 4, hostWidth, hostHeight, scaleX, scaleYAgain);
+        RenderResources::TargetSize(state.surfaceInfo, 4, hostWidth, hostHeight, scaleX, scaleYAgain);
         constants.pixelGen[0] = scaleX > 0.0f ? 1.0f / scaleX : 1.0f;
         constants.pixelGen[1] = scaleYAgain > 0.0f ? 1.0f / scaleYAgain : 1.0f;
         constants.pixelGen[2] = float((state.contextMisc >> 8) & 0xFF);
@@ -1093,11 +1093,11 @@ bool RenderCommands::PrepareResolve(ResolveCommand& out)
     const bool colorClear = ((state.control >> 8) & 1) != 0;
     const bool depthClear = ((state.control >> 9) & 1) != 0;
     RenderStats::Frame().resolves++;
-    if (RenderResources::EnsureRows(state.pitch, y1)) out.bindingsLost = true;
+    if (RenderResources::EnsureRows(state.surfaceInfo, y1)) out.bindingsLost = true;
 
     uint32_t targetWidth, targetHeight;
     float scaleX, scaleY;
-    RenderResources::TargetSize(state.pitch, 4, targetWidth, targetHeight, scaleX, scaleY);
+    RenderResources::TargetSize(state.surfaceInfo, 4, targetWidth, targetHeight, scaleX, scaleY);
     const float hostX0 = x0 * scaleX, hostY0 = y0 * scaleY;
     const uint32_t hostWidth = std::max(1u, uint32_t(std::lround(width * scaleX)));
     const uint32_t hostHeight = std::max(1u, uint32_t(std::lround(height * scaleY)));
@@ -1109,15 +1109,17 @@ bool RenderCommands::PrepareResolve(ResolveCommand& out)
     static const bool resolveLog = getenv("COD3_RESOLVELOG") != nullptr;
     if (resolveLog)
     {
-        static std::map<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>, uint64_t> where;
+        static std::map<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t>, uint64_t> where;
         static auto told = std::chrono::steady_clock::now();
-        where[{ state.control, state.destBase, width, height }]++;
+        const uint32_t sourceTile = (state.control & 7) == 4 ? (state.depthInfo & 0xFFF) : (state.colorInfo[(state.control & 7) < 4 ? (state.control & 7) : 0] & 0xFFF);
+        where[{ state.control, state.destBase, width, height, sourceTile | (state.pitch << 16), (state.surfaceInfo >> 16) & 3 }]++;
         if (std::chrono::steady_clock::now() - told > std::chrono::seconds(5))
         {
             told = std::chrono::steady_clock::now();
             printf("resolves, five seconds:");
             for (const auto& [key, count] : where)
-                printf(" %08X>%08X %ux%u x%llu;", std::get<0>(key), std::get<1>(key), std::get<2>(key), std::get<3>(key), (unsigned long long)count);
+                printf(" %08X>%08X %ux%u from tile %u pitch %u msaa %u x%llu;", std::get<0>(key), std::get<1>(key), std::get<2>(key), std::get<3>(key),
+                       std::get<4>(key) & 0xFFFF, std::get<4>(key) >> 16, 1u << std::get<5>(key), (unsigned long long)count);
             printf("\n");
             fflush(stdout);
             where.clear();
@@ -1130,7 +1132,7 @@ bool RenderCommands::PrepareResolve(ResolveCommand& out)
         DXGI_FORMAT format = DXGI_FORMAT_R8G8B8A8_UNORM;
         if (fromDepth)
         {
-            const RenderResources::DepthTarget* depth = RenderResources::DepthTargetOf(RenderResources::DepthTargetFor(state.depthInfo, state.pitch));
+            const RenderResources::DepthTarget* depth = RenderResources::DepthTargetOf(RenderResources::DepthTargetFor(state.depthInfo, state.surfaceInfo));
             if (depth == nullptr) return false;
             out.source = depth->resource;
             out.sourceWidth = depth->width;
@@ -1141,7 +1143,7 @@ bool RenderCommands::PrepareResolve(ResolveCommand& out)
         else
         {
             const uint32_t info = state.colorInfo[sourceSelect < 4 ? sourceSelect : 0];
-            const RenderResources::ColorTarget* color = RenderResources::ColorTargetOf(RenderResources::ColorTargetFor(info, state.pitch));
+            const RenderResources::ColorTarget* color = RenderResources::ColorTargetOf(RenderResources::ColorTargetFor(info, state.surfaceInfo));
             if (color == nullptr) return false;
             out.source = color->resource;
             out.sourceWidth = color->width;
@@ -1165,7 +1167,7 @@ bool RenderCommands::PrepareResolve(ResolveCommand& out)
 
     if (colorClear)
     {
-        if (const RenderResources::ColorTarget* color = RenderResources::ColorTargetOf(RenderResources::ColorTargetFor(state.colorInfo[0], state.pitch)))
+        if (const RenderResources::ColorTarget* color = RenderResources::ColorTargetOf(RenderResources::ColorTargetFor(state.colorInfo[0], state.surfaceInfo)))
         {
             const uint32_t value = state.colorClearValue;
             out.colorClear = true;
@@ -1182,7 +1184,7 @@ bool RenderCommands::PrepareResolve(ResolveCommand& out)
     }
     if (depthClear)
     {
-        if (const RenderResources::DepthTarget* depth = RenderResources::DepthTargetOf(RenderResources::DepthTargetFor(state.depthInfo, state.pitch)))
+        if (const RenderResources::DepthTarget* depth = RenderResources::DepthTargetOf(RenderResources::DepthTargetFor(state.depthInfo, state.surfaceInfo)))
         {
             const uint32_t value = state.depthClearValue;
             out.depthClear = true;

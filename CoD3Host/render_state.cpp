@@ -88,6 +88,7 @@ void RenderState::ReadResolve(ResolveSnapshot& out)
     out.control = Reg(CopyControl);
     out.destBase = Reg(CopyDestBase);
     out.destInfo = Reg(CopyDestInfo);
+    out.surfaceInfo = Reg(SurfaceInfo);
     out.pitch = Reg(SurfaceInfo) & 0x3FFF;
     out.scissorTopLeft = Reg(ScissorTopLeft);
     out.scissorBottomRight = Reg(ScissorBottomRight);

@@ -145,6 +145,7 @@ namespace RenderState
         uint32_t destBase = 0;         // physical, where the title will sample it
         uint32_t destInfo = 0;
         uint32_t pitch = 0;
+        uint32_t surfaceInfo = 0;      // RB_SURFACE_INFO whole: bits 16, 17 the console's MSAA
         uint32_t scissorTopLeft = 0, scissorBottomRight = 0;
         uint32_t colorInfo[4] = {};
         uint32_t depthInfo = 0;

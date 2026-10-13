@@ -69,15 +69,32 @@ namespace
     // rest to start with, and more when a level asks (EnsureRows: the
     // crossroads level's shadow map is 1024 rows of the 1040 wide surface).
     // COD3_TARGETROWS=N pins it.
-    uint32_t g_rowsAsked[16384 / 32 + 1] = {};   // by pitch in 32s, the most a draw or resolve has used
+    uint32_t g_rowsAsked[2][16384 / 32 + 1] = {};   // by MSAA class and pitch in 32s, the most a draw or resolve has used
 
-    uint32_t TargetRows(uint32_t pitch, uint32_t bytesPerSample)
+    // A surface (RB_SURFACE_INFO): its pitch, and its class: 1 when the
+    // console drew it with MSAA (bits 16, 17), which the host then draws
+    // with the MSAA chosen; 0 for one sample. In a level the frame is the
+    // only such surface (2x on the console); the shadow maps, the half
+    // size smoke and the bloom are single sampled, among them the forest's
+    // 1024 square shadow cascade drawn at the frame's pitch, which as a
+    // surface of that pitch was drawn with four samples and made the
+    // frame's surfaces 1024 rows tall. COD3_PITCHMSAA=1 goes by the pitch
+    // as before (640 and more, MSAA).
+    uint32_t PitchOf(uint32_t surface) { return surface & 0x3FFF; }
+    uint32_t ClassOf(uint32_t surface)
+    {
+        static const bool byPitch = getenv("COD3_PITCHMSAA") != nullptr;
+        if (byPitch) return (surface & 0x3FFF) >= 640 ? 1u : 0u;
+        return ((surface >> 16) & 3) != 0 ? 1u : 0u;
+    }
+
+    uint32_t TargetRows(uint32_t pitch, uint32_t cls, uint32_t bytesPerSample)
     {
         if (pitch == 0) return 0;
         static const uint32_t pinned = []() { const char* t = getenv("COD3_TARGETROWS"); return t ? uint32_t(strtoul(t, nullptr, 10)) : 0u; }();
         const uint32_t edram = (10u << 20) / (pitch * bytesPerSample);
         uint32_t rows = pinned != 0 ? pinned : pitch >= 1024 ? 720 : std::max(pitch, 256u);
-        if (pinned == 0 && pitch / 32 < sizeof(g_rowsAsked) / sizeof(g_rowsAsked[0])) rows = std::max(rows, g_rowsAsked[pitch / 32]);
+        if (pinned == 0 && pitch / 32 < sizeof(g_rowsAsked[0]) / sizeof(g_rowsAsked[0][0])) rows = std::max(rows, g_rowsAsked[cls][pitch / 32]);
         return std::min(std::min(rows, edram), 1440u);
     }
 
@@ -186,8 +203,8 @@ namespace
 
     // --- render targets -----------------------------------------------------------------------
 
-    struct ColorEntry { ColorTarget target; ComPtr<ID3D11Texture2D> texture; ComPtr<ID3D11RenderTargetView> view; ComPtr<ID3D11ShaderResourceView> resource; uint32_t key[2] = {}; };
-    struct DepthEntry { DepthTarget target; ComPtr<ID3D11Texture2D> texture; ComPtr<ID3D11DepthStencilView> view; ComPtr<ID3D11ShaderResourceView> resource; uint32_t key[2] = {}; };
+    struct ColorEntry { ColorTarget target; ComPtr<ID3D11Texture2D> texture; ComPtr<ID3D11RenderTargetView> view; ComPtr<ID3D11ShaderResourceView> resource; uint32_t key[2] = {}; uint32_t cls = 0; };
+    struct DepthEntry { DepthTarget target; ComPtr<ID3D11Texture2D> texture; ComPtr<ID3D11DepthStencilView> view; ComPtr<ID3D11ShaderResourceView> resource; uint32_t key[2] = {}; uint32_t cls = 0; };
     std::deque<ColorEntry> g_colorTargets;   // by handle less one
     std::deque<DepthEntry> g_depthTargets;
     RenderTable::KeyTable<2> g_colorKeys;
@@ -219,10 +236,10 @@ namespace
     // nothing in them and at 200% it cost a shadow map 2585 by 2585 by 4
     // samples of depth. A draw's colour and depth targets share its pitch,
     // so they always agree. COD3_SMALLMSAA=1 multisamples them as before.
-    uint32_t SamplesFor(uint32_t pitch)
+    uint32_t SamplesFor(uint32_t cls)
     {
         static const bool all = getenv("COD3_SMALLMSAA") != nullptr;
-        return all || pitch >= 640 ? g_samples : 1;
+        return all || cls != 0 ? g_samples : 1;
     }
 
     void HostSize(uint32_t pitch, uint32_t rows, uint32_t& width, uint32_t& height)
@@ -900,17 +917,19 @@ void RenderResources::RequestMultisample(uint32_t samples)
 
 uint32_t RenderResources::Multisample() { return g_samples; }
 
-void RenderResources::TargetSize(uint32_t pitch, uint32_t bytesPerSample, uint32_t& width, uint32_t& height, float& scaleX, float& scaleY)
+void RenderResources::TargetSize(uint32_t surface, uint32_t bytesPerSample, uint32_t& width, uint32_t& height, float& scaleX, float& scaleY)
 {
-    const uint32_t rows = TargetRows(pitch, bytesPerSample);
+    const uint32_t pitch = PitchOf(surface);
+    const uint32_t rows = TargetRows(pitch, ClassOf(surface), bytesPerSample);
     HostSize(pitch, rows, width, height);
     scaleX = pitch != 0 ? float(width) / float(pitch) : 1.0f;
     scaleY = rows != 0 ? float(height) / float(rows) : 1.0f;
 }
 
-RenderState::Handle RenderResources::ColorTargetFor(uint32_t colorInfo, uint32_t pitch)
+RenderState::Handle RenderResources::ColorTargetFor(uint32_t colorInfo, uint32_t surface)
 {
-    const uint32_t key[2] = { colorInfo & 0x000F0FFFu, pitch };   // base tile and format
+    const uint32_t pitch = PitchOf(surface), cls = ClassOf(surface);
+    const uint32_t key[2] = { colorInfo & 0x000F0FFFu, pitch | (cls << 16) };   // base tile and format; pitch and class
     if (const Handle found = g_colorKeys.Find(key)) return found;
 
     g_colorTargets.emplace_back();
@@ -920,7 +939,8 @@ RenderState::Handle RenderResources::ColorTargetFor(uint32_t colorInfo, uint32_t
     const uint32_t format = (colorInfo >> 16) & 0xF;
     entry.target.format = ColorFormat(format, bytesPerSample);
     entry.target.pitch = pitch;
-    entry.target.rows = TargetRows(pitch, bytesPerSample);
+    entry.target.rows = TargetRows(pitch, cls, bytesPerSample);
+    entry.cls = cls;
     HostSize(pitch, entry.target.rows, entry.target.width, entry.target.height);
     memcpy(entry.key, key, sizeof(entry.key));
     g_colorKeys.Insert(key, handle);
@@ -932,7 +952,7 @@ RenderState::Handle RenderResources::ColorTargetFor(uint32_t colorInfo, uint32_t
     desc.MipLevels = 1;
     desc.ArraySize = 1;
     desc.Format = entry.target.format;
-    const uint32_t samples = SamplesFor(pitch);
+    const uint32_t samples = SamplesFor(cls);
     desc.SampleDesc.Count = samples;
     desc.Usage = D3D11_USAGE_DEFAULT;
     desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
@@ -950,16 +970,18 @@ RenderState::Handle RenderResources::ColorTargetFor(uint32_t colorInfo, uint32_t
     return handle;
 }
 
-RenderState::Handle RenderResources::DepthTargetFor(uint32_t depthInfo, uint32_t pitch)
+RenderState::Handle RenderResources::DepthTargetFor(uint32_t depthInfo, uint32_t surface)
 {
-    const uint32_t key[2] = { depthInfo & 0xFFF, pitch };
+    const uint32_t pitch = PitchOf(surface), cls = ClassOf(surface);
+    const uint32_t key[2] = { depthInfo & 0xFFF, pitch | (cls << 16) };
     if (const Handle found = g_depthKeys.Find(key)) return found;
 
     g_depthTargets.emplace_back();
     DepthEntry& entry = g_depthTargets.back();
     const Handle handle = Handle(g_depthTargets.size());
     entry.target.pitch = pitch;
-    entry.target.rows = TargetRows(pitch, 4);
+    entry.target.rows = TargetRows(pitch, cls, 4);
+    entry.cls = cls;
     HostSize(pitch, entry.target.rows, entry.target.width, entry.target.height);
     memcpy(entry.key, key, sizeof(entry.key));
     g_depthKeys.Insert(key, handle);
@@ -971,7 +993,7 @@ RenderState::Handle RenderResources::DepthTargetFor(uint32_t depthInfo, uint32_t
     desc.MipLevels = 1;
     desc.ArraySize = 1;
     desc.Format = DXGI_FORMAT_R32G8X24_TYPELESS;
-    const uint32_t samples = SamplesFor(pitch);
+    const uint32_t samples = SamplesFor(cls);
     desc.SampleDesc.Count = samples;
     desc.Usage = D3D11_USAGE_DEFAULT;
     desc.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
@@ -995,20 +1017,21 @@ RenderState::Handle RenderResources::DepthTargetFor(uint32_t depthInfo, uint32_t
     return handle;
 }
 
-bool RenderResources::EnsureRows(uint32_t pitch, uint32_t rows)
+bool RenderResources::EnsureRows(uint32_t surface, uint32_t rows)
 {
-    if (pitch == 0 || pitch / 32 >= sizeof(g_rowsAsked) / sizeof(g_rowsAsked[0])) return false;
+    const uint32_t pitch = PitchOf(surface), cls = ClassOf(surface);
+    if (pitch == 0 || pitch / 32 >= sizeof(g_rowsAsked[0]) / sizeof(g_rowsAsked[0][0])) return false;
     rows = std::min(rows, 1440u);
-    if (rows <= g_rowsAsked[pitch / 32] || rows <= TargetRows(pitch, 4)) return false;
+    if (rows <= g_rowsAsked[cls][pitch / 32] || rows <= TargetRows(pitch, cls, 4)) return false;
     // Whole 64s, so a scissor that grows a row at a time does not make the
     // targets again a row at a time.
-    g_rowsAsked[pitch / 32] = (rows + 63) & ~63u;
-    // The targets of this pitch go: they come back taller at the next ask.
+    g_rowsAsked[cls][pitch / 32] = (rows + 63) & ~63u;
+    // The targets of this pitch and class go: they come back taller at the next ask.
     bool dropped = false;
     for (uint32_t i = 0; i < g_colorTargets.size(); i++)
     {
         ColorEntry& entry = g_colorTargets[i];
-        if (entry.target.pitch != pitch || entry.texture == nullptr) continue;
+        if (entry.target.pitch != pitch || entry.cls != cls || entry.texture == nullptr) continue;
         g_colorKeys.Erase(entry.key);
         g_resourceBytes -= uint64_t(entry.target.width) * entry.target.height * 4 * entry.target.samples;
         entry.texture.Reset(); entry.view.Reset(); entry.resource.Reset();
@@ -1018,14 +1041,14 @@ bool RenderResources::EnsureRows(uint32_t pitch, uint32_t rows)
     for (uint32_t i = 0; i < g_depthTargets.size(); i++)
     {
         DepthEntry& entry = g_depthTargets[i];
-        if (entry.target.pitch != pitch || entry.texture == nullptr) continue;
+        if (entry.target.pitch != pitch || entry.cls != cls || entry.texture == nullptr) continue;
         g_depthKeys.Erase(entry.key);
         g_resourceBytes -= uint64_t(entry.target.width) * entry.target.height * 8 * entry.target.samples;
         entry.texture.Reset(); entry.view.Reset(); entry.resource.Reset();
         entry.target = DepthTarget();
         dropped = true;
     }
-    printf("render: the %u wide surfaces get %u rows\n", pitch, g_rowsAsked[pitch / 32]);
+    printf("render: the %u wide surfaces%s get %u rows\n", pitch, cls != 0 ? " drawn with MSAA" : "", g_rowsAsked[cls][pitch / 32]);
     fflush(stdout);
     return dropped;
 }
