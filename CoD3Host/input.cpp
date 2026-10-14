@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <mutex>
 #include <string>
@@ -47,8 +49,12 @@ namespace
         XInputGamepad gamepad;
     };
 
+    struct XInputVibration { uint16_t left, right; };
+
     using GetStateFunction = uint32_t (WINAPI*)(uint32_t, XInputState*);
+    using SetStateFunction = uint32_t (WINAPI*)(uint32_t, XInputVibration*);
     GetStateFunction g_getState = nullptr;
+    SetStateFunction g_setState = nullptr;
     bool g_looked = false;
 
     void FindXInput()
@@ -66,8 +72,92 @@ namespace
             if (library == nullptr) continue;
             g_getState = reinterpret_cast<GetStateFunction>(
                 reinterpret_cast<void*>(GetProcAddress(library, "XInputGetState")));
-            if (g_getState != nullptr) return;
+            g_setState = reinterpret_cast<SetStateFunction>(
+                reinterpret_cast<void*>(GetProcAddress(library, "XInputSetState")));
+            if (g_getState != nullptr)
+            {
+                printf("input: XInput from %ls\n", name);
+                fflush(stdout);
+                return;
+            }
         }
+        printf("input: no XInput library on this machine, so no controller can be read\n");
+        fflush(stdout);
+    }
+
+    // The pads, on any of XInput's four slots.
+    //
+    // Only slot 0 used to be read. Windows gives a controller whichever slot
+    // is free when it connects, and anything else that speaks XInput takes
+    // one first: Steam Input's virtual pad, DS4Windows, a wheel, a second pad
+    // that was switched off, or the same pad reconnected. A controller on
+    // slot 1 lit up and was never read, so it moved nothing and jumped
+    // nothing while the keyboard worked. Every connected slot is read now
+    // and merged, the way the keyboard and the pad already are.
+    //
+    // Asking an empty slot is slow (a millisecond or more, every call), and
+    // the title asks hundreds of times a second, so empty slots are looked at
+    // again only once a second.
+    constexpr int SlotCount = 4;
+    bool g_slotConnected[SlotCount] = {};
+    std::chrono::steady_clock::time_point g_lastScan{};
+    XInputGamepad g_lastPadSeen{};
+
+    // A stick inside its deadzone is a stick at rest. Outside it, the value
+    // goes through untouched: the title has its own deadzone and curve for a
+    // console pad, and stretching the travel here as well would stack two
+    // deadzones and make the slowest walk unreachable. This one is only so a
+    // worn stick that never quite centres does not take the keys' and the
+    // mouse's place. Radial, so a diagonal is not cut short.
+    void ApplyDeadzone(int16_t& x, int16_t& y, double deadzone)
+    {
+        if (std::hypot(double(x), double(y)) <= deadzone) { x = 0; y = 0; }
+    }
+
+    // Reads every connected pad into one. Buttons from any of them, each
+    // trigger and stick from whichever is pushed furthest.
+    bool ReadPads(XInputGamepad& out)
+    {
+        out = {};
+        if (g_getState == nullptr) return false;
+
+        const auto now = std::chrono::steady_clock::now();
+        const bool scan = now - g_lastScan >= std::chrono::seconds(1);
+        if (scan) g_lastScan = now;
+
+        const double deadzone = 32767.0 * std::clamp(Settings::Get().stickDeadzone, 0, 50) / 100.0;
+        bool any = false;
+        double bestLeft = 0.0, bestRight = 0.0;
+        for (int slot = 0; slot < SlotCount; slot++)
+        {
+            if (!g_slotConnected[slot] && !scan) continue;
+            XInputState state{};
+            const bool connected = g_getState(uint32_t(slot), &state) == ERROR_SUCCESS;
+            if (connected != g_slotConnected[slot])
+            {
+                g_slotConnected[slot] = connected;
+                printf("input: controller %s on XInput slot %d\n", connected ? "connected" : "disconnected", slot);
+                fflush(stdout);
+            }
+            if (!connected) continue;
+            any = true;
+
+            XInputGamepad pad = state.gamepad;
+            ApplyDeadzone(pad.thumbLX, pad.thumbLY, deadzone);
+            ApplyDeadzone(pad.thumbRX, pad.thumbRY, deadzone);
+            // The trigger's own threshold, as XInput defines it.
+            if (pad.leftTrigger < 30) pad.leftTrigger = 0;
+            if (pad.rightTrigger < 30) pad.rightTrigger = 0;
+
+            out.buttons |= pad.buttons;
+            out.leftTrigger = std::max(out.leftTrigger, pad.leftTrigger);
+            out.rightTrigger = std::max(out.rightTrigger, pad.rightTrigger);
+            const double left = std::hypot(double(pad.thumbLX), double(pad.thumbLY));
+            const double right = std::hypot(double(pad.thumbRX), double(pad.thumbRY));
+            if (left > bestLeft) { bestLeft = left; out.thumbLX = pad.thumbLX; out.thumbLY = pad.thumbLY; }
+            if (right > bestRight) { bestRight = right; out.thumbRX = pad.thumbRX; out.thumbRY = pad.thumbRY; }
+        }
+        return any;
     }
 
     bool Down(int key) { return (GetAsyncKeyState(key) & 0x8000) != 0; }
@@ -123,19 +213,38 @@ namespace
     // How far the pointer moved since the last look, in stick units. Full
     // deflection at about twenty five pixels in a sixtieth of a second, a
     // brisk turn rather than a twitch.
-    void ReadMouse(int16_t& outX, int16_t& outY)
-    {
-        outX = 0;
-        outY = 0;
+    // Direct aim (input.h, TakeLook): the mouse's counts go straight to the
+    // title's view angles instead of through the right stick. They pile up
+    // here between the title's frames; the look is direct while the title
+    // has asked for them lately and nothing has asked for the stick back.
+    std::mutex g_lookMutex;
+    long g_lookX = 0, g_lookY = 0;
+    std::atomic<int64_t> g_lookAskedMs{ -100000 };
+    std::atomic<bool> g_lookStick{ false };
 
+    int64_t NowMs()
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+
+    bool LookDirect()
+    {
+        return Settings::Get().directMouse && !g_lookStick.load(std::memory_order_relaxed) &&
+               NowMs() - g_lookAskedMs.load(std::memory_order_relaxed) < 300;
+    }
+
+    // The mouse's movement since the last look, in its own counts (or the
+    // pointer's pixels without raw input). False while it is not held.
+    bool MouseDelta(long& dx, long& dy, bool& raw)
+    {
+        dx = 0;
+        dy = 0;
         // The mouse's own movement is taken whether it is used or not, so
         // that what piled up while the menu was open is not a jump the
         // moment the window takes the mouse back.
         long rawX = 0, rawY = 0;
-        const bool raw = Window::TakeRawMouse(rawX, rawY) && Settings::Get().rawMouse;
-        if (!g_mouseHeld.load()) return;
-
-        long dx = 0, dy = 0;
+        raw = Window::TakeRawMouse(rawX, rawY) && Settings::Get().rawMouse;
+        if (!g_mouseHeld.load()) return false;
         if (raw)
         {
             dx = rawX;
@@ -150,11 +259,29 @@ namespace
         else
         {
             POINT now{};
-            if (!GetCursorPos(&now)) return;
+            if (!GetCursorPos(&now)) return true;
             dx = now.x - g_centre.x;
             dy = now.y - g_centre.y;
             if (dx != 0 || dy != 0) SetCursorPos(g_centre.x, g_centre.y);
         }
+        return true;
+    }
+
+    void ReadMouse(int16_t& outX, int16_t& outY)
+    {
+        outX = 0;
+        outY = 0;
+
+        long dx = 0, dy = 0;
+        bool raw = false;
+        if (LookDirect())
+        {
+            std::lock_guard<std::mutex> lock(g_lookMutex);
+            if (MouseDelta(dx, dy, raw)) { g_lookX += dx; g_lookY += dy; }
+            return;
+        }
+        if (!MouseDelta(dx, dy, raw)) return;
+
 
         // COD3_MOUSELOG=1: what the look took, once a second, to see that
         // the mouse's own counts arrive and how many a turn is worth.
@@ -454,6 +581,8 @@ namespace
             { keys.keys[Settings::Grenade], PadRightShoulder },
             { keys.keys[Settings::Smoke], PadLeftShoulder },
             { keys.keys[Settings::Objectives], PadLeft },
+            { keys.keys[Settings::BinocularsOut], PadUp },
+            { keys.keys[Settings::BinocularsAway], PadDown },
         };
 
         for (const Mapping& mapping : mappings)
@@ -475,7 +604,11 @@ namespace
         // The title's first screen waits for Start, and asking a player to know
         // that is asking them to guess. While the mouse is free, which is every
         // menu, Space is Start as well as A.
+        // Not in the multiplayer program: its menus take a press of A and
+        // Start together as neither, and it has no press start screen.
+#ifndef COD3_MP
         if (!held && Down(VK_SPACE)) pad.buttons |= PadStart;
+#endif
         if (!held && Down(VK_ESCAPE) && !inLevel) pad.buttons |= PadBack;
         if (inLevel && startReadsLeft > 0) { pad.buttons |= PadStart; startReadsLeft--; }
 
@@ -492,6 +625,10 @@ namespace
         {
             if (Down(VK_LBUTTON)) pad.buttons |= PadA;
             if (Down(VK_RBUTTON)) pad.buttons |= PadBack;
+            // Page Up and Page Down are the bumpers, which turn a menu's
+            // pages (the System Link custom rules, lobby_rules.cpp).
+            if (Down(VK_PRIOR)) pad.buttons |= PadLeftShoulder;
+            if (Down(VK_NEXT)) pad.buttons |= PadRightShoulder;
             pad.buttons |= MenuStep();
         }
 
@@ -517,6 +654,9 @@ namespace
         return pad;
     }
 
+    std::atomic<bool> g_binoculars{false}, g_binocularFire{false}, g_sprinting{false};
+    std::atomic<int> g_aimPresses{0}, g_startPresses{0}, g_upPresses{0}, g_downPresses{0}, g_rightPresses{0};
+    bool g_aimWasDown = false;
     std::mutex g_mutex;
     Input::Pad g_pad{};
     uint32_t g_packet = 1;
@@ -558,27 +698,78 @@ namespace
             const char* text = getenv("COD3_NOPAD");
             return text != nullptr && text[0] != 0 && text[0] != '0';
         }();
-        if (g_getState != nullptr && !padIgnored && Settings::Get().controller)
+        if (!padIgnored && Settings::Get().controller)
         {
-            XInputState state{};
-            if (g_getState(0, &state) == ERROR_SUCCESS)
+            XInputGamepad state{};
+            if (ReadPads(state))
             {
-                fromPad = state.gamepad.buttons;
-                pad.buttons |= state.gamepad.buttons;
-                pad.leftTrigger = std::max(pad.leftTrigger, state.gamepad.leftTrigger);
-                pad.rightTrigger = std::max(pad.rightTrigger, state.gamepad.rightTrigger);
-                if (state.gamepad.thumbLX != 0 || state.gamepad.thumbLY != 0)
+                g_lastPadSeen = state;
+                fromPad = state.buttons;
+                pad.buttons |= state.buttons;
+                pad.leftTrigger = std::max(pad.leftTrigger, state.leftTrigger);
+                pad.rightTrigger = std::max(pad.rightTrigger, state.rightTrigger);
+                // A stick pushed past its deadzone wins over the keys and
+                // the mouse; one at rest leaves them theirs.
+                if (state.thumbLX != 0 || state.thumbLY != 0)
                 {
-                    pad.thumbLX = state.gamepad.thumbLX;
-                    pad.thumbLY = state.gamepad.thumbLY;
+                    pad.thumbLX = state.thumbLX;
+                    pad.thumbLY = state.thumbLY;
                 }
-                if (state.gamepad.thumbRX != 0 || state.gamepad.thumbRY != 0)
+                if (state.thumbRX != 0 || state.thumbRY != 0)
                 {
-                    pad.thumbRX = state.gamepad.thumbRX;
-                    pad.thumbRY = state.gamepad.thumbRY;
+                    pad.thumbRX = state.thumbRX;
+                    pad.thumbRY = state.thumbRY;
                 }
             }
+            else g_lastPadSeen = {};
         }
+
+        // Tap to sprint (a PC addition, as later games of the series have it).
+        // The title runs only while the left stick is held in, so a press
+        // of sprint, from the pad or the keyboard, keeps it held for the
+        // title until the run would end anyway: the stick or the keys no
+        // longer forward, aiming down the sights or firing, or sprint
+        // pressed again.
+        {
+            static bool running = false, wasDown = false;
+            const bool down = (pad.buttons & PadLeftThumb) != 0;
+            if (Settings::Get().toggleSprint)
+            {
+                if (down && !wasDown) running = !running;
+                if (pad.thumbLY < 8000 || pad.leftTrigger > 30 || pad.rightTrigger > 30) running = false;
+                if (running) pad.buttons |= PadLeftThumb;
+                else pad.buttons &= uint16_t(~PadLeftThumb);
+            }
+            else running = false;
+            wasDown = down;
+        }
+
+        g_sprinting.store((pad.buttons & PadLeftThumb) != 0 || std::abs(int(pad.thumbLY)) > 20000 || std::abs(int(pad.thumbLX)) > 20000);
+        // Presses of Start and the d-pad's up and down, counted as they
+        // happen here (every few milliseconds): the game's frame, where the
+        // binoculars look (mp_fixes.cpp), comes only twenty times a second,
+        // and Escape's Start lasts a few reads, so it saw neither for sure.
+        {
+            static uint16_t was = 0;
+            const uint16_t now = pad.buttons;
+            if ((now & PadStart) && !(was & PadStart)) g_startPresses.fetch_add(1);
+            if ((now & PadUp) && !(was & PadUp)) g_upPresses.fetch_add(1);
+            if ((now & PadDown) && !(was & PadDown)) g_downPresses.fetch_add(1);
+            if ((now & PadRight) && !(was & PadRight)) g_rightPresses.fetch_add(1);
+            was = now;
+        }
+        // Binoculars out (mp_fixes.cpp): always at the eyes (aim held for
+        // the title), the left trigger's presses kept for the zoom instead,
+        // and the right trigger passed on only when it may fire.
+        if (g_binoculars.load())
+        {
+            const bool aim = pad.leftTrigger > 30;
+            if (aim && !g_aimWasDown) g_aimPresses.fetch_add(1);
+            g_aimWasDown = aim;
+            pad.leftTrigger = 255;
+            if (!g_binocularFire.load()) pad.rightTrigger = 0;
+        }
+        else g_aimWasDown = false;
 
         if (!Same(pad, g_pad))
         {
@@ -592,6 +783,17 @@ namespace
                     pad.buttons, fromKeyboard, fromScript, fromPad, Window::HasFocus() ? 1 : 0);
                 fflush(stdout);
             }
+            // The pad's own changes, separately, so a run where the keyboard
+            // used up the forty lines above still says whether the pad was
+            // ever seen pressing anything.
+            static uint16_t lastFromPad = 0;
+            static int padAnnounced = 0;
+            if (fromPad != lastFromPad && padAnnounced++ < 40)
+            {
+                printf("input: pad buttons 0x%04X, left stick %d,%d\n", fromPad, pad.thumbLX, pad.thumbLY);
+                fflush(stdout);
+            }
+            lastFromPad = fromPad;
             g_pad = pad;
             g_packet++;
         }
@@ -611,6 +813,18 @@ uint16_t Input::Buttons()
     return State().buttons;
 }
 
+void Input::SetBinoculars(bool out, bool mayFire) { g_binoculars.store(out); g_binocularFire.store(mayFire); }
+int Input::TakeAimPresses() { Refresh(); return g_aimPresses.exchange(0); }
+void Input::TakePresses(int& start, int& up, int& down)
+{
+    Refresh();
+    start = g_startPresses.exchange(0);
+    up = g_upPresses.exchange(0);
+    down = g_downPresses.exchange(0);
+}
+int Input::TakeRightPresses() { Refresh(); return g_rightPresses.exchange(0); }
+bool Input::Running() { Refresh(); return g_sprinting.load(); }
+
 bool Input::MouseHeld()
 {
     return g_mouseHeld.load();
@@ -627,4 +841,60 @@ const char* Input::KeyboardHelp()
 {
     return "Enter or Space start, mouse moves the menu and clicks to choose, "
            "F1 steers with it, Escape frees it";
+}
+
+std::string Input::ControllerStatus()
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    FindXInput();
+    if (g_getState == nullptr) return "no XInput on this machine";
+    std::string slots;
+    for (int slot = 0; slot < SlotCount; slot++)
+        if (g_slotConnected[slot]) slots += (slots.empty() ? "" : ", ") + std::to_string(slot);
+    if (slots.empty()) return "no controller found; plug one in or check it is in XInput mode";
+    char text[160];
+    snprintf(text, sizeof(text), "connected on slot %s; buttons 0x%04X, left stick %d,%d",
+        slots.c_str(), g_lastPadSeen.buttons, g_lastPadSeen.thumbLX, g_lastPadSeen.thumbLY);
+    return text;
+}
+
+void Input::SetRumble(uint16_t left, uint16_t right)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    FindXInput();
+    if (g_setState == nullptr) return;
+    const Settings::Values values = Settings::Get();
+    if (!values.controller || !values.rumble) { left = 0; right = 0; }
+    // The title sends the same strength over and over; only a change is
+    // passed on.
+    static uint16_t lastLeft = 0xFFFF, lastRight = 0xFFFF;
+    if (left == lastLeft && right == lastRight) return;
+    lastLeft = left; lastRight = right;
+    XInputVibration vibration{ left, right };
+    for (int slot = 0; slot < SlotCount; slot++)
+        if (g_slotConnected[slot]) g_setState(uint32_t(slot), &vibration);
+}
+
+bool Input::TakeLook(long& dx, long& dy)
+{
+    g_lookAskedMs.store(NowMs(), std::memory_order_relaxed);
+    g_lookStick.store(false, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(g_lookMutex);
+    if (!Settings::Get().directMouse) { g_lookX = g_lookY = 0; dx = dy = 0; return false; }
+    // What moved since the title's last poll of the pad, so the turn is
+    // as fresh as this frame.
+    long moreX = 0, moreY = 0;
+    bool raw = false;
+    if (MouseDelta(moreX, moreY, raw)) { g_lookX += moreX; g_lookY += moreY; }
+    dx = g_lookX;
+    dy = g_lookY;
+    g_lookX = g_lookY = 0;
+    return true;
+}
+
+void Input::LookByStick()
+{
+    g_lookStick.store(true, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(g_lookMutex);
+    g_lookX = g_lookY = 0;
 }

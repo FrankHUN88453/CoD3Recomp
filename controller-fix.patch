@@ -1,0 +1,350 @@
+From 701b2ed74b9e9e3966e9945c231196e1a55a1873 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 8 Oct 2026 21:34:06 -0400
+Subject: [PATCH] Controller: read every XInput slot, deadzone, rumble, status
+ in F11
+
+---
+ input.cpp      | 164 ++++++++++++++++++++++++++++++++++++++++++++-----
+ input.h        |   9 +++
+ kernel_xam.cpp |  12 +++-
+ overlay.cpp    |   6 ++
+ settings.cpp   |   5 +-
+ settings.h     |   2 +
+ 6 files changed, 181 insertions(+), 17 deletions(-)
+
+diff --git a/input.cpp b/input.cpp
+index e436cb2..7d3d9f0 100644
+--- a/input.cpp
++++ b/input.cpp
+@@ -7,6 +7,7 @@
+ #include <algorithm>
+ #include <atomic>
+ #include <chrono>
++#include <cmath>
+ #include <cstdio>
+ #include <mutex>
+ #include <string>
+@@ -47,8 +48,12 @@ namespace
+         XInputGamepad gamepad;
+     };
+ 
++    struct XInputVibration { uint16_t left, right; };
++
+     using GetStateFunction = uint32_t (WINAPI*)(uint32_t, XInputState*);
++    using SetStateFunction = uint32_t (WINAPI*)(uint32_t, XInputVibration*);
+     GetStateFunction g_getState = nullptr;
++    SetStateFunction g_setState = nullptr;
+     bool g_looked = false;
+ 
+     void FindXInput()
+@@ -66,8 +71,92 @@ namespace
+             if (library == nullptr) continue;
+             g_getState = reinterpret_cast<GetStateFunction>(
+                 reinterpret_cast<void*>(GetProcAddress(library, "XInputGetState")));
+-            if (g_getState != nullptr) return;
++            g_setState = reinterpret_cast<SetStateFunction>(
++                reinterpret_cast<void*>(GetProcAddress(library, "XInputSetState")));
++            if (g_getState != nullptr)
++            {
++                printf("input: XInput from %ls\n", name);
++                fflush(stdout);
++                return;
++            }
++        }
++        printf("input: no XInput library on this machine, so no controller can be read\n");
++        fflush(stdout);
++    }
++
++    // The pads, on any of XInput's four slots.
++    //
++    // Only slot 0 used to be read. Windows gives a controller whichever slot
++    // is free when it connects, and anything else that speaks XInput takes
++    // one first: Steam Input's virtual pad, DS4Windows, a wheel, a second pad
++    // that was switched off, or the same pad reconnected. A controller on
++    // slot 1 lit up and was never read, so it moved nothing and jumped
++    // nothing while the keyboard worked. Every connected slot is read now
++    // and merged, the way the keyboard and the pad already are.
++    //
++    // Asking an empty slot is slow (a millisecond or more, every call), and
++    // the title asks hundreds of times a second, so empty slots are looked at
++    // again only once a second.
++    constexpr int SlotCount = 4;
++    bool g_slotConnected[SlotCount] = {};
++    std::chrono::steady_clock::time_point g_lastScan{};
++    XInputGamepad g_lastPadSeen{};
++
++    // A stick inside its deadzone is a stick at rest. Outside it, the value
++    // goes through untouched: the title has its own deadzone and curve for a
++    // console pad, and stretching the travel here as well would stack two
++    // deadzones and make the slowest walk unreachable. This one is only so a
++    // worn stick that never quite centres does not take the keys' and the
++    // mouse's place. Radial, so a diagonal is not cut short.
++    void ApplyDeadzone(int16_t& x, int16_t& y, double deadzone)
++    {
++        if (std::hypot(double(x), double(y)) <= deadzone) { x = 0; y = 0; }
++    }
++
++    // Reads every connected pad into one. Buttons from any of them, each
++    // trigger and stick from whichever is pushed furthest.
++    bool ReadPads(XInputGamepad& out)
++    {
++        out = {};
++        if (g_getState == nullptr) return false;
++
++        const auto now = std::chrono::steady_clock::now();
++        const bool scan = now - g_lastScan >= std::chrono::seconds(1);
++        if (scan) g_lastScan = now;
++
++        const double deadzone = 32767.0 * std::clamp(Settings::Get().stickDeadzone, 0, 50) / 100.0;
++        bool any = false;
++        double bestLeft = 0.0, bestRight = 0.0;
++        for (int slot = 0; slot < SlotCount; slot++)
++        {
++            if (!g_slotConnected[slot] && !scan) continue;
++            XInputState state{};
++            const bool connected = g_getState(uint32_t(slot), &state) == ERROR_SUCCESS;
++            if (connected != g_slotConnected[slot])
++            {
++                g_slotConnected[slot] = connected;
++                printf("input: controller %s on XInput slot %d\n", connected ? "connected" : "disconnected", slot);
++                fflush(stdout);
++            }
++            if (!connected) continue;
++            any = true;
++
++            XInputGamepad pad = state.gamepad;
++            ApplyDeadzone(pad.thumbLX, pad.thumbLY, deadzone);
++            ApplyDeadzone(pad.thumbRX, pad.thumbRY, deadzone);
++            // The trigger's own threshold, as XInput defines it.
++            if (pad.leftTrigger < 30) pad.leftTrigger = 0;
++            if (pad.rightTrigger < 30) pad.rightTrigger = 0;
++
++            out.buttons |= pad.buttons;
++            out.leftTrigger = std::max(out.leftTrigger, pad.leftTrigger);
++            out.rightTrigger = std::max(out.rightTrigger, pad.rightTrigger);
++            const double left = std::hypot(double(pad.thumbLX), double(pad.thumbLY));
++            const double right = std::hypot(double(pad.thumbRX), double(pad.thumbRY));
++            if (left > bestLeft) { bestLeft = left; out.thumbLX = pad.thumbLX; out.thumbLY = pad.thumbLY; }
++            if (right > bestRight) { bestRight = right; out.thumbRX = pad.thumbRX; out.thumbRY = pad.thumbRY; }
+         }
++        return any;
+     }
+ 
+     bool Down(int key) { return (GetAsyncKeyState(key) & 0x8000) != 0; }
+@@ -558,26 +647,30 @@ namespace
+             const char* text = getenv("COD3_NOPAD");
+             return text != nullptr && text[0] != 0 && text[0] != '0';
+         }();
+-        if (g_getState != nullptr && !padIgnored && Settings::Get().controller)
++        if (!padIgnored && Settings::Get().controller)
+         {
+-            XInputState state{};
+-            if (g_getState(0, &state) == ERROR_SUCCESS)
++            XInputGamepad state{};
++            if (ReadPads(state))
+             {
+-                fromPad = state.gamepad.buttons;
+-                pad.buttons |= state.gamepad.buttons;
+-                pad.leftTrigger = std::max(pad.leftTrigger, state.gamepad.leftTrigger);
+-                pad.rightTrigger = std::max(pad.rightTrigger, state.gamepad.rightTrigger);
+-                if (state.gamepad.thumbLX != 0 || state.gamepad.thumbLY != 0)
++                g_lastPadSeen = state;
++                fromPad = state.buttons;
++                pad.buttons |= state.buttons;
++                pad.leftTrigger = std::max(pad.leftTrigger, state.leftTrigger);
++                pad.rightTrigger = std::max(pad.rightTrigger, state.rightTrigger);
++                // A stick pushed past its deadzone wins over the keys and
++                // the mouse; one at rest leaves them theirs.
++                if (state.thumbLX != 0 || state.thumbLY != 0)
+                 {
+-                    pad.thumbLX = state.gamepad.thumbLX;
+-                    pad.thumbLY = state.gamepad.thumbLY;
++                    pad.thumbLX = state.thumbLX;
++                    pad.thumbLY = state.thumbLY;
+                 }
+-                if (state.gamepad.thumbRX != 0 || state.gamepad.thumbRY != 0)
++                if (state.thumbRX != 0 || state.thumbRY != 0)
+                 {
+-                    pad.thumbRX = state.gamepad.thumbRX;
+-                    pad.thumbRY = state.gamepad.thumbRY;
++                    pad.thumbRX = state.thumbRX;
++                    pad.thumbRY = state.thumbRY;
+                 }
+             }
++            else g_lastPadSeen = {};
+         }
+ 
+         if (!Same(pad, g_pad))
+@@ -592,6 +685,17 @@ namespace
+                     pad.buttons, fromKeyboard, fromScript, fromPad, Window::HasFocus() ? 1 : 0);
+                 fflush(stdout);
+             }
++            // The pad's own changes, separately, so a run where the keyboard
++            // used up the forty lines above still says whether the pad was
++            // ever seen pressing anything.
++            static uint16_t lastFromPad = 0;
++            static int padAnnounced = 0;
++            if (fromPad != lastFromPad && padAnnounced++ < 40)
++            {
++                printf("input: pad buttons 0x%04X, left stick %d,%d\n", fromPad, pad.thumbLX, pad.thumbLY);
++                fflush(stdout);
++            }
++            lastFromPad = fromPad;
+             g_pad = pad;
+             g_packet++;
+         }
+@@ -628,3 +732,35 @@ const char* Input::KeyboardHelp()
+     return "Enter or Space start, mouse moves the menu and clicks to choose, "
+            "F1 steers with it, Escape frees it";
+ }
++
++std::string Input::ControllerStatus()
++{
++    std::lock_guard<std::mutex> lock(g_mutex);
++    FindXInput();
++    if (g_getState == nullptr) return "no XInput on this machine";
++    std::string slots;
++    for (int slot = 0; slot < SlotCount; slot++)
++        if (g_slotConnected[slot]) slots += (slots.empty() ? "" : ", ") + std::to_string(slot);
++    if (slots.empty()) return "no controller found; plug one in or check it is in XInput mode";
++    char text[160];
++    snprintf(text, sizeof(text), "connected on slot %s; buttons 0x%04X, left stick %d,%d",
++        slots.c_str(), g_lastPadSeen.buttons, g_lastPadSeen.thumbLX, g_lastPadSeen.thumbLY);
++    return text;
++}
++
++void Input::SetRumble(uint16_t left, uint16_t right)
++{
++    std::lock_guard<std::mutex> lock(g_mutex);
++    FindXInput();
++    if (g_setState == nullptr) return;
++    const Settings::Values values = Settings::Get();
++    if (!values.controller || !values.rumble) { left = 0; right = 0; }
++    // The title sends the same strength over and over; only a change is
++    // passed on.
++    static uint16_t lastLeft = 0xFFFF, lastRight = 0xFFFF;
++    if (left == lastLeft && right == lastRight) return;
++    lastLeft = left; lastRight = right;
++    XInputVibration vibration{ left, right };
++    for (int slot = 0; slot < SlotCount; slot++)
++        if (g_slotConnected[slot]) g_setState(uint32_t(slot), &vibration);
++}
+diff --git a/input.h b/input.h
+index 28c6a3b..4172d80 100644
+--- a/input.h
++++ b/input.h
+@@ -10,6 +10,7 @@
+ // stands in, so the title can be driven without hardware.
+ 
+ #include <cstdint>
++#include <string>
+ 
+ namespace Input
+ {
+@@ -42,4 +43,12 @@ namespace Input
+ 
+     // Which keys stand in for which buttons, for the status view to show.
+     const char* KeyboardHelp();
++
++    // Which controllers Windows reports, for the settings menu: "none found"
++    // or the XInput slots in use and what they are pressing.
++    std::string ControllerStatus();
++
++    // The title's vibration, sent to every connected pad (0 .. 65535 each
++    // motor, the low frequency one on the left).
++    void SetRumble(uint16_t left, uint16_t right);
+ }
+diff --git a/kernel_xam.cpp b/kernel_xam.cpp
+index 2fd4400..6306a2a 100644
+--- a/kernel_xam.cpp
++++ b/kernel_xam.cpp
+@@ -292,8 +292,16 @@ PPC_FUNC(__imp__XamInputGetCapabilities)
+ PPC_FUNC(__imp__XamInputSetState)
+ {
+     Kernel::CountImport("XamInputSetState");
+-    ctx.r3.u32 = (ctx.r3.u32 == SignedInUser)
+-        ? X_ERROR_SUCCESS : X_ERROR_DEVICE_NOT_CONNECTED;
++    if (ctx.r3.u32 != SignedInUser)
++    {
++        ctx.r3.u32 = X_ERROR_DEVICE_NOT_CONNECTED;
++        return;
++    }
++    // XINPUT_VIBRATION: the left (low frequency) motor's speed, then the
++    // right's, big endian. Passed on to the real pad.
++    if (ctx.r5.u32 != 0)
++        Input::SetRumble(Guest::Read16(base, ctx.r5.u32 + 0), Guest::Read16(base, ctx.r5.u32 + 2));
++    ctx.r3.u32 = X_ERROR_SUCCESS;
+ }
+ 
+ // --- Notifications ---------------------------------------------------------
+diff --git a/overlay.cpp b/overlay.cpp
+index 3831057..30b595c 100644
+--- a/overlay.cpp
++++ b/overlay.cpp
+@@ -1,6 +1,7 @@
+ #include "overlay.h"
+ #include "kernel.h"
+ #include "settings.h"
++#include "input.h"
+ #include "render_stats.h"
+ #include "render.h"
+ 
+@@ -323,6 +324,11 @@ namespace
+                     ImGui::SameLine();
+                     ImGui::TextDisabled("(the game's own; takes effect after a restart)");
+                     ImGui::Checkbox("Controller support", &g_edit.controller);
++                    ImGui::SameLine();
++                    ImGui::TextDisabled("(%s)", Input::ControllerStatus().c_str());
++                    ImGui::Checkbox("Controller vibration", &g_edit.rumble);
++                    ImGui::SliderInt("Stick deadzone", &g_edit.stickDeadzone, 0, 50, "%d%%");
++                    ImGui::TextDisabled("Raise it if the view or the soldier drifts with the sticks untouched.");
+                     ImGui::Separator();
+                     ImGui::TextUnformatted("Keys");
+                     if (ImGui::BeginTable("keys", 2, ImGuiTableFlags_SizingStretchProp))
+diff --git a/settings.cpp b/settings.cpp
+index 78143b9..927ee79 100644
+--- a/settings.cpp
++++ b/settings.cpp
+@@ -159,6 +159,8 @@ void Settings::Load(const std::filesystem::path& exeDirectory)
+             else if (key == "stats_overlay") v.statsOverlay = atoi(value.c_str()) != 0;
+             else if (key == "aim_assist") v.aimAssist = atoi(value.c_str()) != 0;
+             else if (key == "controller") v.controller = atoi(value.c_str()) != 0;
++            else if (key == "rumble") v.rumble = atoi(value.c_str()) != 0;
++            else if (key == "stick_deadzone") v.stickDeadzone = atoi(value.c_str());
+             else if (key == "mouse_sensitivity") v.mouseSensitivity = float(atof(value.c_str()));
+             else if (key == "raw_mouse") v.rawMouse = atoi(value.c_str()) != 0;
+             else if (key.compare(0, 4, "key_") == 0)
+@@ -179,6 +181,7 @@ void Settings::Load(const std::filesystem::path& exeDirectory)
+     if (v.fov < 65 || v.fov > 100) v.fov = 65;
+     if (v.modelDetail < 0 || v.modelDetail > 1) v.modelDetail = 1;
+     if (v.windowMode < 0 || v.windowMode > 1) v.windowMode = 0;
++    if (v.stickDeadzone < 0 || v.stickDeadzone > 50) v.stickDeadzone = 15;
+     if (!(v.mouseSensitivity >= 0.1f && v.mouseSensitivity <= 3.0f)) v.mouseSensitivity = 1.0f;
+     std::lock_guard<std::mutex> lock(g_mutex);
+     g_values = v;
+@@ -196,7 +199,7 @@ void Settings::Save()
+         else snprintf(resolution, sizeof(resolution), "desktop");
+         fprintf(file, "[graphics]\nrenderer = %d\nresolution = %s\nresolution_scale = %d\ntexture_filter = %d\nanisotropy = %d\nvsync = %d\nunlock_frame_rate = %d\nantialiasing = %d\ntexture_quality = %d\nfov = %d\nmodel_detail = %d\naim_blur = %d\nconsole_depth = %d\nnative_commands = %d\nwatch_writes = %d\nwindow_mode = %d\nfps_overlay = %d\nstats_overlay = %d\n",
+             v.renderer, resolution, v.resolutionScale, v.textureFilter, v.anisotropy, v.vsync ? 1 : 0, v.unlockFrameRate ? 1 : 0, v.antialiasing, v.textureQuality, v.fov, v.modelDetail, v.aimBlur ? 1 : 0, v.consoleDepth ? 1 : 0, v.nativeCommands ? 1 : 0, v.watchWrites ? 1 : 0, v.windowMode, v.fpsOverlay ? 1 : 0, v.statsOverlay ? 1 : 0);
+-        fprintf(file, "[game]\naim_assist = %d\ncontroller = %d\nmouse_sensitivity = %.2f\nraw_mouse = %d\n", v.aimAssist ? 1 : 0, v.controller ? 1 : 0, v.mouseSensitivity, v.rawMouse ? 1 : 0);
++        fprintf(file, "[game]\naim_assist = %d\ncontroller = %d\nrumble = %d\nstick_deadzone = %d\nmouse_sensitivity = %.2f\nraw_mouse = %d\n", v.aimAssist ? 1 : 0, v.controller ? 1 : 0, v.rumble ? 1 : 0, v.stickDeadzone, v.mouseSensitivity, v.rawMouse ? 1 : 0);
+         fprintf(file, "[keys]\n");
+         for (int i = 0; i < ActionCount; i++) fprintf(file, "key_%s = %d\n", ActionKeys[i], v.keys[i]);
+         fclose(file);
+diff --git a/settings.h b/settings.h
+index d63d5e9..11bd408 100644
+--- a/settings.h
++++ b/settings.h
+@@ -47,6 +47,8 @@ namespace Settings
+         bool statsOverlay = false;    // the renderer's counters over the picture
+         bool aimAssist = true;        // the title's own, through its config
+         bool controller = true;       // read a pad when one is there
++        bool rumble = true;           // the title's vibration sent to the pad
++        int stickDeadzone = 15;       // per cent of a stick's travel ignored around its centre, 0 .. 50
+         float mouseSensitivity = 1.0f;   // both axes, 0.1 .. 3
+         bool rawMouse = true;            // the mouse's own counts, not the pointer's travel
+         int keys[ActionCount] = {};
+-- 
+2.43.0
+

@@ -112,11 +112,8 @@ namespace
         for (const auto& [key, cost] : list)
         {
             if (shown++ >= 30) break;
-            char name[64];
+            char name[32];
             if (key == 1) snprintf(name, sizeof(name), "resolves");
-            else if ((key & 0xFF) == 4)
-                snprintf(name, sizeof(name), "resolve %ux%u %ux%s%s%s", unsigned(key >> 48), unsigned((key >> 32) & 0xFFFF), unsigned((key >> 8) & 0xF),
-                         (key & 0x1000) ? " depth" : "", (key & 0x2000) ? " copy" : "", (key & 0x4000) ? " clear" : "");
             else if (key == 2) snprintf(name, sizeof(name), "present and after");
             else if ((key & 0x0000FFFFFFFFFFFFull) == 3) snprintf(name, sizeof(name), "no ps, %u wide", unsigned(key >> 48));
             else snprintf(name, sizeof(name), "ps %012llx, %u wide", (unsigned long long)(key & 0x0000FFFFFFFFFFFFull), unsigned(key >> 48));

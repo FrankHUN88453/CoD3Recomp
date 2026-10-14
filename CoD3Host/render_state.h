@@ -87,7 +87,6 @@ namespace RenderState
 
         // The surface.
         uint32_t pitch = 0;
-        uint32_t surfaceInfo = 0;      // RB_SURFACE_INFO whole: bits 16, 17 the console's MSAA
         uint32_t colorInfo[4] = {};
         uint32_t depthInfo = 0;
         uint32_t modeControl = 0;      // 0x2208 & 7
@@ -144,8 +143,8 @@ namespace RenderState
         uint32_t control = 0;          // source, command, clears
         uint32_t destBase = 0;         // physical, where the title will sample it
         uint32_t destInfo = 0;
+        uint32_t destPitch = 0;        // RB_COPY_DEST_PITCH: pitch, and height from bit 16
         uint32_t pitch = 0;
-        uint32_t surfaceInfo = 0;      // RB_SURFACE_INFO whole: bits 16, 17 the console's MSAA
         uint32_t scissorTopLeft = 0, scissorBottomRight = 0;
         uint32_t colorInfo[4] = {};
         uint32_t depthInfo = 0;
@@ -275,5 +274,13 @@ namespace RenderState
         uint8_t clearStencilValue = 0;
 
         bool bindingsLost = false;
+
+        // A depth copy also written into the title's memory, as the
+        // console's resolve would (debug.txt depth_writeback): the tiled
+        // surface at guestBase, guestPitch texels across.
+        bool writeBack = false;
+        uint32_t guestBase = 0, guestPitch = 0, guestWidth = 0, guestHeight = 0;
+        uint32_t guestEndian = 0;
+        bool guestFloatDepth = false;
     };
 }

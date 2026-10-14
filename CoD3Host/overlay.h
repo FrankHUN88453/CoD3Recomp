@@ -31,6 +31,8 @@ namespace Overlay
 
     // A line for the console's log, from anywhere.
     void ConsolePrint(const std::string& line);
+    // A message across the top of the picture for a while (a killstreak's).
+    void Notice(const std::string& text, int milliseconds = 3000);
     void RequestScreenshot();
 
     // Frames the title finished, for the counter; called at every swap.
@@ -41,4 +43,13 @@ namespace Overlay
     // options page follows the main menu, which is the OPTIONS entry.
     enum class FrontEndText { MainMenu = 1, OptionsMenu = 2 };
     void NoteFrontEndText(FrontEndText text);
+
+    // A game's own heads-up display drawn over the picture (Domination's
+    // flags, dom.cpp): while active() says so, draw(width, height) each frame
+    // between ImGui's new frame and its render.
+    void SetHud(bool (*active)(), void (*draw)(int width, int height));
+    // A second one, over the first (the custom class editor, class_editor.cpp).
+    void SetMenuHud(bool (*active)(), void (*draw)(int width, int height));
+    // A third, the killstreaks' box (mp_fixes.cpp, 0.5.82).
+    void SetStreakHud(bool (*active)(), void (*draw)(int width, int height));
 }

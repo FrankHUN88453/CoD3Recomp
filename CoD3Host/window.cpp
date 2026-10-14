@@ -7,6 +7,7 @@
 // The window is either a plain one at 720p or a borderless one over the
 // whole screen, from the settings or Alt+Enter.
 
+#include "version.h"
 #include "kernel.h"
 #include "window.h"
 #include "overlay.h"
@@ -181,7 +182,11 @@ namespace
         AdjustWindowRect(&desired, WS_OVERLAPPEDWINDOW, FALSE);
 
         HWND window = CreateWindowExW(0, L"CoD3Recomp",
-            L"Call of Duty 3 - recompiled", WS_OVERLAPPEDWINDOW,
+#ifdef COD3_MP
+            L"Call of Duty 3 Multiplayer - recompiled v" COD3_VERSION_W, WS_OVERLAPPEDWINDOW,
+#else
+            L"Call of Duty 3 - recompiled v" COD3_VERSION_W, WS_OVERLAPPEDWINDOW,
+#endif
             CW_USEDEFAULT, CW_USEDEFAULT,
             desired.right - desired.left, desired.bottom - desired.top,
             nullptr, nullptr, windowClass.hInstance, nullptr);

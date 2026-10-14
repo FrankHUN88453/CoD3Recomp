@@ -27,15 +27,14 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 TAB = "\t"
 
 
-def patch_main() -> int:
-    folder = ROOT / "CoD3RecompLib" / "ppc"
+def patch_main(folder=ROOT / "CoD3RecompLib" / "ppc", resume="824A6150", start_fn="823C0B98", label="main") -> int:
     for path in folder.glob("ppc_recomp.*.cpp"):
         text = path.read_text(encoding="ascii")
-        start = text.find("PPC_FUNC_IMPL(__imp__sub_824A6150)")
+        start = text.find(f"PPC_FUNC_IMPL(__imp__sub_{resume})")
         if start < 0:
             continue
         if "Coroutines::Resume" in text:
-            print("main: already patched")
+            print(f"{label}: already patched")
             return 0
         end = text.find("\n}\n", start)
         body = text[start:end]
@@ -69,12 +68,12 @@ def patch_main() -> int:
         # The thread's first run: the engine calls its start on the stack
         # region it reserved, and the thread's first yield longjmps back. That
         # call runs on the thread's fiber from the beginning.
-        birth = TAB + "sub_823C0B98(ctx, base);\n"
+        birth = TAB + f"sub_{start_fn}(ctx, base);\n"
         at = body.find(birth)
         if at < 0:
             print("main: the thread start call in sub_824A6150 was not found", file=sys.stderr)
             return 1
-        body = (body[:at] + TAB + "Coroutines::Begin(ctx, base, PPC_LOAD_U32(ctx.r1.u32 + 8192 + 436), sub_823C0B98);\n"
+        body = (body[:at] + TAB + "Coroutines::Begin(ctx, base, PPC_LOAD_U32(ctx.r1.u32 + 8192 + 436), sub_" + start_fn + ");\n"
                 + "loc_thread_finished:\n"
                 + body[at + len(birth):])
 
@@ -95,7 +94,7 @@ def patch_main() -> int:
         text = text.replace('#include "ppc_recomp_shared.h"\n',
                             '#include "ppc_recomp_shared.h"\n' + declaration, 1)
         path.write_text(text, encoding="ascii", newline="\n")
-        print(f"main: patched {path.name}")
+        print(f"{label}: patched {path.name}")
         return 0
     print("main: sub_824A6150 was not found", file=sys.stderr)
     return 1
@@ -110,8 +109,8 @@ YIELD = re.compile(
     r"\tPPC_CALL_INDIRECT_FUNC\(ctx\.ctr\.u32\);\n)(?!\treturn;   // the suspend)")
 
 
-def patch_level(name: str) -> int:
-    folder = ROOT / "CoD3RecompLib" / "levels" / name
+def patch_level(name: str, folder=None) -> int:
+    folder = folder or ROOT / "CoD3RecompLib" / "levels" / name
     if not folder.is_dir():
         print(f"{name}: missing {folder}", file=sys.stderr)
         return 1
@@ -139,11 +138,100 @@ def patch_level(name: str) -> int:
     return 0
 
 
+# The graphics library's cuts of addresses to 29 bits (`clrlwi rX,rY,3`,
+# generated as `ctx.rX.u64 = ctx.rY.u32 & 0x1FFFFFFF;`), each routed through
+# GpuMask (CoD3Host/gpu_address.cpp) with its function and its order there:
+# the same result, counted, to find which of them only ever see addresses
+# (the first step of graphics memory past 512 MB).
+WINDOW = re.compile(r"^(\t// addis (r\d+),(r\d+),-16384\n)\tctx\.(r\d+)\.s64 = ctx\.(r\d+)\.s64 \+ -1073741824;$", re.M)
+LIBRARY = (0x822A0000, 0x822E0000)   # the Xbox graphics library in the multiplayer executable
+MASK = re.compile(r"^(\t// clrlwi (r\d+),(r\d+),3\n)\tctx\.(r\d+)\.u64 = ctx\.(r\d+)\.u32 & 0x1FFFFFFF;$", re.M)
+FUNC = re.compile(r"^PPC_FUNC_IMPL\(__imp__sub_([0-9A-F]{8})\)", re.M)
+# The library's other cuts to 29 bits: `rlwinm rX,rY,0,3,22/29/30`, the
+# address with its top three bits and some low ones cleared (a processor
+# address made physical, then (address >> 20) + 0x200 & 0x1000 added: the
+# 0xE0000000 window's page), written into the GPU's command packets.
+BITS = re.compile(r"^(\t// rlwinm (r\d+),(r\d+),0,3,(?:22|29|30)\n)\tctx\.(r\d+)\.u64 = __builtin_rotateleft64\(ctx\.(r\d+)\.u32 \| \(ctx\.(r\d+)\.u64 << 32\), 0\) & (0x1FFFF[0-9A-F]{3});$", re.M)
+
+
+def patch_gpu_masks(folder) -> int:
+    total = 0
+    for path in sorted(folder.glob("ppc_recomp.*.cpp")):
+        text = path.read_text(encoding="ascii")
+        if "GpuMask(" in text:
+            continue
+        starts = [(m.start(), m.group(1)) for m in FUNC.finditer(text)]
+        counts = {}
+        out = []
+        last = 0
+        for m in MASK.finditer(text):
+            if m.group(2) != m.group(4) or m.group(3) != m.group(5):
+                continue
+            owner = None
+            for at, name in starts:
+                if at > m.start():
+                    break
+                owner = name
+            if owner is None:
+                continue
+            place = counts.get(owner, 0)
+            counts[owner] = place + 1
+            out.append(text[last:m.start()])
+            out.append(f"{m.group(1)}\tctx.{m.group(4)}.u64 = GpuMask(ctx.{m.group(5)}.u32, 0x{owner}u, {place}u);")
+            last = m.end()
+        out.append(text[last:])
+        text = "".join(out)
+        # Its conversions back (`addis rX,rY,-16384`: a GPU address to the
+        # processor's window at 0xC0000000), in the library's functions.
+        starts = [(m.start(), m.group(1)) for m in FUNC.finditer(text)]
+        def window(m):
+            owner = None
+            for at, name in starts:
+                if at > m.start():
+                    break
+                owner = name
+            if owner is None or not (LIBRARY[0] <= int(owner, 16) < LIBRARY[1]) or m.group(2) != m.group(4) or m.group(3) != m.group(5):
+                return m.group(0)
+            counts["window"] = counts.get("window", 0) + 1
+            return f"{m.group(1)}\tctx.{m.group(4)}.s64 = GpuWindow(ctx.{m.group(5)}.s64);"
+        text = WINDOW.sub(window, text)
+        starts = [(m.start(), m.group(1)) for m in FUNC.finditer(text)]
+        def bits(m):
+            owner = None
+            for at, name in starts:
+                if at > m.start():
+                    break
+                owner = name
+            if owner is None or not (LIBRARY[0] <= int(owner, 16) < LIBRARY[1]) or m.group(2) != m.group(4) or m.group(3) != m.group(5) or m.group(5) != m.group(6):
+                return m.group(0)
+            counts["bits"] = counts.get("bits", 0) + 1
+            return f"{m.group(1)}\tctx.{m.group(4)}.u64 = GpuMaskBits(ctx.{m.group(5)}.u32, {m.group(7)}u);"
+        text = BITS.sub(bits, text)
+        if not counts:
+            continue
+        text = text.replace('#include "ppc_recomp_shared.h"\n',
+                            '#include "ppc_recomp_shared.h"\nuint32_t GpuMask(uint32_t value, uint32_t function, uint32_t place);\nint64_t GpuWindow(int64_t value);\nuint32_t GpuMaskBits(uint32_t value, uint32_t mask);\n', 1)
+        path.write_text(text, encoding="ascii", newline="\n")
+        total += sum(counts.values())
+    print(f"gpu masks: {total} address cuts and window conversions routed through GpuMask and GpuWindow")
+    return 0
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print("usage: patch_recomp.py main|<level>", file=sys.stderr)
         return 1
-    return patch_main() if sys.argv[1] == "main" else patch_level(sys.argv[1])
+    if sys.argv[1] == "main":
+        return patch_main()
+    if sys.argv[1] == "mp":
+        # The multiplayer executable has both seams in one module: the
+        # engine's resume point (the same function as the single player
+        # one's, instruction for instruction, at another address) and the
+        # game types' script code, which yields through the interface table
+        # the way a level's does.
+        folder = ROOT / "CoD3RecompLib" / "ppc_mp"
+        return patch_main(folder, "824C5298", "823911E8", "mp") or patch_level("mp", folder) or patch_gpu_masks(folder)
+    return patch_level(sys.argv[1])
 
 
 if __name__ == "__main__":

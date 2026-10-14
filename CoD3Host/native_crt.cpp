@@ -54,6 +54,7 @@ namespace
     }
 
 NATIVE_MEMSET(sub_8234EBA0)
+#ifndef COD3_MP   // the levels' own copies: the multiplayer executable has no level DLLs
 NATIVE_MEMSET(blkbrn_sub_891FBC60)
 NATIVE_MEMSET(chambois_sub_8921C5E0)
 NATIVE_MEMSET(credits_sub_891CFF10)
@@ -69,3 +70,4 @@ NATIVE_MEMSET(mayenne_sub_8920E820)
 NATIVE_MEMSET(nightd_sub_89203380)
 NATIVE_MEMSET(saint_lo_sub_89236020)
 NATIVE_MEMSET(stbert_sub_89209D90)
+#endif

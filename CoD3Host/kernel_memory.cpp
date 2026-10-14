@@ -17,9 +17,13 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
 #include <map>
 #include <vector>
 #include <mutex>
+
+// The graphics library's address cuts, counted (gpu_address.cpp).
+void GpuMaskReport();
 
 #include <Windows.h>
 
@@ -42,7 +46,7 @@ namespace
 
     uint32_t Align(uint32_t value, uint32_t to) { return (value + to - 1) & ~(to - 1); }
 
-    struct Region { uint32_t size; bool physical; };
+    struct Region { uint32_t size; bool physical; uint32_t from = 0; };
 
     // Every live allocation, so a free can report a size and the address
     // space does not silently leak into a wrong answer later.
@@ -199,7 +203,9 @@ namespace
         }
 
         uint32_t& next = physical ? g_physicalNext : g_virtualNext;
-        const uint32_t limit = physical ? Guest::PhysicalHeapLimit : Guest::VirtualHeapLimit;
+        // (The title's virtual allocations stop where the extended window
+        // begins, kernel.h: 256 MB, of which it uses about 16.)
+        const uint32_t limit = physical ? Guest::PhysicalHeapLimit : Guest::ExtendedCpuBase;
         const uint32_t address = Align(next, alignment);
         if (!(address < next || address + size < address || address + size > limit))
         {
@@ -248,6 +254,21 @@ namespace
 // Physical memory for this runtime's own use: the same allocator the title's
 // physical allocations come from, so nothing here can land on top of one of
 // those, committed and cleared.
+// Graphics memory past 512 MB (kernel.h, gpu_address.cpp): a bump allocation
+// in the extended window, committed as it is given.
+uint32_t Guest::AllocateExtended(uint32_t size)
+{
+    static uint32_t next = Guest::ExtendedCpuBase;
+    std::lock_guard<std::mutex> hold(g_allocatorMutex);
+    const uint32_t address = (next + 0xFFFFu) & ~0xFFFFu;
+    const uint32_t bytes = (size + 0xFFFFu) & ~0xFFFFu;
+    if (address + bytes < address || address + bytes > Guest::ExtendedCpuLimit) return 0;
+    if (VirtualAlloc(Guest::Ptr(address), bytes, MEM_COMMIT, PAGE_READWRITE) == nullptr) return 0;
+    next = address + bytes;
+    Regions()[address] = { bytes, false };
+    return address;
+}
+
 uint32_t Guest::AllocatePhysical(uint32_t size)
 {
     std::lock_guard<std::mutex> lock(g_allocatorMutex);
@@ -399,6 +420,32 @@ PPC_FUNC(__imp__MmAllocatePhysicalMemoryEx)
     const uint32_t reusedBefore = uint32_t(FreeList(true).size());
     const uint32_t address = Take(size, alignment, true);
     if (address != 0) Note(address < g_physicalNext - size || reusedBefore != FreeList(true).size() ? 'r' : 'a', address, size, uint32_t(ctx.lr));
+    if (address != 0)
+    {
+        // Who asked: the title's allocations go through its helpers
+        // (sub_823142B0, and XMemAlloc, sub_82314F40, above it), so the guest
+        // stack is walked (the back chain, the return address eight bytes
+        // below each frame) to the first call from outside them.
+#ifdef COD3_MP
+        // The multiplayer executable's own addresses (written apart, so the
+        // build's translation from the single player's leaves them be).
+        const uint32_t helpersFrom = 0x8231'4000u, helpersTo = 0x8231'5400u;
+#else
+        const uint32_t helpersFrom = 0, helpersTo = 0;
+#endif
+        uint32_t from = uint32_t(ctx.lr);
+        uint32_t frame = ctx.r1.u32;
+        for (int level = 0; level < 6 && from >= helpersFrom && from < helpersTo; level++)
+        {
+            const uint32_t up = frame >= 0x10000 && frame < 0xC0000000u ? Guest::Read32(Guest::Base, frame) : 0;
+            if (!(up > frame && up - frame < 0x100000 && (up & 7) == 0)) break;
+            const uint32_t caller = Guest::Read32(Guest::Base, up - 8);
+            if (caller < 0x82000000u || caller >= 0x8A000000u) break;
+            from = caller;
+            frame = up;
+        }
+        Regions()[address].from = from;
+    }
     if (address == 0)
     {
         fprintf(stderr, "MmAllocatePhysicalMemoryEx: out of physical space for %u bytes\n", size);
@@ -491,6 +538,23 @@ void Kernel::ReportHeaps()
     printf("heaps: physical %.1f of %.1f MB handed out, %.1f MB free in %zu ranges; virtual %.1f of %.1f MB, %.1f MB free in %zu ranges\n",
         (g_physicalNext - Guest::PhysicalHeapBase) / 1048576.0, (Guest::PhysicalHeapLimit - Guest::PhysicalHeapBase) / 1048576.0, physicalFree / 1048576.0, physicalRanges,
         (g_virtualNext - Guest::VirtualHeapBase) / 1048576.0, (Guest::VirtualHeapLimit - Guest::VirtualHeapBase) / 1048576.0, virtualFree / 1048576.0, virtualRanges);
+
+    // Every half minute: who holds the physical memory, by the code that
+    // asked for it (the return address of its call), the largest first.
+    static int reports = 0;
+    if (reports++ % 30 != 0) return;
+    std::map<uint32_t, std::pair<uint64_t, uint32_t>> byCaller;
+    for (const auto& entry : Regions())
+        if (entry.second.physical) { auto& slot = byCaller[entry.second.from]; slot.first += entry.second.size; slot.second++; }
+    std::vector<std::pair<uint64_t, uint32_t>> order;
+    for (const auto& entry : byCaller) order.push_back({ entry.second.first, entry.first });
+    std::sort(order.begin(), order.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+    printf("heaps: physical memory held, by caller:");
+    for (size_t i = 0; i < order.size() && i < 14; i++)
+        printf(" %08X %.1f MB (x%u)", order[i].second, order[i].first / 1048576.0, byCaller[order[i].second].second);
+    printf("\n");
+    // What the graphics library's address cuts were given (gpu_address.cpp).
+    ::GpuMaskReport();
 }
 
 // ULONG MmGetPhysicalAddress(PVOID address)

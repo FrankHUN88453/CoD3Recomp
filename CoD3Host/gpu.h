@@ -27,10 +27,6 @@ namespace Gpu
     // buffer is drawing: 0x80000001 the depth pass, 2 the colour pass).
     uint64_t BinSelect();
     void WriteRegister(uint32_t address, uint32_t value);
-    // Whether the native lists still run their bin mask packets
-    // (COD3_NATIVEMASKS=1, or COD3_MASKCHECK=1 to compare the masks the
-    // lists carry with them); otherwise each predicated item brings its own.
-    bool KeepBinMaskPackets();
 
     // Where the driver says it has filled the ring, in dwords.
     uint32_t WritePointer();

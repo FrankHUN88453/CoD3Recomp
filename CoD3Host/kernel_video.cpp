@@ -42,6 +42,16 @@
 
 #include <Windows.h>
 
+#ifdef COD3_MP
+void MpFixesAskVehicle(const std::string& kind);   // mp_fixes.cpp
+void BotsAsk(int count);                           // bots.cpp
+void MpFixesVehiclesEverywhere(bool on);           // mp_fixes.cpp
+void MpFixesKangaroo(bool on);                     // mp_fixes.cpp
+void MpFixesKangarooType(int type);                // mp_fixes.cpp
+void MpFixesVehicleOrder(int what, const std::string& kind);   // mp_fixes.cpp
+void MpFixesGiveStreak(const std::string& kind);   // mp_fixes.cpp
+#endif
+
 namespace
 {
     struct VideoState
@@ -133,7 +143,11 @@ namespace
         const bool level = Kernel::Stats().filesOpened.load(std::memory_order_relaxed) >= 40;
         const bool usual = armed == 0x82130098u || armed == 0x821300C8u ||
                            armed == 0x822F4A10u || armed == 0x0BADF00Du;
-        if (raised < 40 || (level && (!usual || inLevel.fetch_add(1) < 40)))
+        // An unusual callback is said too, but not every time: the
+        // multiplayer title arms its own on every frame, and a line each
+        // was hundreds of writes a second on the thread that delivers them.
+        static std::atomic<int> unusual{ 0 };
+        if (raised < 40 || (level && (usual ? inLevel.fetch_add(1) < 40 : unusual.fetch_add(1) < 200)))
         {
             printf("gpu: interrupt %llu on cpu %u, pending mask 0x%02X, callback "
                    "0x%08X%s\n", (unsigned long long)raised, cpu, pending, armed,
@@ -160,8 +174,15 @@ namespace
     // waits here instead of being lost.
     std::string TakeConsoleCommand()
     {
+#ifdef COD3_MP
+        // Multiplayer's cmd_text is at 0x82B93444 (the text, its size, how
+        // much is used), its Cbuf_AddText sub_8247FA38.
+        const uint32_t size = Guest::Read32(Guest::Base, 0x82B93448u);
+        const uint32_t used = Guest::Read32(Guest::Base, 0x82B9344Cu);
+#else
         const uint32_t size = Guest::Read32(Guest::Base, 0x829F1BBCu);
         const uint32_t used = Guest::Read32(Guest::Base, 0x829F1BC0u);
+#endif
         std::lock_guard<std::mutex> lock(g_consoleMutex);
         if (g_consoleQueue.empty()) return {};
         if (size <= used || g_consoleQueue.front().size() + 2 > size - used) return {};
@@ -169,6 +190,9 @@ namespace
         g_consoleQueue.pop_front();
         return command;
     }
+
+    // The command processor thread's own accounts (cp: in the log).
+    uint64_t g_cpIdleNs = 0, g_cpHandlerNs = 0;
 
     void CommandThread()
     {
@@ -347,7 +371,9 @@ namespace
                         ctx.r1.u32 = stackTop - 0x100;
                         ctx.r3.u32 = 1;   // source: the command processor
                         ctx.r4.u32 = video.interruptContext.load();
+                        const auto handlerStarted = std::chrono::steady_clock::now();
                         routine(ctx, Guest::Base);
+                        g_cpHandlerNs += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - handlerStarted).count());
                         worked = true;
                     }
                 }
@@ -388,10 +414,30 @@ namespace
             // walk and here would otherwise be sat on for that millisecond.
             if (!worked)
             {
+                const auto idleStarted = std::chrono::steady_clock::now();
                 std::unique_lock<std::mutex> lock(video.submitMutex);
                 if (video.submissions.load(std::memory_order_acquire) == seenSubmissions)
                     video.submitted.wait_for(lock, std::chrono::milliseconds(1));
                 seenSubmissions = video.submissions.load(std::memory_order_acquire);
+                g_cpIdleNs += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - idleStarted).count());
+            }
+            // Every five seconds: how much of the command processor's time
+            // went waiting for the title to give it something, and how much
+            // to the title's own interrupt handler run on it. A command
+            // processor that never waits is the frame rate's limit.
+            {
+                static auto reportedAt = std::chrono::steady_clock::now();
+                const auto now = std::chrono::steady_clock::now();
+                const double seconds = std::chrono::duration<double>(now - reportedAt).count();
+                if (seconds >= 5.0)
+                {
+                    printf("cp: %.0f%% of the time waiting for the title, %.0f%% in its interrupt handler\n",
+                        double(g_cpIdleNs) / 1e9 / seconds * 100.0, double(g_cpHandlerNs) / 1e9 / seconds * 100.0);
+                    fflush(stdout);
+                    g_cpIdleNs = 0;
+                    g_cpHandlerNs = 0;
+                    reportedAt = now;
+                }
             }
         }
     }
@@ -403,9 +449,17 @@ namespace
     // level loads and after, are not.
     bool TitlePlaying()
     {
+#ifdef COD3_MP
+        // Multiplayer has no films to keep at their speed, a player who
+        // joins another's game runs no server of their own, and the single
+        // player's test never once said "playing" here, not even for the
+        // host: the frame rate is the machine's from the menu on.
+        return true;
+#else
         const uint32_t running = Guest::Read32(Guest::Base, 0x829BAB18u);
         if (running == 0 || Guest::Read32(Guest::Base, running + 32) == 0) return false;
         return Guest::Read32(Guest::Base, 0x82A2A24Cu) == 0;
+#endif
     }
 
     // Whether the frame rate is unlocked now: the settings say so (the
@@ -725,6 +779,26 @@ namespace
                     (unsigned long long)gpu.packets,
                     (unsigned long long)gpu.draws);
                 swapsBefore = swaps;
+                // The processor's clock now, against its most: a machine
+                // that slows itself down (heat, or a power limit that lets it
+                // run fast for half a minute) shows here.
+                {
+                    struct PowerInfo { ULONG number, maxMhz, currentMhz, limitMhz, maxIdle, currentIdle; };
+                    using CallPower = LONG(WINAPI*)(int, void*, ULONG, void*, ULONG);
+                    static CallPower callPower = reinterpret_cast<CallPower>(
+                        GetProcAddress(LoadLibraryA("powrprof.dll"), "CallNtPowerInformation"));
+                    SYSTEM_INFO system{};
+                    GetSystemInfo(&system);
+                    std::vector<PowerInfo> cores(system.dwNumberOfProcessors ? system.dwNumberOfProcessors : 1);
+                    if (callPower && callPower(11 /* ProcessorInformation */, nullptr, 0, cores.data(),
+                                               ULONG(cores.size() * sizeof(PowerInfo))) == 0)
+                    {
+                        unsigned long long current = 0, most = 0, limit = 0;
+                        for (const PowerInfo& core : cores) { current += core.currentMhz; most += core.maxMhz; limit += core.limitMhz; }
+                        printf("cpu clock: %llu of %llu MHz (limit %llu), %zu threads\n", current / cores.size(), most / cores.size(),
+                               limit / cores.size(), cores.size());
+                    }
+                }
                 fflush(stdout);
 
                 // COD3_SCANMEM=text: every ten seconds, where that text is
@@ -916,8 +990,111 @@ namespace
                 // on the way, since va takes a format.
                 for (std::string command = TakeConsoleCommand(); !command.empty(); command = TakeConsoleCommand())
                 {
+#ifdef COD3_MP
+                    // Multiplayer: the text straight to Cbuf_AddText
+                    // (sub_8247FA38, which copies it), from a block of
+                    // our own that lives as long as the game.
+                    PPCFunc* format = nullptr;
+                    PPCFunc* addText = Guest::Lookup(0x8247FA38);
+#else
                     PPCFunc* format = Guest::Lookup(0x824534B0);
                     PPCFunc* addText = Guest::Lookup(0x824644D0);
+#endif
+#ifdef COD3_MP
+                    // spawnvehicle <kind>: done by the host's code (mp_fixes.cpp).
+                    // kangaroo 0/1: the Kangaroo APC set up on the maps after
+                    // (mp_fixes.cpp).
+                    // kangaroo_type 1/2: the Kangaroo driven as four wheel or tank.
+                    if (command.compare(0, 14, "kangaroo_type ") == 0)
+                    {
+                        MpFixesKangarooType(atoi(command.c_str() + 14));
+                        continue;
+                    }
+                    if (command.compare(0, 9, "kangaroo ") == 0 || command == "kangaroo")
+                    {
+                        const bool on = command.size() <= 9 || atoi(command.c_str() + 9) != 0;
+                        MpFixesKangaroo(on);
+                        printf("video: kangaroo %d (from the next map loaded)\n", on ? 1 : 0);
+                        fflush(stdout);
+                        continue;
+                    }
+                    // vehicles_everywhere 0/1: Merville's vehicles loaded on the
+                    // maps after (mp_fixes.cpp).
+                    if (command.compare(0, 19, "vehicles_everywhere") == 0)
+                    {
+                        const bool on = atoi(command.c_str() + 19) != 0;
+                        MpFixesVehiclesEverywhere(on);
+                        printf("video: vehicles_everywhere %d (from the next map loaded)\n", on ? 1 : 0);
+                        fflush(stdout);
+                        continue;
+                    }
+                    // vehicle_mark <kind>, vehicle_clear, vehicle_list: the map's
+                    // placed vehicles (vehicles.txt, mp_fixes.cpp).
+                    if (command.compare(0, 12, "vehicle_mark") == 0 || command.compare(0, 13, "vehicle_clear") == 0 ||
+                        command.compare(0, 12, "vehicle_list") == 0)
+                    {
+                        const size_t space = command.find(' ');
+                        std::string kind = space == std::string::npos ? std::string() : command.substr(space + 1);
+                        while (!kind.empty() && (kind.back() == ' ' || kind.back() == '\r' || kind.back() == '\n')) kind.pop_back();
+                        const int what = command.compare(0, 12, "vehicle_mark") == 0 ? 2 : command.compare(0, 13, "vehicle_clear") == 0 ? 3 : 4;
+                        if (what == 2 && kind.empty()) kind = "sherman";
+                        MpFixesVehicleOrder(what, kind);
+                        printf("video: %s asked for\n", command.c_str());
+                        fflush(stdout);
+                        continue;
+                    }
+                    // streak_give <uav|artillery|typhoon>: a killstreak for the host's
+                    // own player, for testing (mp_fixes.cpp).
+                    if (command.compare(0, 11, "streak_give") == 0)
+                    {
+                        std::string kind = command.size() > 12 ? command.substr(12) : std::string();
+                        while (!kind.empty() && (kind.back() == ' ' || kind.back() == '\r' || kind.back() == '\n')) kind.pop_back();
+                        MpFixesGiveStreak(kind);
+                        printf("video: streak_give %s asked for\n", kind.c_str());
+                        fflush(stdout);
+                        continue;
+                    }
+                    // bot_add <n>: bots on the host until there are n (bots.cpp).
+                    if (command.compare(0, 7, "bot_add") == 0)
+                    {
+                        const int count = atoi(command.c_str() + 7);
+                        BotsAsk(count);
+                        printf("video: bot_add %d asked for\n", count);
+                        fflush(stdout);
+                        continue;
+                    }
+                    if (command.compare(0, 12, "spawnvehicle") == 0 || command.compare(0, 12, "vehiclespawn") == 0 ||
+                        command.compare(0, 13, "vechiclespawn") == 0 || command.compare(0, 8, "vehicle ") == 0)
+                    {
+                        // (The kind after the first space; vehiclespawn and
+                        // vehicle are the same command.)
+                        const size_t space = command.find(' ');
+                        std::string kind = space == std::string::npos ? std::string() : command.substr(space);
+                        while (!kind.empty() && (kind.front() == ' ' || kind.front() == '\t')) kind.erase(0, 1);
+                        while (!kind.empty() && (kind.back() == ' ' || kind.back() == '\r' || kind.back() == '\n')) kind.pop_back();
+                        MpFixesAskVehicle(kind);
+                        printf("video: spawnvehicle %s asked for\n", kind.c_str());
+                        fflush(stdout);
+                        continue;
+                    }
+                    // g_gametype (the PC Call of Duty name) is mp_gametype here
+                    // (dm, tdm, ctf, hq, scf, dom, war, sd); taken either way.
+                    if (command.compare(0, 11, "g_gametype ") == 0) command = "mp_gametype " + command.substr(11);
+                    if (addText != nullptr)
+                    {
+                        static uint32_t block = 0;
+                        if (!block) block = Guest::AllocatePhysical(0x1000);
+                        std::string text = command + "\n";
+                        if (text.size() > 0xF00) text.resize(0xF00);
+                        for (size_t i = 0; i <= text.size(); i++) Guest::Base[block + i] = uint8_t(i < text.size() ? text[i] : 0);
+                        ctx.r1.u32 = stackTop - 0x1100;
+                        ctx.r3.u32 = block;
+                        addText(ctx, Guest::Base);
+                        printf("video: \"%s\" put on the title's command buffer\n", command.c_str());
+                        fflush(stdout);
+                        continue;
+                    }
+#endif
                     if (format == nullptr || addText == nullptr)
                     {
                         printf("video: the title's Cbuf_AddText is not recompiled code; \"%s\" not run\n", command.c_str());

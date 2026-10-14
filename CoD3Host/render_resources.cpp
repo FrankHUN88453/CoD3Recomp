@@ -3,6 +3,7 @@
 #include "render_stats.h"
 #include "kernel.h"
 #include "write_watch.h"
+#include "texture_pack.h"
 
 #include <algorithm>
 #include <atomic>
@@ -69,32 +70,15 @@ namespace
     // rest to start with, and more when a level asks (EnsureRows: the
     // crossroads level's shadow map is 1024 rows of the 1040 wide surface).
     // COD3_TARGETROWS=N pins it.
-    uint32_t g_rowsAsked[2][16384 / 32 + 1] = {};   // by MSAA class and pitch in 32s, the most a draw or resolve has used
+    uint32_t g_rowsAsked[16384 / 32 + 1] = {};   // by pitch in 32s, the most a draw or resolve has used
 
-    // A surface (RB_SURFACE_INFO): its pitch, and its class: 1 when the
-    // console drew it with MSAA (bits 16, 17), which the host then draws
-    // with the MSAA chosen; 0 for one sample. In a level the frame is the
-    // only such surface (2x on the console); the shadow maps, the half
-    // size smoke and the bloom are single sampled, among them the forest's
-    // 1024 square shadow cascade drawn at the frame's pitch, which as a
-    // surface of that pitch was drawn with four samples and made the
-    // frame's surfaces 1024 rows tall. COD3_PITCHMSAA=1 goes by the pitch
-    // as before (640 and more, MSAA).
-    uint32_t PitchOf(uint32_t surface) { return surface & 0x3FFF; }
-    uint32_t ClassOf(uint32_t surface)
-    {
-        static const bool byPitch = getenv("COD3_PITCHMSAA") != nullptr;
-        if (byPitch) return (surface & 0x3FFF) >= 640 ? 1u : 0u;
-        return ((surface >> 16) & 3) != 0 ? 1u : 0u;
-    }
-
-    uint32_t TargetRows(uint32_t pitch, uint32_t cls, uint32_t bytesPerSample)
+    uint32_t TargetRows(uint32_t pitch, uint32_t bytesPerSample)
     {
         if (pitch == 0) return 0;
         static const uint32_t pinned = []() { const char* t = getenv("COD3_TARGETROWS"); return t ? uint32_t(strtoul(t, nullptr, 10)) : 0u; }();
         const uint32_t edram = (10u << 20) / (pitch * bytesPerSample);
         uint32_t rows = pinned != 0 ? pinned : pitch >= 1024 ? 720 : std::max(pitch, 256u);
-        if (pinned == 0 && pitch / 32 < sizeof(g_rowsAsked[0]) / sizeof(g_rowsAsked[0][0])) rows = std::max(rows, g_rowsAsked[cls][pitch / 32]);
+        if (pinned == 0 && pitch / 32 < sizeof(g_rowsAsked) / sizeof(g_rowsAsked[0])) rows = std::max(rows, g_rowsAsked[pitch / 32]);
         return std::min(std::min(rows, edram), 1440u);
     }
 
@@ -203,8 +187,8 @@ namespace
 
     // --- render targets -----------------------------------------------------------------------
 
-    struct ColorEntry { ColorTarget target; ComPtr<ID3D11Texture2D> texture; ComPtr<ID3D11RenderTargetView> view; ComPtr<ID3D11ShaderResourceView> resource; uint32_t key[2] = {}; uint32_t cls = 0; };
-    struct DepthEntry { DepthTarget target; ComPtr<ID3D11Texture2D> texture; ComPtr<ID3D11DepthStencilView> view; ComPtr<ID3D11ShaderResourceView> resource; uint32_t key[2] = {}; uint32_t cls = 0; };
+    struct ColorEntry { ColorTarget target; ComPtr<ID3D11Texture2D> texture; ComPtr<ID3D11RenderTargetView> view; ComPtr<ID3D11ShaderResourceView> resource; uint32_t key[2] = {}; };
+    struct DepthEntry { DepthTarget target; ComPtr<ID3D11Texture2D> texture; ComPtr<ID3D11DepthStencilView> view; ComPtr<ID3D11ShaderResourceView> resource; uint32_t key[2] = {}; };
     std::deque<ColorEntry> g_colorTargets;   // by handle less one
     std::deque<DepthEntry> g_depthTargets;
     RenderTable::KeyTable<2> g_colorKeys;
@@ -236,10 +220,10 @@ namespace
     // nothing in them and at 200% it cost a shadow map 2585 by 2585 by 4
     // samples of depth. A draw's colour and depth targets share its pitch,
     // so they always agree. COD3_SMALLMSAA=1 multisamples them as before.
-    uint32_t SamplesFor(uint32_t cls)
+    uint32_t SamplesFor(uint32_t pitch)
     {
         static const bool all = getenv("COD3_SMALLMSAA") != nullptr;
-        return all || cls != 0 ? g_samples : 1;
+        return all || pitch >= 640 ? g_samples : 1;
     }
 
     void HostSize(uint32_t pitch, uint32_t rows, uint32_t& width, uint32_t& height)
@@ -368,8 +352,17 @@ namespace
         uint32_t seen = 0;              // the largest size a fetch asked for
         uint64_t watchedSince = 0;      // COD3_WRITEWATCH: its pages watched from this write sequence on, 0 not
         bool live = false;
+        std::vector<uint8_t> shadow;    // a big buffer: what went up, to send only what changed
     };
     std::deque<BufferEntry> g_buffers;
+
+    // A vertex buffer this big is compared with a copy of what went up, a
+    // piece at a time, and only the pieces that changed go up. The title
+    // keeps a twelve megabyte pool its few dynamic models draw from, a few
+    // kilobytes of it rewritten each frame, and it went up whole, all of
+    // it looked at first, every frame. COD3_NOBUFFERDIFF=1: whole again.
+    constexpr uint32_t BigBufferBytes = 1u << 20;
+    constexpr uint32_t BufferPieceBytes = 16u << 10;
     RenderTable::KeyTable<2> g_bufferKeys;
     std::vector<uint32_t> g_freeBuffers;
 
@@ -455,6 +448,33 @@ namespace
                     memcpy(out.data() + size_t(y) * rowBytes + size_t(x) * 4, &word, 4);
                 }
         }
+        else if (format == 3 || format == 4 || format == 10 || format == 15)
+        {
+            // Sixteen bits a texel (1_5_5_5, 5_6_5, 8_8, 4_4_4_4: some HUD
+            // icons, the campaign's among them), widened to eight bits a
+            // component: x the lowest bits into the first byte, as format
+            // 6's are, the fetch swizzle putting them right.
+            rowBytes = width * 4;
+            out.resize(size_t(rowBytes) * height);
+            for (uint32_t y = 0; y < height; y++)
+                for (uint32_t x = 0; x < width; x++)
+                {
+                    const uint32_t offset = tiled ? TiledOffset(x + x0, y + y0, pitchTexels, 1)
+                                                  : ((y + y0) * pitchTexels + x + x0) * 2;
+                    uint16_t v;
+                    memcpy(&v, data + offset, 2);
+                    if (endian == 1 || endian == 2) v = uint16_t((v >> 8) | (v << 8));
+                    auto wide = [](uint32_t bits, uint32_t count) { return uint8_t(count >= 8 ? bits : (bits * 255 + ((1u << count) - 1) / 2) / ((1u << count) - 1)); };
+                    uint8_t* to = out.data() + size_t(y) * rowBytes + size_t(x) * 4;
+                    switch (format)
+                    {
+                    case 3: to[0] = wide(v & 31, 5); to[1] = wide((v >> 5) & 31, 5); to[2] = wide((v >> 10) & 31, 5); to[3] = (v & 0x8000) ? 255 : 0; break;
+                    case 4: to[0] = wide(v & 31, 5); to[1] = wide((v >> 5) & 63, 6); to[2] = wide((v >> 11) & 31, 5); to[3] = 255; break;
+                    case 10: to[0] = uint8_t(v & 0xFF); to[1] = uint8_t(v >> 8); to[2] = 0; to[3] = 255; break;
+                    default: to[0] = wide(v & 15, 4); to[1] = wide((v >> 4) & 15, 4); to[2] = wide((v >> 8) & 15, 4); to[3] = wide((v >> 12) & 15, 4); break;
+                    }
+                }
+        }
         else   // 2: one byte a texel
         {
             rowBytes = width;
@@ -506,7 +526,7 @@ namespace
         const uint32_t mipAddress = fetch[5] & 0xFFFFF000u;
         const uint32_t mipMax = (fetch[4] >> 6) & 0xF;
         const bool compressed = format == 18 || format == 19 || format == 20;
-        const uint32_t blockBytes = format == 18 ? 8 : format == 19 || format == 20 ? 16 : format == 6 ? 4 : 1;
+        const uint32_t blockBytes = format == 18 ? 8 : format == 19 || format == 20 ? 16 : format == 6 ? 4 : (format == 3 || format == 4 || format == 10 || format == 15) ? 2 : 1;
         const uint32_t blockTexels = compressed ? 4 : 1;
 
         DXGI_FORMAT hostFormat;
@@ -514,6 +534,7 @@ namespace
         {
         case 2: hostFormat = DXGI_FORMAT_R8_UNORM; break;
         case 6: hostFormat = DXGI_FORMAT_R8G8B8A8_UNORM; break;
+        case 3: case 4: case 10: case 15: hostFormat = DXGI_FORMAT_R8G8B8A8_UNORM; break;
         case 18: hostFormat = DXGI_FORMAT_BC1_UNORM; break;
         case 19: hostFormat = DXGI_FORMAT_BC2_UNORM; break;
         case 20: hostFormat = DXGI_FORMAT_BC3_UNORM; break;
@@ -575,6 +596,32 @@ namespace
             offset += pitchBlocks * rowsBlocks * blockBytes;
         }
 
+        // A texture pack's replacement (texture_pack.h), by the first
+        // level's texels; or the texture saved for one.
+        if (!cube && TexturePack::Active())
+        {
+            std::vector<uint8_t> top;
+            uint32_t topRow = 0;
+            if (skip == 0) top = pixels[0];
+            else LinearLevel(data, format, endian, width, height, pitch, tiled, packedX, packedY, top, topRow);
+            const std::string key = TexturePack::Key(format, width, height, top);
+            ID3D11Texture2D* replaced = nullptr;
+            ID3D11ShaderResourceView* replacedView = nullptr;
+            if (TexturePack::Load(key, g_device, g_context, &replaced, &replacedView))
+            {
+                entry.texture.Attach(replaced);
+                entry.resource.Attach(replacedView);
+                entry.cube = false;
+                entry.face.Reset();
+                entry.width = width;
+                entry.height = height;
+                entry.levels = 1;
+                g_textureUploads.fetch_add(1, std::memory_order_relaxed);
+                return true;
+            }
+            TexturePack::Dump(key, format, width, height, top);
+        }
+
         const uint32_t topWidth = std::max(width >> skip, 1u), topHeight = std::max(height >> skip, 1u);
         D3D11_TEXTURE2D_DESC desc{};
         desc.Width = compressed ? ((topWidth + 3) & ~3u) : topWidth;
@@ -632,7 +679,7 @@ namespace
                 }
                 else
                 {
-                    const uint32_t bytesPerTexel = format == 6 ? 4 : 1;
+                    const uint32_t bytesPerTexel = (format == 6 || format == 3 || format == 4 || format == 10 || format == 15) ? 4 : 1;
                     std::vector<uint8_t> bgra(size_t(width) * height * 4);
                     for (uint32_t y = 0; y < height; y++)
                         for (uint32_t x = 0; x < width; x++)
@@ -851,7 +898,7 @@ bool RenderResources::BeginFrame(uint64_t frame)
 
 bool RenderResources::Forget(uint32_t address, uint32_t size)
 {
-    const uint32_t first = address & 0x1FFFFFFFu, end = first + size;
+    const uint32_t first = Guest::GpuOffset(address), end = first + size;
     auto inside = [&](uint32_t at) { return at >= first && at < end; };
     bool dropped = false;
     for (uint32_t i = 0; i < g_textures.size(); i++)
@@ -917,19 +964,17 @@ void RenderResources::RequestMultisample(uint32_t samples)
 
 uint32_t RenderResources::Multisample() { return g_samples; }
 
-void RenderResources::TargetSize(uint32_t surface, uint32_t bytesPerSample, uint32_t& width, uint32_t& height, float& scaleX, float& scaleY)
+void RenderResources::TargetSize(uint32_t pitch, uint32_t bytesPerSample, uint32_t& width, uint32_t& height, float& scaleX, float& scaleY)
 {
-    const uint32_t pitch = PitchOf(surface);
-    const uint32_t rows = TargetRows(pitch, ClassOf(surface), bytesPerSample);
+    const uint32_t rows = TargetRows(pitch, bytesPerSample);
     HostSize(pitch, rows, width, height);
     scaleX = pitch != 0 ? float(width) / float(pitch) : 1.0f;
     scaleY = rows != 0 ? float(height) / float(rows) : 1.0f;
 }
 
-RenderState::Handle RenderResources::ColorTargetFor(uint32_t colorInfo, uint32_t surface)
+RenderState::Handle RenderResources::ColorTargetFor(uint32_t colorInfo, uint32_t pitch)
 {
-    const uint32_t pitch = PitchOf(surface), cls = ClassOf(surface);
-    const uint32_t key[2] = { colorInfo & 0x000F0FFFu, pitch | (cls << 16) };   // base tile and format; pitch and class
+    const uint32_t key[2] = { colorInfo & 0x000F0FFFu, pitch };   // base tile and format
     if (const Handle found = g_colorKeys.Find(key)) return found;
 
     g_colorTargets.emplace_back();
@@ -939,8 +984,7 @@ RenderState::Handle RenderResources::ColorTargetFor(uint32_t colorInfo, uint32_t
     const uint32_t format = (colorInfo >> 16) & 0xF;
     entry.target.format = ColorFormat(format, bytesPerSample);
     entry.target.pitch = pitch;
-    entry.target.rows = TargetRows(pitch, cls, bytesPerSample);
-    entry.cls = cls;
+    entry.target.rows = TargetRows(pitch, bytesPerSample);
     HostSize(pitch, entry.target.rows, entry.target.width, entry.target.height);
     memcpy(entry.key, key, sizeof(entry.key));
     g_colorKeys.Insert(key, handle);
@@ -952,7 +996,7 @@ RenderState::Handle RenderResources::ColorTargetFor(uint32_t colorInfo, uint32_t
     desc.MipLevels = 1;
     desc.ArraySize = 1;
     desc.Format = entry.target.format;
-    const uint32_t samples = SamplesFor(cls);
+    const uint32_t samples = SamplesFor(pitch);
     desc.SampleDesc.Count = samples;
     desc.Usage = D3D11_USAGE_DEFAULT;
     desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
@@ -970,18 +1014,16 @@ RenderState::Handle RenderResources::ColorTargetFor(uint32_t colorInfo, uint32_t
     return handle;
 }
 
-RenderState::Handle RenderResources::DepthTargetFor(uint32_t depthInfo, uint32_t surface)
+RenderState::Handle RenderResources::DepthTargetFor(uint32_t depthInfo, uint32_t pitch)
 {
-    const uint32_t pitch = PitchOf(surface), cls = ClassOf(surface);
-    const uint32_t key[2] = { depthInfo & 0xFFF, pitch | (cls << 16) };
+    const uint32_t key[2] = { depthInfo & 0xFFF, pitch };
     if (const Handle found = g_depthKeys.Find(key)) return found;
 
     g_depthTargets.emplace_back();
     DepthEntry& entry = g_depthTargets.back();
     const Handle handle = Handle(g_depthTargets.size());
     entry.target.pitch = pitch;
-    entry.target.rows = TargetRows(pitch, cls, 4);
-    entry.cls = cls;
+    entry.target.rows = TargetRows(pitch, 4);
     HostSize(pitch, entry.target.rows, entry.target.width, entry.target.height);
     memcpy(entry.key, key, sizeof(entry.key));
     g_depthKeys.Insert(key, handle);
@@ -993,7 +1035,7 @@ RenderState::Handle RenderResources::DepthTargetFor(uint32_t depthInfo, uint32_t
     desc.MipLevels = 1;
     desc.ArraySize = 1;
     desc.Format = DXGI_FORMAT_R32G8X24_TYPELESS;
-    const uint32_t samples = SamplesFor(cls);
+    const uint32_t samples = SamplesFor(pitch);
     desc.SampleDesc.Count = samples;
     desc.Usage = D3D11_USAGE_DEFAULT;
     desc.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
@@ -1017,21 +1059,20 @@ RenderState::Handle RenderResources::DepthTargetFor(uint32_t depthInfo, uint32_t
     return handle;
 }
 
-bool RenderResources::EnsureRows(uint32_t surface, uint32_t rows)
+bool RenderResources::EnsureRows(uint32_t pitch, uint32_t rows)
 {
-    const uint32_t pitch = PitchOf(surface), cls = ClassOf(surface);
-    if (pitch == 0 || pitch / 32 >= sizeof(g_rowsAsked[0]) / sizeof(g_rowsAsked[0][0])) return false;
+    if (pitch == 0 || pitch / 32 >= sizeof(g_rowsAsked) / sizeof(g_rowsAsked[0])) return false;
     rows = std::min(rows, 1440u);
-    if (rows <= g_rowsAsked[cls][pitch / 32] || rows <= TargetRows(pitch, cls, 4)) return false;
+    if (rows <= g_rowsAsked[pitch / 32] || rows <= TargetRows(pitch, 4)) return false;
     // Whole 64s, so a scissor that grows a row at a time does not make the
     // targets again a row at a time.
-    g_rowsAsked[cls][pitch / 32] = (rows + 63) & ~63u;
-    // The targets of this pitch and class go: they come back taller at the next ask.
+    g_rowsAsked[pitch / 32] = (rows + 63) & ~63u;
+    // The targets of this pitch go: they come back taller at the next ask.
     bool dropped = false;
     for (uint32_t i = 0; i < g_colorTargets.size(); i++)
     {
         ColorEntry& entry = g_colorTargets[i];
-        if (entry.target.pitch != pitch || entry.cls != cls || entry.texture == nullptr) continue;
+        if (entry.target.pitch != pitch || entry.texture == nullptr) continue;
         g_colorKeys.Erase(entry.key);
         g_resourceBytes -= uint64_t(entry.target.width) * entry.target.height * 4 * entry.target.samples;
         entry.texture.Reset(); entry.view.Reset(); entry.resource.Reset();
@@ -1041,14 +1082,14 @@ bool RenderResources::EnsureRows(uint32_t surface, uint32_t rows)
     for (uint32_t i = 0; i < g_depthTargets.size(); i++)
     {
         DepthEntry& entry = g_depthTargets[i];
-        if (entry.target.pitch != pitch || entry.cls != cls || entry.texture == nullptr) continue;
+        if (entry.target.pitch != pitch || entry.texture == nullptr) continue;
         g_depthKeys.Erase(entry.key);
         g_resourceBytes -= uint64_t(entry.target.width) * entry.target.height * 8 * entry.target.samples;
         entry.texture.Reset(); entry.view.Reset(); entry.resource.Reset();
         entry.target = DepthTarget();
         dropped = true;
     }
-    printf("render: the %u wide surfaces%s get %u rows\n", pitch, cls != 0 ? " drawn with MSAA" : "", g_rowsAsked[cls][pitch / 32]);
+    printf("render: the %u wide surfaces get %u rows\n", pitch, g_rowsAsked[pitch / 32]);
     fflush(stdout);
     return dropped;
 }
@@ -1069,7 +1110,7 @@ const RenderResources::DepthTarget* RenderResources::DepthTargetOf(Handle handle
 
 RenderResources::Resolved* RenderResources::ResolvedFor(uint32_t physical, uint32_t width, uint32_t height, DXGI_FORMAT format, bool depth)
 {
-    const uint32_t key[1] = { physical & 0x1FFFFFFFu };
+    const uint32_t key[1] = { Guest::GpuOffset(physical) };
     Handle handle = g_resolvedKeys.Find(key);
     if (handle == 0)
     {
@@ -1112,7 +1153,7 @@ RenderResources::Resolved* RenderResources::ResolvedFor(uint32_t physical, uint3
 
 const RenderResources::Resolved* RenderResources::ResolvedAt(uint32_t physical)
 {
-    const uint32_t key[1] = { physical & 0x1FFFFFFFu };
+    const uint32_t key[1] = { Guest::GpuOffset(physical) };
     const Handle handle = g_resolvedKeys.Find(key);
     if (handle == 0) return nullptr;
     const Resolved& out = g_resolved[handle - 1].surface;
@@ -1160,20 +1201,21 @@ RenderState::Handle RenderResources::TextureFor(const uint32_t fetch[6], uint32_
         // Handle 0 with `resolved` set: the caller binds the surface itself.
         return 0;
     }
-    if (format != 2 && format != 6 && format != 18 && format != 19 && format != 20) { g_whiteReason = "format not uploaded"; return 1; }
-
+    const bool uploadable = format == 2 || format == 3 || format == 4 || format == 6 || format == 10 || format == 15 || format == 18 || format == 19 || format == 20;
     const uint32_t dimension = (fetch[5] >> 9) & 3;
     // What is not uploaded is said once each, so a level that needs a
-    // format this does not have is a level that says so.
+    // format this does not have is a level that says so (said before the
+    // way out, which until 0.5.36 came first and kept it quiet).
     static uint64_t announced = 0;
-    if ((dimension == 2 || (format != 2 && format != 6 && format != 18 && format != 19 && format != 20)) && (announced & (1ull << (format & 63))) == 0)
+    if ((dimension == 2 || !uploadable) && (announced & (1ull << (format & 63))) == 0)
     {
         announced |= 1ull << (format & 63);
         printf("render: texture format %u%s at %08X (%ux%u) is not uploaded; it reads white\n", format, dimension == 2 ? " (a volume)" : dimension == 3 ? " (a cube)" : "", base, width, height);
         fflush(stdout);
     }
+    if (!uploadable) { g_whiteReason = "format not uploaded"; return 1; }
     if (dimension == 2) return 1;   // a volume: not uploaded, white
-    const uint32_t key[4] = { base & 0x1FFFFFFFu, format | (dimension << 8), width, height };
+    const uint32_t key[4] = { Guest::GpuOffset(base), format | (dimension << 8), width, height };
     Handle handle = g_textureKeys.Find(key);
     const uint8_t* data = Guest::Base + Guest::PhysicalAlias(base);
     if (handle != 0)
@@ -1254,7 +1296,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
 {
     t_fingerprintKind = "vertex";
     if (bytes == 0 || bytes > (128u << 20)) return 0;
-    const uint32_t key[2] = { physical & 0x1FFFFFFFu, endian };
+    const uint32_t key[2] = { Guest::GpuOffset(physical), endian };
     Handle handle = g_bufferKeys.Find(key);
     const uint8_t* data = Guest::Base + Guest::PhysicalAlias(physical);
     bytes = (bytes + 3) & ~3u;
@@ -1311,6 +1353,76 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
         if (!look) return handle;
         entry.checkedFrame = g_frame;
         wanted = std::max(bytes, entry.seen);
+        static const bool noDiff = getenv("COD3_NOBUFFERDIFF") != nullptr;
+        if (!noDiff && wanted >= BigBufferBytes && entry.bytes >= wanted)
+        {
+            // Watched since it was last found the same (COD3_WRITEWATCH,
+            // "Watch memory writes"), and none of its pages written since:
+            // the same still, without comparing a byte. A big buffer
+            // compared whole each time it was looked at was a tenth of the
+            // command processor's time on a big map.
+            if (entry.watchedSince != 0 && entry.shadow.size() >= wanted && wanted <= entry.seen
+                && WriteWatch::Clean(physical, wanted, entry.watchedSince))
+            {
+                RenderStats::Frame().watchedLooks++;
+                return handle;
+            }
+            entry.watchedSince = 0;
+            uint64_t sent = 0;
+            if (entry.shadow.size() < wanted)
+            {
+                entry.shadow.assign(data, data + wanted);
+                D3D11_BOX box{ 0, 0, 0, wanted, 1, 1 };
+                g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data, 0, 0);
+                sent = wanted;
+            }
+            else
+            {
+                uint8_t* shadow = entry.shadow.data();
+                uint32_t runStart = 0xFFFFFFFFu;
+                for (uint32_t at = 0; at < wanted; at += BufferPieceBytes)
+                {
+                    const uint32_t length = std::min(BufferPieceBytes, wanted - at);
+                    const bool changed = memcmp(data + at, shadow + at, length) != 0;
+                    if (changed)
+                    {
+                        if (runStart == 0xFFFFFFFFu) runStart = at;
+                        memcpy(shadow + at, data + at, length);
+                    }
+                    const bool last = at + length >= wanted;
+                    if (runStart != 0xFFFFFFFFu && (!changed || last))
+                    {
+                        const uint32_t end = changed ? at + length : at;
+                        D3D11_BOX box{ runStart, 0, 0, end, 1, 1 };
+                        g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data + runStart, 0, 0);
+                        sent += end - runStart;
+                        runStart = 0xFFFFFFFFu;
+                    }
+                }
+            }
+            entry.seen = wanted;
+            if (sent != 0)
+            {
+                entry.stable = 0;
+                g_bufferUploads.fetch_add(1, std::memory_order_relaxed);
+                g_bufferBytes.fetch_add(sent, std::memory_order_relaxed);
+                RenderStats::Frame().bufferUploads++;
+                RenderStats::Frame().uploadBytes += sent;
+            }
+            else
+            {
+                if (entry.stable < StableLooks) entry.stable++;
+                // Still for long enough: its pages watched from now on, and
+                // compared once more after they are, for a write in between.
+                if (WriteWatch::Enabled() && entry.stable >= StableLooks && !entry.midFrame)
+                {
+                    const uint64_t since = WriteWatch::Sequence();
+                    if (WriteWatch::Arm(physical, wanted) && memcmp(data, entry.shadow.data(), wanted) == 0)
+                        entry.watchedSince = since;
+                }
+            }
+            return handle;
+        }
         // COD3_WRITEWATCH=1: a buffer watched since it was last found the
         // same, and none of its pages written since, is the same still.
         if (entry.watchedSince != 0)
@@ -1484,7 +1596,7 @@ ID3D11Buffer* RenderResources::IndexBufferFor(uint32_t physical, uint32_t count,
     // widened, so the cut can be the host's.
     indices32 = wide || (reset != ~0u && reset != 0xFFFFu);
     const uint32_t guestBytes = count * (wide ? 4 : 2);
-    const uint32_t key[4] = { physical & 0x1FFFFFFFu, count, wide ? 1u : 0u, reset };
+    const uint32_t key[4] = { Guest::GpuOffset(physical), count, wide ? 1u : 0u, reset };
     const uint8_t* data = Guest::Base + Guest::PhysicalAlias(physical);
     Handle handle = g_indexKeys.Find(key);
     if (handle == 0)

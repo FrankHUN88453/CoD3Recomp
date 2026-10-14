@@ -55,6 +55,7 @@ PPC_FUNC(sub_823F04B0)
     __imp__sub_823F04B0(ctx, base);
 }
 
+#ifndef COD3_MP   // missions and their films are single player's
 // --- the mission's film, skippable once the level has loaded (a PC addition) ---------------------
 //
 // A mission's film plays while its level loads (sub_824636D0 opens it and
@@ -75,3 +76,4 @@ PPC_FUNC(sub_824EEBA0)
     if (!consoleWay) Guest::Write32(base, 0x82A2A258u, 0);   // 0.0f
     __imp__sub_824EEBA0(ctx, base);
 }
+#endif

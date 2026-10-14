@@ -10,6 +10,7 @@
 // stands in, so the title can be driven without hardware.
 
 #include <cstdint>
+#include <string>
 
 namespace Input
 {
@@ -42,4 +43,38 @@ namespace Input
 
     // Which keys stand in for which buttons, for the status view to show.
     const char* KeyboardHelp();
+
+    // Which controllers Windows reports, for the settings menu: "none found"
+    // or the XInput slots in use and what they are pressing.
+    std::string ControllerStatus();
+
+    // The title's vibration, sent to every connected pad (0 .. 65535 each
+    // motor, the low frequency one on the left).
+    void SetRumble(uint16_t left, uint16_t right);
+
+    // Direct aim: the mouse's movement since the last call, in its counts,
+    // for the title's frame to turn the view by; false when the setting is
+    // off. While it is called the mouse no longer moves the right stick.
+    bool TakeLook(long& dx, long& dy);
+    // The title is turning by the stick alone for now (a mounted gun's
+    // limits): the mouse goes back to the stick until TakeLook is next
+    // called.
+    void LookByStick();
+
+    // Multiplayer's binoculars out (mp_fixes.cpp): aim held for the title
+    // the whole time (at the eyes), the left trigger's presses counted for
+    // the zoom instead (TakeAimPresses: how many since the last call), and
+    // the right trigger let through only when mayFire (an artillery strike
+    // ready).
+    void SetBinoculars(bool out, bool mayFire);
+    int TakeAimPresses();
+    // Presses of Start, d-pad up and d-pad down since the last call, counted
+    // as the pad is read (so a short one between two game frames counts).
+    void TakePresses(int& start, int& up, int& down);
+    // Presses of d-pad right since the last call (the killstreaks' call, 0.5.82).
+    int TakeRightPresses();
+
+    // Whether the player is running: the left stick (or the keys) pushed most
+    // of the way, or sprint held (the tap-to-sprint's hold too).
+    bool Running();
 }

@@ -1,6 +1,9 @@
+#include "version.h"
 #include "overlay.h"
 #include "kernel.h"
 #include "settings.h"
+#include "input.h"
+#include "net.h"
 #include "render_stats.h"
 #include "render.h"
 
@@ -87,7 +90,12 @@ namespace
         if (line == "help" || line == "?")
         {
             ConsoleLine("Commands go on the game's own command buffer, the way the chapter select runs \"spmap\".");
+#ifdef COD3_MP
+            ConsoleLine("Examples: devmap mp_merv   (cheats on)   god   noclip   ufo   notarget   give all   where   cg_thirdPerson 1   map_restart");
+            ConsoleLine("Maps: mp_merv mp_fuel mp_hosta mpmaynne ederdam forest poissons rouen verdun. Cheats need a map started with devmap.");
+#else
             ConsoleLine("Examples: spmap forest   map_restart   cg_fov 80   timescale 0.5   god   noclip   give all   seta com_maxfps 60");
+#endif
             ConsoleLine("The game's replies (Com_Printf) were compiled out of this build, so only this side's lines appear here.");
             ConsoleLine("clear: empties the log.   ` or ~ or Esc: closes the console.");
             return;
@@ -96,67 +104,35 @@ namespace
         Kernel::QueueConsoleCommand(line);
     }
 
-    double g_consoleOpenedAt = -1.0;   // when it began to come down; below nought: at the next frame
-
-    // The console as the Call of Duty engines draw theirs: a dark band that
-    // drops from the top of the screen, the log above a "]" prompt, an
-    // amber line under it.
     void DrawConsole(int width, int height)
     {
-        const double now = ImGui::GetTime();
-        if (g_consoleOpenedAt < 0.0) g_consoleOpenedAt = now;
-        const float shown = float(std::min(1.0, (now - g_consoleOpenedAt) / 0.12));
-        const float drop = 1.0f - (1.0f - shown) * (1.0f - shown);
-        const float full = float(height) * 0.45f;
-        ImGui::SetNextWindowPos(ImVec2(0, full * (drop - 1.0f)));
-        ImGui::SetNextWindowSize(ImVec2(float(width), full));
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
-        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.04f, 0.05f, 0.07f, 0.90f));
-        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.86f, 0.86f, 0.82f, 1.0f));
-        const bool visible = ImGui::Begin("Console", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
-                                                               ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar);
-        if (visible)
+        ImGui::SetNextWindowPos(ImVec2(0, 0));
+        ImGui::SetNextWindowSize(ImVec2(float(width), float(height) * 0.45f));
+        ImGui::SetNextWindowBgAlpha(0.85f);
+        if (!ImGui::Begin("Console", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings))
         {
-            const float inputHeight = ImGui::GetFrameHeightWithSpacing() + 6.0f;
-            if (ImGui::BeginChild("log", ImVec2(0, -inputHeight), false, ImGuiWindowFlags_HorizontalScrollbar))
-            {
-                if (g_consoleLines.empty()) ImGui::TextDisabled("Type \"help\" for examples.");
-                for (const std::string& line : g_consoleLines)
-                {
-                    const bool typed = line.size() >= 2 && line[0] == ']' && line[1] == ' ';
-                    if (typed) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
-                    ImGui::TextUnformatted(line.c_str());
-                    if (typed) ImGui::PopStyleColor();
-                }
-                if (g_consoleScroll) { ImGui::SetScrollHereY(1.0f); g_consoleScroll = false; }
-            }
-            ImGui::EndChild();
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted("]");
-            ImGui::SameLine(0.0f, 4.0f);
-            ImGui::SetNextItemWidth(-1.0f);
-            if (g_consoleFocus) { ImGui::SetKeyboardFocusHere(); g_consoleFocus = false; }
-            const ImGuiInputTextFlags flags = ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackHistory;
-            if (ImGui::InputText("##input", g_consoleInput, sizeof(g_consoleInput), flags, ConsoleInputCallback))
-            {
-                RunConsoleLine(g_consoleInput);
-                g_consoleInput[0] = 0;
-                g_consoleFocus = true;
-            }
-            // The amber line along its bottom edge, and the build's name.
-            const ImVec2 at = ImGui::GetWindowPos(), size = ImGui::GetWindowSize();
-            ImDrawList* draw = ImGui::GetWindowDrawList();
-            draw->AddRectFilled(ImVec2(at.x, at.y + size.y - 2.0f), ImVec2(at.x + size.x, at.y + size.y), IM_COL32(214, 160, 64, 255));
-            const char* name = "Call of Duty 3 recompiled";
-            const ImVec2 nameSize = ImGui::CalcTextSize(name);
-            draw->AddText(ImVec2(at.x + size.x - nameSize.x - 10.0f, at.y + 6.0f), IM_COL32(150, 150, 140, 200), name);
+            ImGui::End();
+            return;
+        }
+        const float inputHeight = ImGui::GetFrameHeightWithSpacing() + 4.0f;
+        if (ImGui::BeginChild("log", ImVec2(0, -inputHeight), false, ImGuiWindowFlags_HorizontalScrollbar))
+        {
+            if (g_consoleLines.empty()) ImGui::TextDisabled("Console. Type \"help\" for examples.");
+            for (const std::string& line : g_consoleLines) ImGui::TextUnformatted(line.c_str());
+            if (g_consoleScroll) { ImGui::SetScrollHereY(1.0f); g_consoleScroll = false; }
+        }
+        ImGui::EndChild();
+        ImGui::Separator();
+        ImGui::SetNextItemWidth(-1.0f);
+        if (g_consoleFocus) { ImGui::SetKeyboardFocusHere(); g_consoleFocus = false; }
+        const ImGuiInputTextFlags flags = ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackHistory;
+        if (ImGui::InputText("##input", g_consoleInput, sizeof(g_consoleInput), flags, ConsoleInputCallback))
+        {
+            RunConsoleLine(g_consoleInput);
+            g_consoleInput[0] = 0;
+            g_consoleFocus = true;
         }
         ImGui::End();
-        ImGui::PopStyleColor(3);
-        ImGui::PopStyleVar(3);
     }
 
     std::atomic<bool> g_ready{ false };
@@ -254,7 +230,7 @@ namespace
         ImGui::SetNextWindowSize(ImVec2(620 * g_fontScale, 0), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowPos(ImVec2(width * 0.5f, height * 0.5f), ImGuiCond_FirstUseEver, ImVec2(0.5f, 0.5f));
         bool open = true;
-        if (ImGui::Begin("Settings (F11)", &open, ImGuiWindowFlags_NoCollapse))
+        if (ImGui::Begin("Settings (F11) - version " COD3_VERSION "###settings", &open, ImGuiWindowFlags_NoCollapse))
         {
             if (ImGui::BeginTabBar("tabs"))
             {
@@ -324,43 +300,77 @@ namespace
                     ImGui::Combo("Model detail", &g_edit.modelDetail, details, 2);
                     ImGui::SameLine();
                     ImGui::TextDisabled("(Maximum: the finest version of every model at any distance)");
+                    ImGui::Checkbox("Fog", &g_edit.fog);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(the maps' haze in the distance)");
+                    const char* distances[] = { "The game's own", "Far", "Medium", "Near" };
+                    ImGui::Combo("Draw distance", &g_edit.drawDistance, distances, 4);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(nearer draws less: faster on a slow machine)");
+                    const char* effects[] = { "All", "Fewer far away", "None" };
+                    ImGui::Combo("Effects", &g_edit.effects, effects, 3);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(smoke, dust, fire and sparks)");
+                    ImGui::Checkbox("Dynamic lights", &g_edit.dynamicLights);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(muzzle flashes and explosions lighting what is near)");
                     ImGui::Checkbox("Blur while aiming", &g_edit.aimBlur);
                     ImGui::SameLine();
-                    ImGui::TextDisabled("(the game's depth of field down the sights)");
+                    ImGui::TextDisabled("(the console's depth of field down the sights: soft, with an outline round the gun at PC resolutions)");
                     ImGui::Checkbox("Console depth precision", &g_edit.consoleDepth);
                     ImGui::SameLine();
                     ImGui::TextDisabled("(no flickering surfaces; costs frame rate with MSAA; after a restart)");
+                    ImGui::Checkbox("Native command lists (experimental)", &g_edit.nativeCommands);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(the draws' state straight from the game's own calls: faster; after a restart)");
+                    ImGui::Checkbox("Watch memory writes (experimental)", &g_edit.watchWrites);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(still textures and buffers not looked at again until written: faster; after a restart)");
                     ImGui::Checkbox("Vertical sync (VSync)", &g_edit.vsync);
                     ImGui::Checkbox("Unlimited frame rate in levels", &g_edit.unlockFrameRate);
                     ImGui::SameLine();
                     ImGui::TextDisabled("(the menus and films keep the console's 60)");
+                    {
+                        // A cap holds the frames to an even pace: a steady 60
+                        // feels smoother than a rate swinging between 50 and 140.
+                        static const int caps[] = { 0, 60, 90, 120, 144 };
+                        static const char* const names[] = { "Off", "60", "90", "120", "144" };
+                        int current = 0;
+                        for (int i = 0; i < 5; i++) if (caps[i] == g_edit.frameCap) current = i;
+                        ImGui::SetNextItemWidth(120);
+                        if (ImGui::Combo("Frame rate cap", &current, names, 5)) g_edit.frameCap = caps[current];
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("(an even pace; 60 for the steadiest picture)");
+                    }
                     ImGui::Checkbox("Show FPS", &g_edit.fpsOverlay);
                     ImGui::Checkbox("Renderer statistics", &g_edit.statsOverlay);
                     ImGui::EndTabItem();
                 }
-                if (ImGui::BeginTabItem("Gameplay"))
-                {
-                    ImGui::Checkbox("Subtitles", &g_edit.subtitles);
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("(the game's own, as on its Gameplay page)");
-                    ImGui::Checkbox("Console", &g_edit.console);
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("(opened with the key left of 1)");
-                    ImGui::TextDisabled("The game's own console was left out of its Xbox 360 release; this one sends");
-                    ImGui::TextDisabled("its commands to the game's command buffer, as the game's own did.");
-                    ImGui::EndTabItem();
-                }
                 if (ImGui::BeginTabItem("Controls"))
                 {
+                    ImGui::SliderInt("Master volume", &g_edit.masterVolume, 0, 100, "%d%%");
                     ImGui::SliderFloat("Mouse sensitivity", &g_edit.mouseSensitivity, 0.1f, 3.0f, "%.2f");
                     ImGui::TextDisabled("Both axes alike.");
                     ImGui::Checkbox("Raw mouse input", &g_edit.rawMouse);
                     ImGui::SameLine();
                     ImGui::TextDisabled("(the mouse's own movement, without Windows' pointer speed and acceleration)");
+                    ImGui::Checkbox("Direct mouse aim (PC style)", &g_edit.directMouse);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("The mouse turns the view one to one, as in a PC shooter. Off: the mouse\n"
+                                          "stands in for the right stick, with the console's turn speed-up and limits.");
+                    ImGui::Checkbox("Tap to sprint (L3 / Shift once, not held)", &g_edit.toggleSprint);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("One press of sprint keeps running until you stop pushing forward, aim, fire\n"
+                                          "or press sprint again. Off: sprint lasts only while the button is held.");
                     ImGui::Checkbox("Aim assist", &g_edit.aimAssist);
                     ImGui::SameLine();
                     ImGui::TextDisabled("(the game's own; takes effect after a restart)");
                     ImGui::Checkbox("Controller support", &g_edit.controller);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(%s)", Input::ControllerStatus().c_str());
+                    ImGui::Checkbox("Controller vibration", &g_edit.rumble);
+                    ImGui::SliderInt("Stick deadzone", &g_edit.stickDeadzone, 0, 50, "%d%%");
+                    ImGui::TextDisabled("Raise it if the view or the soldier drifts with the sticks untouched.");
                     ImGui::Separator();
                     ImGui::TextUnformatted("Keys");
                     if (ImGui::BeginTable("keys", 2, ImGuiTableFlags_SizingStretchProp))
@@ -386,16 +396,123 @@ namespace
                     }
                     ImGui::EndTabItem();
                 }
-                if (ImGui::BeginTabItem("Experimental"))
+                if (ImGui::BeginTabItem("Multiplayer"))
                 {
-                    ImGui::TextDisabled("On by default: the game runs faster with them. Turn one off if something");
-                    ImGui::TextDisabled("looks wrong, and tell what; each takes effect after a restart.");
-                    ImGui::Checkbox("Native command lists", &g_edit.nativeCommands);
+#ifndef COD3_MP
+                    ImGui::TextDisabled("These are for CoD3MP.exe, the multiplayer program (Multiplayer in the main menu starts it).");
+#endif
+                    ImGui::InputText("Player name", g_edit.playerName, sizeof(g_edit.playerName));
                     ImGui::SameLine();
-                    ImGui::TextDisabled("(the draws' state straight from the game's own calls)");
-                    ImGui::Checkbox("Watch memory writes", &g_edit.watchWrites);
+                    ImGui::TextDisabled("(what others see; empty is your Windows name)");
+                    ImGui::InputText("System Link address", g_edit.lanAddress, sizeof(g_edit.lanAddress));
                     ImGui::SameLine();
-                    ImGui::TextDisabled("(still textures and buffers not looked at again until written)");
+                    ImGui::TextDisabled("(empty: automatic; after a restart)");
+                    ImGui::InputText("System Link peers", g_edit.systemLinkPeers, sizeof(g_edit.systemLinkPeers));
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(friends' IPs, comma separated; after a restart)");
+                    ImGui::Separator();
+                    ImGui::TextUnformatted("Network");
+                    const Net::Summary net = Net::Status();
+                    ImGui::Text("This PC on System Link: %s", net.address.c_str());
+                    for (const std::string& line : net.adapters) ImGui::BulletText("%s", line.c_str());
+                    if (net.peers.empty()) ImGui::TextDisabled("No peers: games are found by broadcast only.");
+                    else
+                    {
+                        std::string list;
+                        for (const std::string& peer : net.peers) list += (list.empty() ? "" : ", ") + peer;
+                        ImGui::Text("Peers: %s", list.c_str());
+                    }
+#ifdef COD3_MP
+                    ImGui::Text("Sockets open: %u   Packets sent: %llu   received: %llu%s%s", net.sockets, net.sent, net.received,
+                        net.lastFrom.empty() ? "" : "   last from ", net.lastFrom.c_str());
+#endif
+                    ImGui::Separator();
+                    ImGui::Checkbox("CoD4 bounces", &g_edit.bounces);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Jumping onto a slope at the right angle bounces you off it, as in Call of Duty 4 and\n"
+                                          "World at War. Everyone in a match should have the same setting, or a bounce gets\n"
+                                          "taken back by the host as it happens.");
+                    ImGui::Checkbox("Quick landing", &g_edit.quickLanding);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("After a heavy fall you are slowed for a moment only (at most 0.15 seconds),\n"
+                                          "not the game's own half a second to two seconds.");
+                    ImGui::Checkbox("Quick sprint recovery", &g_edit.quickSprint);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Stamina starts coming back a quarter second after a sprint and is full\n"
+                                          "in a second and a half, so you can sprint again sooner.");
+                    if (ImGui::CollapsingHeader("Custom classes (multiplayer)", ImGuiTreeNodeFlags_DefaultOpen))
+                    {
+                        const char* weapons[] = { "The class's own", "M1 Garand", "Thompson", "BAR", "Springfield (scoped)",
+                                                  ".30 cal machine gun", "Bazooka", "Trench gun", "Kar98k", "MP40", "StG 44",
+                                                  "Kar98k (scoped)", "MG34", "Panzerschreck", "Lee-Enfield", "Bren", "Sten", "FG42", "FG42 (scoped)" };
+                        const char* sidearms[] = { "The side's own", "Colt .45", "P38", "M1 Garand", "Thompson", "BAR", "Springfield (scoped)",
+                                                   ".30 cal machine gun", "Bazooka", "Trench gun", "Kar98k", "MP40", "StG 44",
+                                                   "Kar98k (scoped)", "MG34", "Panzerschreck", "Lee-Enfield", "Bren", "Sten", "FG42", "FG42 (scoped)" };
+                        ImGui::TextDisabled("Pick one on the class screen with L1 / R1 (or here). The class you pick in the game's\n"
+                                            "menu still gives its grenades and ability (medic healing, scout artillery and so on).");
+                        ImGui::RadioButton("None: the class's own kit", &g_edit.activeClass, 0);
+                        for (int i = 0; i < Settings::Values::CustomClasses; i++)
+                        {
+                            ImGui::PushID(i);
+                            ImGui::RadioButton("##use", &g_edit.activeClass, i + 1);
+                            ImGui::SameLine();
+                            ImGui::SetNextItemWidth(140);
+                            ImGui::InputText("##name", g_edit.className[i], sizeof(g_edit.className[i]), ImGuiInputTextFlags_CharsUppercase);
+                            ImGui::SameLine();
+                            ImGui::SetNextItemWidth(200);
+                            ImGui::Combo("##primary", &g_edit.classPrimary[i], weapons, 19);
+                            ImGui::SameLine();
+                            ImGui::SetNextItemWidth(140);
+                            ImGui::Combo("##sidearm", &g_edit.classSidearm[i], sidearms, 21);
+                            ImGui::PopID();
+                        }
+                    }
+                    ImGui::Checkbox("Faster aiming walk", &g_edit.fasterAds);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Walking while aiming down the sights is quicker (never quicker than from the hip).");
+                    if (g_edit.fasterAds)
+                        ImGui::SliderInt("Aiming walk speed", &g_edit.aimWalk, 40, 100, "%d%% of the hip walk");
+                    ImGui::Checkbox("Rocket launcher on d-pad left", &g_edit.launcher);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Every spawn also gets your side's launcher (bazooka or Panzerschreck) with a few rockets:\n"
+                                          "d-pad left takes it out, press again for your main weapon.");
+                    ImGui::Checkbox("Binoculars for everyone", &g_edit.binoculars);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Every class also gets binoculars: d-pad up (or the Binoculars out key, B) puts them to\n"
+                                          "your eyes, d-pad down (Binoculars away, N) puts them away. The left trigger (aim) zooms\n"
+                                          "x2 and back. The right trigger calls artillery when a killstreak has earned one.");
+                    ImGui::Checkbox("Killstreaks", &g_edit.killstreakArtillery);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Hosting: kills in a row without dying earn rewards. The UAV shows every enemy on the\n"
+                                          "compass; the artillery barrage and the Typhoon are called in with the binoculars\n"
+                                          "(d-pad up, then the right trigger at the spot).");
+                    if (g_edit.killstreakArtillery)
+                    {
+                        ImGui::SliderInt("Kills for the UAV", &g_edit.killstreakUav, 1, 15, "%d in a row");
+                        ImGui::SliderInt("UAV time", &g_edit.uavSeconds, 10, 90, "%d seconds");
+                        ImGui::SliderInt("Kills for artillery", &g_edit.killstreakKills, 1, 20, "%d in a row");
+                        ImGui::SliderInt("Kills for the Typhoon", &g_edit.killstreakTyphoon, 1, 25, "%d in a row");
+                    }
+                    ImGui::Checkbox("Four of the second grenade and mines", &g_edit.fourSecondary);
+                    ImGui::SliderInt("Ability recharge", &g_edit.abilityRecharge, 10, 100, g_edit.abilityRecharge >= 100 ? "the game's own" : "%d%% of the wait");
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Multiplayer: the scout's artillery (three minutes normally), the medic's health packs\n"
+                                          "and the support's ammo come back in this share of the usual time.");
+                    ImGui::Checkbox("Two grenades", &g_edit.twoGrenades);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Multiplayer: you start with at least two grenades (more as you rank up).");
+                    ImGui::Checkbox("Melee lunge", &g_edit.meleeLunge);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("A melee with an enemy close in front pulls you at him, as World at War's bayonet\n"
+                                          "and Modern Warfare 2's commando knife do. Everyone in a match wants the same setting.");
+                    ImGui::Checkbox("Shell shock screen blur", &g_edit.shellShockBlur);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("The blurred, dark screen after an explosion close by (a bazooka at your feet), which\n"
+                                          "hides the HUD for a moment. Off: the screen stays clear; the shock's sound and kick stay.");
+                    ImGui::Separator();
+                    ImGui::TextWrapped("Playing with a friend: both of you on the same LAN, or in the same Hamachi, ZeroTier or "
+                                       "Radmin network; one hosts under System Link, the other searches. On Tailscale, which "
+                                       "carries no broadcasts, each of you puts the other's Tailscale address in the peers.");
                     ImGui::EndTabItem();
                 }
                 ImGui::EndTabBar();
@@ -419,8 +536,7 @@ namespace
             ImGui::SameLine();
             if (ImGui::Button("Close", ImVec2(140 * g_fontScale, 0))) open = false;
             if (dirty) { ImGui::SameLine(); ImGui::TextDisabled("(unapplied changes)"); }
-            ImGui::TextDisabled(applied.console ? "F11: this menu   F12: screenshot   ` (left of 1): console   Esc: back to the game"
-                                                : "F11: this menu   F12: screenshot   Esc: back to the game");
+            ImGui::TextDisabled("F11: this menu   F12: screenshot   ` (left of 1): console   Esc: back to the game");
         }
         ImGui::End();
         (void)changed;
@@ -545,6 +661,78 @@ void Overlay::NoteFrame()
     g_frontEndLast = now;
 }
 
+namespace
+{
+    std::atomic<bool (*)()> g_hudActive{ nullptr };
+    std::atomic<void (*)(int, int)> g_hudDraw{ nullptr };
+    std::atomic<bool (*)()> g_menuHudActive{ nullptr };
+    std::atomic<void (*)(int, int)> g_menuHudDraw{ nullptr };
+    std::atomic<bool (*)()> g_streakHudActive{ nullptr };
+    std::atomic<void (*)(int, int)> g_streakHudDraw{ nullptr };
+}
+
+// A short message across the top of the picture for a few seconds (the
+// killstreaks' "UAV online" and such, mp_fixes.cpp).
+namespace
+{
+    std::mutex g_noticeLock;
+    std::string g_notice;
+    uint64_t g_noticeUntil = 0;
+
+    bool NoticeShown()
+    {
+        std::lock_guard<std::mutex> lock(g_noticeLock);
+        return !g_notice.empty() && GetTickCount64() < g_noticeUntil;
+    }
+
+    void DrawNotice(int width, int height)
+    {
+        std::string text;
+        uint64_t until = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_noticeLock);
+            text = g_notice;
+            until = g_noticeUntil;
+        }
+        if (text.empty() || GetTickCount64() >= until) return;
+        ImDrawList* draw = ImGui::GetForegroundDrawList();
+        ImFont* font = ImGui::GetFont();
+        const float size = 34.0f * height / 1080.0f;
+        const ImVec2 extent = font->CalcTextSizeA(size, FLT_MAX, 0.0f, text.c_str());
+        // Fading out over its last half second.
+        const float left = float(until - GetTickCount64());
+        const int alpha = left < 500.0f ? int(255.0f * left / 500.0f) : 255;
+        const ImVec2 at((width - extent.x) * 0.5f, height * 0.22f);
+        draw->AddText(font, size, ImVec2(at.x + 2, at.y + 2), IM_COL32(0, 0, 0, alpha * 3 / 4), text.c_str());
+        draw->AddText(font, size, at, IM_COL32(255, 214, 90, alpha), text.c_str());
+    }
+}
+
+void Overlay::Notice(const std::string& text, int milliseconds)
+{
+    std::lock_guard<std::mutex> lock(g_noticeLock);
+    g_notice = text;
+    g_noticeUntil = GetTickCount64() + uint64_t(milliseconds);
+}
+
+void Overlay::SetMenuHud(bool (*active)(), void (*draw)(int width, int height))
+{
+    g_menuHudDraw.store(draw);
+    g_menuHudActive.store(active);
+}
+
+void Overlay::SetStreakHud(bool (*active)(), void (*draw)(int width, int height))
+{
+    g_streakHudDraw.store(draw);
+    g_streakHudActive.store(active);
+}
+
+void Overlay::SetHud(bool (*active)(), void (*draw)(int width, int height))
+{
+    g_hudDraw.store(draw);
+    g_hudActive.store(active);
+}
+
 void Overlay::NoteFrontEndText(FrontEndText text)
 {
     g_frontEndNow.fetch_or(uint32_t(text), std::memory_order_relaxed);
@@ -563,7 +751,7 @@ void Overlay::ToggleConsole()
 {
     const bool open = !g_console.load();
     g_console.store(open);
-    if (open) { g_consoleFocus = true; g_consoleInput[0] = 0; g_consoleOpenedAt = -1.0; }
+    if (open) { g_consoleFocus = true; g_consoleInput[0] = 0; }
 }
 
 void Overlay::ConsolePrint(const std::string& line)
@@ -585,9 +773,8 @@ bool Overlay::HandleMessage(void* hwnd, uint32_t message, uint64_t wParam, int64
         if (wParam == VK_F12) { RequestScreenshot(); Render::LogNextFrame(); return true; }
         // The key left of 1 (scan code 0x29: ` and ~ on a US keyboard, 0
         // on a Hungarian one): the console, as the title's own configs
-        // bind it, when the Gameplay page turns it on. By scan code, so it
-        // is that key on every layout.
-        if (((lParam >> 16) & 0xFF) == 0x29 && !g_open.load() && (Settings::Get().console || g_console.load())) { ToggleConsole(); return true; }
+        // bind it. By scan code, so it is that key on every layout.
+        if (((lParam >> 16) & 0xFF) == 0x29 && !g_open.load()) { ToggleConsole(); return true; }
         if (wParam == VK_ESCAPE && g_console.load() && !g_open.load()) { g_console.store(false); return true; }
     }
     // The character that key makes must not land in the console's input.
@@ -636,7 +823,17 @@ void Overlay::Render(ID3D11RenderTargetView* back, ID3D11Texture2D* backTexture,
     const Settings::Values values = Settings::Get();
     const bool open = g_open.load();
     const bool console = g_console.load();
-    if (!open && !console && !values.fpsOverlay && !values.statsOverlay) return;
+    bool (*hudActive)() = g_hudActive.load();
+    void (*hudDraw)(int, int) = g_hudDraw.load();
+    const bool hud = hudActive && hudDraw && hudActive();
+    bool (*menuHudActive)() = g_menuHudActive.load();
+    void (*menuHudDraw)(int, int) = g_menuHudDraw.load();
+    const bool menuHud = menuHudActive && menuHudDraw && menuHudActive();
+    bool (*streakHudActive)() = g_streakHudActive.load();
+    void (*streakHudDraw)(int, int) = g_streakHudDraw.load();
+    const bool streakHud = streakHudActive && streakHudDraw && streakHudActive();
+    const bool notice = NoticeShown();
+    if (!open && !console && !hud && !menuHud && !streakHud && !notice && !values.fpsOverlay && !values.statsOverlay) return;
 
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
@@ -663,6 +860,10 @@ void Overlay::Render(ID3D11RenderTargetView* back, ID3D11Texture2D* backTexture,
         }
         ImGui::End();
     }
+    if (hud) hudDraw(width, height);
+    if (streakHud) streakHudDraw(width, height);
+    if (menuHud) menuHudDraw(width, height);
+    if (notice) DrawNotice(width, height);
     if (open) DrawMenu(width, height);
     else if (console) DrawConsole(width, height);
     ImGui::Render();

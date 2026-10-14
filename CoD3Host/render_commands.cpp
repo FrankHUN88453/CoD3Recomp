@@ -14,6 +14,8 @@
 #include "render_shaders.h"
 #include "render_resources.h"
 #include "render_stats.h"
+#include "debug_probe.h"
+#include "settings.h"
 #include "gpu.h"
 #include "kernel.h"
 
@@ -231,7 +233,7 @@ namespace
             const uint32_t tl = state.scissorTopLeft, br = state.scissorBottomRight;
             const int32_t offsetY = (tl & 0x80000000u) ? 0 : (int32_t(state.windowOffset << 1) >> 17);
             const int32_t bottom = int32_t((br >> 16) & 0x7FFF) + offsetY;
-            if (bottom > 0 && RenderResources::EnsureRows(state.surfaceInfo, uint32_t(bottom))) out.bindingsLost = true;
+            if (bottom > 0 && RenderResources::EnsureRows(state.pitch, uint32_t(bottom))) out.bindingsLost = true;
         }
 
         // Only the targets the pixel program writes, each once: the title
@@ -242,7 +244,7 @@ namespace
         {
             if (((ps->colourTargets >> i) & 1) == 0) continue;
             if (((state.colorMask >> (i * 4)) & 0xF) == 0) continue;
-            const RenderResources::ColorTarget* target = RenderResources::ColorTargetOf(RenderResources::ColorTargetFor(state.colorInfo[i], state.surfaceInfo));
+            const RenderResources::ColorTarget* target = RenderResources::ColorTargetOf(RenderResources::ColorTargetFor(state.colorInfo[i], state.pitch));
             if (target == nullptr) continue;
             bool duplicate = false;
             for (uint32_t j = 0; j < i; j++) if (out.targets[j] == target->view) duplicate = true;
@@ -254,7 +256,7 @@ namespace
         }
         if ((state.depthControl & 3) != 0)
         {
-            if (const RenderResources::DepthTarget* depth = RenderResources::DepthTargetOf(RenderResources::DepthTargetFor(state.depthInfo, state.surfaceInfo)))
+            if (const RenderResources::DepthTarget* depth = RenderResources::DepthTargetOf(RenderResources::DepthTargetFor(state.depthInfo, state.pitch)))
             {
                 out.depthView = depth->view;
                 out.depthResource = depth->resource;
@@ -280,7 +282,7 @@ namespace
         // The target's host size, and the scissor in it. Bit 31 of the
         // scissor says the window offset does not apply.
         float scaleX;
-        RenderResources::TargetSize(state.surfaceInfo, 4, out.targetWidth, out.targetHeight, scaleX, scaleY);
+        RenderResources::TargetSize(state.pitch, 4, out.targetWidth, out.targetHeight, scaleX, scaleY);
         {
             const uint32_t tl = state.scissorTopLeft, br = state.scissorBottomRight;
             const int32_t offsetX = (tl & 0x80000000u) ? 0 : (int32_t(state.windowOffset << 17) >> 17);
@@ -820,6 +822,30 @@ namespace
         return hash;
     }
 
+    void DumpVertices(const RenderState::Snapshot& state, const RenderShaders::Program* vs, const DrawCommand& out)
+    {
+        printf("debug: vs %016llx, primitive %u, %u indices, depth control %08X info %08X, view %p, vte %03X, viewport z %g %g, poly offset %08X\n",
+            (unsigned long long)vs->hash, state.primitive, state.indexCount, state.depthControl, state.depthInfo, (void*)out.depthView,
+            state.vteControl, state.viewport[4], state.viewport[5], state.suScModeControl);
+        for (const XenosHlsl::VertexFetch& fetch : vs->vertexFetches)
+        {
+            uint32_t word0, word1;
+            RenderState::ReadVertexFetch(fetch.slot, word0, word1);
+            const uint32_t at = word0 & ~3u, bytes = ((word1 >> 2) & 0xFFFFFF) * 4;
+            printf("  slot %u at %08X, %u bytes:", fetch.slot, at, bytes);
+            for (uint32_t i = 0; i < bytes / 4 && i < 48; i++)
+            {
+                const uint32_t word = Guest::Read32(Guest::Base, Guest::PhysicalAlias(at + i * 4));
+                float f;
+                memcpy(&f, &word, 4);
+                printf(" %08X(%g)", word, f);
+            }
+            printf("\n");
+            break;
+        }
+        fflush(stdout);
+    }
+
     void DrawLog(const RenderState::Snapshot& state, const RenderShaders::Program* vs, const RenderShaders::Program* ps, const DrawCommand& out)
     {
         static const char* const path = getenv("COD3_DRAWLOG");
@@ -886,12 +912,12 @@ namespace
         }
         const uint32_t indexBytes = out.indexed ? state.indexCount * 4 : 0;
         char line[512];
-        const int n = snprintf(line, sizeof(line), "%llu %u %llx %016llx %016llx p%u n%u %c vb %08X %u %016llx ib %016llx c %016llx d %08X b %08X m %X t %u pc %016llx tx %016llx vs %016llx %u s %08X z %08X sc %08X\n",
+        const int n = snprintf(line, sizeof(line), "%llu %u %llx %016llx %016llx p%u n%u %c vb %08X %u %016llx ib %016llx c %016llx d %08X b %08X m %X t %u pc %016llx tx %016llx vs %016llx %u\n",
             (unsigned long long)swap, number++, (unsigned long long)Gpu::BinSelect(), (unsigned long long)vs->hash, (unsigned long long)ps->hash,
             state.primitive, state.indexCount, out.indexed ? 'i' : 'p', vb, vbBytes, (unsigned long long)SampleHash(vb, vbBytes),
             (unsigned long long)(out.indexed ? SampleHash(state.indexBase, indexBytes) : 0), (unsigned long long)vsConstants,
             state.depthControl, state.blendControl[0], state.colorMask, out.targetCount, (unsigned long long)psConstants, (unsigned long long)textures,
-            (unsigned long long)streams, unsigned(vs->vertexFetches.size()), state.surfaceInfo, state.depthInfo, state.scissorBottomRight);
+            (unsigned long long)streams, unsigned(vs->vertexFetches.size()));
         if (n > 0) lines.append(line, size_t(n));
         // COD3_DRAWLOG_PSDUMP=hash: the first draw of a frame with that pixel
         // program adds its 256 pixel constants, every word, to the log.
@@ -1035,7 +1061,7 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
     {
         uint32_t hostWidth, hostHeight;
         float scaleX, scaleYAgain;
-        RenderResources::TargetSize(state.surfaceInfo, 4, hostWidth, hostHeight, scaleX, scaleYAgain);
+        RenderResources::TargetSize(state.pitch, 4, hostWidth, hostHeight, scaleX, scaleYAgain);
         constants.pixelGen[0] = scaleX > 0.0f ? 1.0f / scaleX : 1.0f;
         constants.pixelGen[1] = scaleYAgain > 0.0f ? 1.0f / scaleYAgain : 1.0f;
         constants.pixelGen[2] = float((state.contextMisc >> 8) & 0xFF);
@@ -1046,6 +1072,22 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
     // see what a pass (the fog, say) puts over the picture.
     static const uint64_t skipPixel = []() { const char* t = getenv("COD3_SKIPPS"); return t ? uint64_t(strtoull(t, nullptr, 16)) : 0ull; }();
     if (skipPixel != 0 && ps != nullptr && ps->hash == skipPixel) return false;
+    // The shell shock's black flash: right after an explosion close by (a
+    // bazooka at one's feet) the title draws one full screen pass with this
+    // pixel program over the whole frame, before the HUD, for its first
+    // frames. It should show a blurred copy of the scene; here the copy is
+    // black, and the pass wipes the picture to black for a moment. Left out
+    // unless "Shell shock screen blur" is ticked in F11 (found from F12
+    // captures of the shock: present at its first and eighth frame, gone by
+    // its twentieth, and the frame black from that draw on).
+    if (!Settings::Get().shellShockBlur && ps != nullptr && ps->hash == 0x5fb07e1b8502496aull) return false;
+    // debug.txt's skip_vs and skip_ps, and dump_vs: what a vertex program's
+    // draws are given, the vertices as the title wrote them.
+    {
+        const uint64_t skipVs = DebugProbe::SkipVs(), skipPs = DebugProbe::SkipPs();
+        if ((skipVs != 0 && vs->hash == skipVs) || (skipPs != 0 && ps != nullptr && ps->hash == skipPs)) return false;
+        if (DebugProbe::DumpVs() == vs->hash && DebugProbe::TakeDump()) DumpVertices(state, vs, out);
+    }
 
     RenderStats::Enter(RenderStats::SectionTextures);
     Textures(vs, ps, out, constants);
@@ -1093,11 +1135,11 @@ bool RenderCommands::PrepareResolve(ResolveCommand& out)
     const bool colorClear = ((state.control >> 8) & 1) != 0;
     const bool depthClear = ((state.control >> 9) & 1) != 0;
     RenderStats::Frame().resolves++;
-    if (RenderResources::EnsureRows(state.surfaceInfo, y1)) out.bindingsLost = true;
+    if (RenderResources::EnsureRows(state.pitch, y1)) out.bindingsLost = true;
 
     uint32_t targetWidth, targetHeight;
     float scaleX, scaleY;
-    RenderResources::TargetSize(state.surfaceInfo, 4, targetWidth, targetHeight, scaleX, scaleY);
+    RenderResources::TargetSize(state.pitch, 4, targetWidth, targetHeight, scaleX, scaleY);
     const float hostX0 = x0 * scaleX, hostY0 = y0 * scaleY;
     const uint32_t hostWidth = std::max(1u, uint32_t(std::lround(width * scaleX)));
     const uint32_t hostHeight = std::max(1u, uint32_t(std::lround(height * scaleY)));
@@ -1109,30 +1151,45 @@ bool RenderCommands::PrepareResolve(ResolveCommand& out)
     static const bool resolveLog = getenv("COD3_RESOLVELOG") != nullptr;
     if (resolveLog)
     {
-        static std::map<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t>, uint64_t> where;
+        static std::map<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>, uint64_t> where;
         static auto told = std::chrono::steady_clock::now();
-        const uint32_t sourceTile = (state.control & 7) == 4 ? (state.depthInfo & 0xFFF) : (state.colorInfo[(state.control & 7) < 4 ? (state.control & 7) : 0] & 0xFFF);
-        where[{ state.control, state.destBase, width, height, sourceTile | (state.pitch << 16), (state.surfaceInfo >> 16) & 3 }]++;
+        where[{ state.control, state.destBase, width, height }]++;
         if (std::chrono::steady_clock::now() - told > std::chrono::seconds(5))
         {
             told = std::chrono::steady_clock::now();
             printf("resolves, five seconds:");
             for (const auto& [key, count] : where)
-                printf(" %08X>%08X %ux%u from tile %u pitch %u msaa %u x%llu;", std::get<0>(key), std::get<1>(key), std::get<2>(key), std::get<3>(key),
-                       std::get<4>(key) & 0xFFFF, std::get<4>(key) >> 16, 1u << std::get<5>(key), (unsigned long long)count);
+                printf(" %08X>%08X %ux%u x%llu;", std::get<0>(key), std::get<1>(key), std::get<2>(key), std::get<3>(key), (unsigned long long)count);
             printf("\n");
             fflush(stdout);
             where.clear();
         }
     }
 
+    if (DebugProbe::TakeResolveLog())
+    {
+        printf("debug: resolve control %08X to %08X, %u,%u-%u,%u, dest info %08X pitch %08X, surface pitch %u, colour %08X depth %08X\n",
+            state.control, state.destBase, x0, y0, x1, y1, state.destInfo, state.destPitch, state.pitch, state.colorInfo[0], state.depthInfo);
+        fflush(stdout);
+    }
+
     if (command != 3 && state.destBase != 0)
     {
         const bool fromDepth = sourceSelect == 4;
+        if (fromDepth && DebugProbe::DepthWriteback() != 0 && (state.destPitch & 0x3FFF) != 0)
+        {
+            out.writeBack = true;
+            out.guestBase = state.destBase;
+            out.guestPitch = state.destPitch & 0x3FFF;
+            out.guestWidth = width;
+            out.guestHeight = height;
+            out.guestEndian = state.destInfo & 7;
+            out.guestFloatDepth = ((state.depthInfo >> 16) & 1) != 0;
+        }
         DXGI_FORMAT format = DXGI_FORMAT_R8G8B8A8_UNORM;
         if (fromDepth)
         {
-            const RenderResources::DepthTarget* depth = RenderResources::DepthTargetOf(RenderResources::DepthTargetFor(state.depthInfo, state.surfaceInfo));
+            const RenderResources::DepthTarget* depth = RenderResources::DepthTargetOf(RenderResources::DepthTargetFor(state.depthInfo, state.pitch));
             if (depth == nullptr) return false;
             out.source = depth->resource;
             out.sourceWidth = depth->width;
@@ -1143,7 +1200,7 @@ bool RenderCommands::PrepareResolve(ResolveCommand& out)
         else
         {
             const uint32_t info = state.colorInfo[sourceSelect < 4 ? sourceSelect : 0];
-            const RenderResources::ColorTarget* color = RenderResources::ColorTargetOf(RenderResources::ColorTargetFor(info, state.surfaceInfo));
+            const RenderResources::ColorTarget* color = RenderResources::ColorTargetOf(RenderResources::ColorTargetFor(info, state.pitch));
             if (color == nullptr) return false;
             out.source = color->resource;
             out.sourceWidth = color->width;
@@ -1167,7 +1224,7 @@ bool RenderCommands::PrepareResolve(ResolveCommand& out)
 
     if (colorClear)
     {
-        if (const RenderResources::ColorTarget* color = RenderResources::ColorTargetOf(RenderResources::ColorTargetFor(state.colorInfo[0], state.surfaceInfo)))
+        if (const RenderResources::ColorTarget* color = RenderResources::ColorTargetOf(RenderResources::ColorTargetFor(state.colorInfo[0], state.pitch)))
         {
             const uint32_t value = state.colorClearValue;
             out.colorClear = true;
@@ -1184,7 +1241,7 @@ bool RenderCommands::PrepareResolve(ResolveCommand& out)
     }
     if (depthClear)
     {
-        if (const RenderResources::DepthTarget* depth = RenderResources::DepthTargetOf(RenderResources::DepthTargetFor(state.depthInfo, state.surfaceInfo)))
+        if (const RenderResources::DepthTarget* depth = RenderResources::DepthTargetOf(RenderResources::DepthTargetFor(state.depthInfo, state.pitch)))
         {
             const uint32_t value = state.depthClearValue;
             out.depthClear = true;

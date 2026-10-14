@@ -18,6 +18,10 @@
 
 namespace Kernel
 {
+    // The multiplayer map whose archive was opened last (kernel_file.cpp),
+    // lower case: "poissons", "rouen"...
+    inline std::string& CurrentMap() { static std::string map; return map; }
+
     // One kernel import: the name the XEX records for it, and the host
     // function that stands in for it.
     struct Import
@@ -391,8 +395,29 @@ namespace Guest
     // they are the same bytes: here, three views of one section
     // (Initialize). Where a physical address is readable in this runtime's
     // flat memory.
+    // Graphics memory past 512 MB (gpu_address.cpp). The processor's
+    // addresses 0x50000000 to 0x6F000000 (above the virtual heap the title
+    // allocates from) are graphics memory too, seen by the GPU at 0x20000000
+    // to 0x3F000000: addresses the Xbox never had, which neither the 512 MB of
+    // physical memory nor its windows can mean.
+    inline constexpr uint32_t ExtendedCpuBase = 0x50000000, ExtendedCpuLimit = 0x6F000000;
+    inline constexpr uint32_t ExtendedShift = 0x30000000;   // processor address minus GPU address
+    inline constexpr bool IsExtendedCpu(uint32_t address) { return address >= ExtendedCpuBase && address < ExtendedCpuLimit; }
+    inline constexpr bool IsExtendedGpu(uint32_t address) { return address >= ExtendedCpuBase - ExtendedShift && address < ExtendedCpuLimit - ExtendedShift; }
+
+    // An address as the GPU sees it, from a processor's or a GPU's: what the
+    // console's `& 0x1FFFFFFF` did, now keeping the extended window.
+    inline constexpr uint32_t GpuOffset(uint32_t address)
+    {
+        if (IsExtendedCpu(address)) return address - ExtendedShift;
+        if (IsExtendedGpu(address)) return address;
+        return address & 0x1FFFFFFF;
+    }
+
     inline uint32_t PhysicalAlias(uint32_t physicalAddress)
     {
+        if (IsExtendedCpu(physicalAddress)) return physicalAddress;
+        if (IsExtendedGpu(physicalAddress)) return physicalAddress + ExtendedShift;
         return 0xA0000000u | (physicalAddress & 0x1FFFFFFF);
     }
 
@@ -400,6 +425,7 @@ namespace Guest
     // fence the driver puts at physical 0x100 and reads back there.
     inline void WritePhysical32(uint32_t physicalAddress, uint32_t value)
     {
+        if (IsExtendedCpu(physicalAddress) || IsExtendedGpu(physicalAddress)) { Write32(Base, PhysicalAlias(physicalAddress), value); return; }
         const uint32_t offset = physicalAddress & 0x1FFFFFFF;
         if (offset < 0x10000) Write32(Base, offset, value);
         Write32(Base, 0xA0000000u | offset, value);
@@ -426,6 +452,8 @@ namespace Guest
 
     // A block of physical memory, from the same pool the title is given.
     uint32_t AllocatePhysical(uint32_t size);
+    // Graphics memory in the extended window (0 when it is full).
+    uint32_t AllocateExtended(uint32_t size);
 
     // Where KeTimeStampBundle lives, for the clock thread to keep current.
     void SetTimeStampBundle(uint32_t address);

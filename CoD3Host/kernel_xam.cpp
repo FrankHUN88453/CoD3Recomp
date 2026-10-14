@@ -8,12 +8,14 @@
 // cancelled it immediately. Those answers are chosen to be the ones a title
 // handles as a normal case rather than an error.
 
+#include "debug_probe.h"
 #include "kernel.h"
 #include "log.h"
 #include "sampler.h"
 #include <atomic>
 #include <chrono>
 #include "input.h"
+#include "settings.h"
 
 #include <cstdio>
 #include <mutex>
@@ -39,8 +41,51 @@ namespace
     constexpr uint32_t X_ERROR_IO_PENDING         = 0x000003E5;
 
     constexpr uint32_t SignedInUser = 0;
-    constexpr uint64_t PlayerXuid = 0xE000000000000001ull;
-    constexpr char PlayerName[] = "Player";
+    // The bot experiment (debug.txt bot_pads): players 2 to 4 as controllers
+    // this runtime drives itself, signed in locally as "Bot 1" to "Bot 3".
+    bool IsBot(uint32_t userIndex)
+    {
+        return userIndex >= 1 && userIndex <= 3 && int(userIndex) <= DebugProbe::BotPads();
+    }
+    // Who the player is. On the console a profile; here this machine's
+    // Windows user. The XUID has to differ from one machine to the next:
+    // two players with one XUID are one player to the title, and the second
+    // to join a System Link game would be refused as already in it. An
+    // offline XUID (0xE000...) made from the computer's and the user's
+    // names stays the same on this machine from one run to the next.
+    uint64_t PlayerXuid()
+    {
+        static const uint64_t xuid = [] {
+            char computer[MAX_COMPUTERNAME_LENGTH + 1] = {};
+            DWORD computerLength = sizeof(computer);
+            GetComputerNameA(computer, &computerLength);
+            char user[257] = {};
+            DWORD userLength = sizeof(user);
+            GetUserNameA(user, &userLength);
+            uint64_t hash = 0xCBF29CE484222325ull;   // FNV-1a
+            for (const char* text : { static_cast<const char*>(computer), "/", static_cast<const char*>(user) })
+                for (const char* c = text; *c != 0; c++) { hash ^= uint8_t(*c); hash *= 0x100000001B3ull; }
+            return 0xE000000000000000ull | (hash & 0x0000FFFFFFFFFFFFull);
+        }();
+        return xuid;
+    }
+
+    // The gamertag: the settings menu's, or the Windows user name, in the
+    // characters a gamertag can have and no longer than one (15).
+    std::string PlayerName()
+    {
+        std::string name = Settings::Get().playerName;
+        if (name.empty())
+        {
+            char user[257] = {};
+            DWORD length = sizeof(user);
+            if (GetUserNameA(user, &length)) name = user;
+        }
+        std::string clean;
+        for (char c : name)
+            if (c >= 0x20 && c < 0x7F && clean.size() < 15) clean.push_back(c);
+        return clean.empty() ? std::string("Player") : clean;
+    }
 }
 
 // --- The signed in user ----------------------------------------------------
@@ -50,7 +95,7 @@ PPC_FUNC(__imp__XamUserGetSigninState)
 {
     Kernel::CountImport("XamUserGetSigninState");
     // 0 not signed in, 1 signed in locally, 2 signed in to Live.
-    ctx.r3.u32 = (ctx.r3.u32 == SignedInUser) ? 1 : 0;
+    ctx.r3.u32 = (ctx.r3.u32 == SignedInUser || IsBot(ctx.r3.u32)) ? 1 : 0;
 }
 
 // X_RESULT XamUserGetName(ULONG userIndex, char* buffer, ULONG length)
@@ -61,15 +106,16 @@ PPC_FUNC(__imp__XamUserGetName)
     const uint32_t buffer = ctx.r4.u32;
     const uint32_t length = ctx.r5.u32;
 
-    if (userIndex != SignedInUser || buffer == 0 || length == 0)
+    if ((userIndex != SignedInUser && !IsBot(userIndex)) || buffer == 0 || length == 0)
     {
         ctx.r3.u32 = X_ERROR_NO_SUCH_USER;
         return;
     }
 
-    const uint32_t copy = length < sizeof(PlayerName) ? length : uint32_t(sizeof(PlayerName));
-    memcpy(Guest::Ptr(buffer), PlayerName, copy);
-    *(Guest::Ptr(buffer) + copy - 1) = '\0';
+    const std::string name = IsBot(userIndex) ? "Bot " + std::to_string(userIndex) : PlayerName();
+    const uint32_t copy = std::min<uint32_t>(length - 1, uint32_t(name.size()));
+    memcpy(Guest::Ptr(buffer), name.data(), copy);
+    *(Guest::Ptr(buffer) + copy) = '\0';
     ctx.r3.u32 = X_ERROR_SUCCESS;
 }
 
@@ -84,12 +130,12 @@ PPC_FUNC(__imp__XamUserGetXUID)
             ctx.r3.u32, ctx.r4.u32, uint32_t(ctx.lr));
         fflush(stdout);
     }
-    if (ctx.r3.u32 != SignedInUser || ctx.r5.u32 == 0)
+    if ((ctx.r3.u32 != SignedInUser && !IsBot(ctx.r3.u32)) || ctx.r5.u32 == 0)
     {
         ctx.r3.u32 = X_ERROR_NO_SUCH_USER;
         return;
     }
-    Guest::Write64(base, ctx.r5.u32, PlayerXuid);
+    Guest::Write64(base, ctx.r5.u32, PlayerXuid() + (IsBot(ctx.r3.u32) ? ctx.r3.u32 * 0x1000 : 0));
     ctx.r3.u32 = X_ERROR_SUCCESS;
 }
 
@@ -202,6 +248,24 @@ PPC_FUNC(__imp__XamInputGetState)
         }
     }
 
+    if (IsBot(ctx.r3.u32))
+    {
+        if (ctx.r5.u32 != 0)
+        {
+            static uint32_t packet = 0;
+            int16_t lx, ly, rx, ry;
+            DebugProbe::BotSticks(lx, ly, rx, ry);
+            memset(Guest::Ptr(ctx.r5.u32), 0, 16);
+            Guest::Write32(base, ctx.r5.u32 + 0, ++packet);
+            Guest::Write16(base, ctx.r5.u32 + 4, DebugProbe::BotButtons());
+            Guest::Write16(base, ctx.r5.u32 + 8, uint16_t(lx));
+            Guest::Write16(base, ctx.r5.u32 + 10, uint16_t(ly));
+            Guest::Write16(base, ctx.r5.u32 + 12, uint16_t(rx));
+            Guest::Write16(base, ctx.r5.u32 + 14, uint16_t(ry));
+        }
+        ctx.r3.u32 = X_ERROR_SUCCESS;
+        return;
+    }
     if (ctx.r3.u32 != SignedInUser)
     {
         if (ctx.r5.u32 != 0) memset(Guest::Ptr(ctx.r5.u32), 0, 16);
@@ -267,7 +331,7 @@ PPC_FUNC(__imp__XamInputGetCapabilities)
 {
     Kernel::CountImport("XamInputGetCapabilities");
 
-    if (ctx.r3.u32 != SignedInUser)
+    if (ctx.r3.u32 != SignedInUser && !IsBot(ctx.r3.u32))
     {
         if (ctx.r5.u32 != 0) memset(Guest::Ptr(ctx.r5.u32), 0, 20);
         ctx.r3.u32 = X_ERROR_DEVICE_NOT_CONNECTED;
@@ -292,8 +356,16 @@ PPC_FUNC(__imp__XamInputGetCapabilities)
 PPC_FUNC(__imp__XamInputSetState)
 {
     Kernel::CountImport("XamInputSetState");
-    ctx.r3.u32 = (ctx.r3.u32 == SignedInUser)
-        ? X_ERROR_SUCCESS : X_ERROR_DEVICE_NOT_CONNECTED;
+    if (ctx.r3.u32 != SignedInUser)
+    {
+        ctx.r3.u32 = X_ERROR_DEVICE_NOT_CONNECTED;
+        return;
+    }
+    // XINPUT_VIBRATION: the left (low frequency) motor's speed, then the
+    // right's, big endian. Passed on to the real pad.
+    if (ctx.r5.u32 != 0)
+        Input::SetRumble(Guest::Read16(base, ctx.r5.u32 + 0), Guest::Read16(base, ctx.r5.u32 + 2));
+    ctx.r3.u32 = X_ERROR_SUCCESS;
 }
 
 // --- Notifications ---------------------------------------------------------
@@ -332,6 +404,19 @@ PPC_FUNC(__imp__XamNotifyCreateListener)
 PPC_FUNC(__imp__XNotifyGetNext)
 {
     Kernel::CountImport("XNotifyGetNext");
+    // The bot experiment: players signed in or out tell the title so.
+    {
+        static int bots = 0;
+        const int now = DebugProbe::BotPads();
+        if (now != bots)
+        {
+            bots = now;
+            uint32_t mask = 1u << SignedInUser;
+            for (int i = 1; i <= now; i++) mask |= 1u << i;
+            std::lock_guard<std::mutex> lock(g_notifyMutex);
+            g_notifications.push_back({ XN_SYS_SIGNINCHANGED, mask });
+        }
+    }
     const uint32_t wanted = ctx.r4.u32;
     Notification next{ 0, 0 };
     bool found = false;
@@ -671,7 +756,7 @@ PPC_FUNC(__imp__XamContentGetCreator)
 {
     Kernel::CountImport("XamContentGetCreator");
     if (ctx.r5.u32 != 0) Guest::Write32(base, ctx.r5.u32, 1);
-    if (ctx.r6.u32 != 0) Guest::Write64(base, ctx.r6.u32, PlayerXuid);
+    if (ctx.r6.u32 != 0) Guest::Write64(base, ctx.r6.u32, PlayerXuid());
     ctx.r3.u32 = CompleteOverlapped(ctx, base, ctx.r7.u32, X_ERROR_SUCCESS);
 }
 
@@ -785,6 +870,26 @@ namespace
 
     // This executable again, with the launch data in a file and the scripted
     // run's knobs left out (the relaunched title goes where its data says).
+    // Starts another program from this one's folder, with this process's
+    // environment and none of its arguments.
+    bool StartSibling(const wchar_t* name)
+    {
+        wchar_t executable[MAX_PATH] = {};
+        GetModuleFileNameW(nullptr, executable, MAX_PATH);
+        const std::filesystem::path other = std::filesystem::path(executable).parent_path() / name;
+        std::wstring commandLine = L"\"" + other.wstring() + L"\"";
+        STARTUPINFOW startup{};
+        startup.cb = sizeof(startup);
+        PROCESS_INFORMATION process{};
+        const std::wstring folder = other.parent_path().wstring();
+        if (!CreateProcessW(other.c_str(), commandLine.data(), nullptr, nullptr, FALSE, CREATE_NEW_CONSOLE,
+                            nullptr, folder.c_str(), &startup, &process))
+            return false;
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+        return true;
+    }
+
     bool Relaunch()
     {
         std::filesystem::path file = Kernel::SavesRoot();
@@ -889,10 +994,36 @@ PPC_FUNC(__imp__XamLoaderLaunchTitle)
     }
     printf(", flags 0x%08X, from 0x%08X.\n", ctx.r4.u32, uint32_t(ctx.lr));
 
-    // Itself: the next mission. Started again, and this process ends.
     std::string lower(path);
     for (char& c : lower) c = char(tolower(static_cast<unsigned char>(c)));
-    if (lower.size() >= 11 && lower.compare(lower.size() - 11, 11, "default.xex") == 0)
+    const auto endsWith = [&](const char* tail) {
+        const size_t n = strlen(tail);
+        return lower.size() >= n && lower.compare(lower.size() - n, n, tail) == 0;
+    };
+
+    // The other executable: the single player menu's "Multiplayer" asks for
+    // codmp_xenonf.xex, and multiplayer's way back asks for default.xex.
+    // Each is a program of its own here, beside this one.
+#ifdef COD3_MP
+    const wchar_t* const sibling = endsWith("default.xex") ? L"CoD3.exe" : nullptr;
+#else
+    const wchar_t* const sibling = endsWith("codmp_xenonf.xex") ? L"CoD3MP.exe" : nullptr;
+#endif
+    if (sibling != nullptr)
+    {
+        if (StartSibling(sibling))
+        {
+            printf("Started %ls; this process ends.\n", sibling);
+            fflush(stdout);
+            Log::Finish();
+            ExitProcess(0);
+        }
+        printf("Could not start %ls beside this program (error %lu).\n", sibling, GetLastError());
+    }
+
+#ifndef COD3_MP
+    // Itself: the next mission. Started again, and this process ends.
+    if (endsWith("default.xex"))
     {
         if (Relaunch())
         {
@@ -903,6 +1034,7 @@ PPC_FUNC(__imp__XamLoaderLaunchTitle)
         }
         printf("The relaunch failed (error %lu).\n", GetLastError());
     }
+#endif
     {
         uint32_t functions[12] = {};
         const int count = Sampler::FunctionsOnStack(functions, 12);
@@ -936,6 +1068,20 @@ PPC_FUNC(__imp__XamLoaderTerminateTitle)
 PPC_FUNC(__imp__XMsgInProcessCall)
 {
     Kernel::CountImport("XMsgInProcessCall");
+    const uint32_t app = ctx.r3.u32, message = ctx.r4.u32, buffer = ctx.r5.u32;
+
+    // The music player (app 0xFA). The multiplayer front end asks for its
+    // status every frame, to know whether the player has music of their own
+    // playing over the game's: XMPGetStatus, { client, DWORD* state }. It is
+    // idle (0): there is no music player here.
+    if (app == 0xFA && message == 0x00070009 && buffer != 0)
+    {
+        const uint32_t state = Guest::Read32(base, buffer + 4);
+        if (state != 0) Guest::Write32(base, state, 0);
+        ctx.r3.u32 = X_ERROR_SUCCESS;
+        return;
+    }
+
     static std::atomic<int> announced{ 0 };
     if (announced.fetch_add(1) < 20)
     {
