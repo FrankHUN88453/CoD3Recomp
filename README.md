@@ -17,19 +17,19 @@ You need your **own** Xbox 360 disc image of Call of Duty 3. No game files are i
 
 ## What this fork adds since 0.4.0
 
-**Multiplayer (0.4.1 â€“ 0.4.10)**
+**Multiplayer (0.4.1 - 0.4.10)**
 - Multiplayer runs: System Link between PCs (LAN or Tailscale), the F11 settings menu for addresses and options
 - DLC maps and bots (experimental), custom rules for everyone
 - **Domination**, the cut game mode, restored
 - Custom classes, loadout extras, aiming and ability tweaks, graphics options and movement fixes
 
-**Campaign weapons in multiplayer (0.5.0 â€“ 0.5.56)**
+**Campaign weapons in multiplayer (0.5.0 - 0.5.56)**
 - The campaign's Lee-Enfield, Sten, FG42 (and scoped FG42), Bren and Mills bomb usable in multiplayer,
   with their models, arms, reload timing, gunshots, reload sounds and pick-up icons
 - Memory past 512 MB (big memory), so Poissons and other big maps load whole with the campaign guns
 - Pick up and swap the gun in your hands; dying drops the gun you are holding; aim in the air
 
-**Console, binoculars and killstreaks (0.5.57 â€“ 0.5.84)**
+**Console, binoculars and killstreaks (0.5.57 - 0.5.84)**
 - The developer console works in multiplayer (`devmap`, `god`, `noclip`, `setviewpos`, ...)
 - Binoculars for every class (d-pad up / down, light zoom)
 - **Killstreaks**: UAV (enemies on the compass), artillery barrage, and the **Typhoon strafing run**
@@ -37,15 +37,15 @@ You need your **own** Xbox 360 disc image of Call of Duty 3. No game files are i
   strikes are marked with the spotter's binoculars. Players who join get their artillery/Typhoon armed too.
 - `streak_give uav|artillery|typhoon` for testing
 
-**Vehicles and the Kangaroo APC (0.5.59 â€“ 0.5.86)**
+**Vehicles and the Kangaroo APC (0.5.59 - 0.5.86)**
 - `spawnvehicle`, vehicles on any map (`vehicles_everywhere`), saved vehicle spots (`vehicle_mark`, `vehicle_clear`, `vehicle_list`)
 - The campaign's **Kangaroo APC** brought into multiplayer as its own vehicle: drivable, mountable gun,
   six passenger seats, its own driving curve, wheels, suspension and treads drawn
 
 **Menus and textures**
-- Texture replacement packs; the menu art, banners, fonts, controller diagrams and HUD icons upscaled 4Ã—
+- Texture replacement packs; the menu art, banners, fonts, controller diagrams and HUD icons upscaled 4x
 
-## Recent work (0.5.87–0.5.183)
+## Recent work (0.5.87 – 0.5.183)
 
 - Kangaroo entry/exit improvements, native controller sensitivity up to 200%,
   persistent audio/controller settings, and menu input fixes.
