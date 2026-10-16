@@ -1,4 +1,6 @@
 #include "input.h"
+#include "sprint_input.h"
+#include "weapon_cycle_input.h"
 #include "kernel.h"
 #include "window.h"
 #include "overlay.h"
@@ -18,6 +20,11 @@
 
 namespace
 {
+    std::atomic<bool> g_scopedBreath{true};
+    std::atomic<bool> g_tacticalPointActive{false}, g_tacticalPointCanReturn{false}, g_tacticalPointSaveHeld{false};
+    std::atomic<bool> g_tacticalPointReturnHeld{false};
+    std::atomic<bool> g_weaponCycleEnabled{false};
+    WeaponCycleInput::Latch g_weaponCycle;
     // The Xbox button masks, which are also the XInput ones.
     constexpr uint16_t PadUp        = 0x0001;
     constexpr uint16_t PadDown      = 0x0002;
@@ -171,10 +178,12 @@ namespace
     // clicking in the window and given back with Escape, because a window that
     // swallows the pointer without asking cannot be left.
     std::atomic<bool> g_mouseHeld{ false };
+    std::atomic<bool> g_captureSuspended{ false };
     POINT g_centre{};
 
     void SetHold(bool hold)
     {
+        if (hold && g_captureSuspended.load()) return;
         if (g_mouseHeld.load() == hold) return;
 
         const HWND window = static_cast<HWND>(Window::Handle());
@@ -244,7 +253,7 @@ namespace
         // moment the window takes the mouse back.
         long rawX = 0, rawY = 0;
         raw = Window::TakeRawMouse(rawX, rawY) && Settings::Get().rawMouse;
-        if (!g_mouseHeld.load()) return false;
+        if (g_captureSuspended.load() || !g_mouseHeld.load()) return false;
         if (raw)
         {
             dx = rawX;
@@ -523,7 +532,7 @@ namespace
             return text != nullptr && text[0] != 0 && text[0] != '0';
         }();
         if (ignored) return pad;
-        if (!Window::HasFocus() || Overlay::IsOpen())
+        if (!Window::HasFocus() || Overlay::IsOpen() || g_captureSuspended.load())
         {
             // Out of focus, or the settings menu is up and the keys and the
             // mouse are its.
@@ -552,7 +561,11 @@ namespace
             static bool takenForLevel = false;
             if (!inLevel) takenForLevel = false;
             const bool firstTime = inLevel && !takenForLevel;
-            if (Down(VK_F1) || Down(VK_MBUTTON) || firstTime || (inLevel && Down(VK_LBUTTON) && !escapeDown))
+            POINT pointer{}; RECT client{};
+            const HWND captureWindow=static_cast<HWND>(Window::Handle());
+            const bool inClient=captureWindow && GetCursorPos(&pointer) &&
+                ScreenToClient(captureWindow,&pointer) && GetClientRect(captureWindow,&client) && PtInRect(&client,pointer);
+            if (Down(VK_F1) || (inClient && Down(VK_MBUTTON)) || firstTime || (inLevel && inClient && Down(VK_LBUTTON) && !escapeDown))
             {
                 SetHold(true);
                 if (inLevel) takenForLevel = true;
@@ -724,6 +737,25 @@ namespace
             else g_lastPadSeen = {};
         }
 
+#ifdef COD3_MP
+        // Use real held buttons before SprintInput removes stationary L3.
+        // Moving/aiming leaves both original controls available.
+        {
+            const bool stationary=std::abs(int(pad.thumbLX))<8000 && std::abs(int(pad.thumbLY))<8000;
+            const bool ready=stationary && pad.leftTrigger<=30;
+            const bool save=ready && (fromPad&PadLeftThumb)!=0;
+            // 0.5.181: Justin: the return is held X on the controller now
+            // (was R3), from anywhere, moving or not. X still reaches the
+            // game (reload/use on the press); only a 2-second hold returns.
+            const bool back=(fromPad&PadX)!=0;
+            g_tacticalPointSaveHeld.store(save);
+            g_tacticalPointReturnHeld.store(back);
+            if(g_tacticalPointActive.load()) {
+                if(save) pad.buttons&=uint16_t(~PadLeftThumb);
+            }
+        }
+#endif
+
         // Tap to sprint (a PC addition, as later games of the series have it).
         // The title runs only while the left stick is held in, so a press
         // of sprint, from the pad or the keyboard, keeps it held for the
@@ -731,20 +763,18 @@ namespace
         // longer forward, aiming down the sights or firing, or sprint
         // pressed again.
         {
-            static bool running = false, wasDown = false;
-            const bool down = (pad.buttons & PadLeftThumb) != 0;
-            if (Settings::Get().toggleSprint)
-            {
-                if (down && !wasDown) running = !running;
-                if (pad.thumbLY < 8000 || pad.leftTrigger > 30 || pad.rightTrigger > 30) running = false;
-                if (running) pad.buttons |= PadLeftThumb;
-                else pad.buttons &= uint16_t(~PadLeftThumb);
-            }
-            else running = false;
-            wasDown = down;
+            static SprintInput::State sprint;
+#ifdef COD3_MP
+            const bool scopedBreath=g_scopedBreath.load();
+#else
+            const bool scopedBreath=false; // campaign uses separate binocular/breath bindings
+#endif
+            pad.buttons=SprintInput::Filter(sprint,pad.buttons,pad.thumbLY,pad.leftTrigger,
+                                            pad.rightTrigger,Settings::Get().toggleSprint,scopedBreath);
         }
-
-        g_sprinting.store((pad.buttons & PadLeftThumb) != 0 || std::abs(int(pad.thumbLY)) > 20000 || std::abs(int(pad.thumbLX)) > 20000);
+        // Forward walking while ADS remains walking, not a sprint report.
+        g_sprinting.store(pad.leftTrigger<=30 && ((pad.buttons & PadLeftThumb)!=0 ||
+                          std::abs(int(pad.thumbLY))>20000 || std::abs(int(pad.thumbLX))>20000));
         // Presses of Start and the d-pad's up and down, counted as they
         // happen here (every few milliseconds): the game's frame, where the
         // binoculars look (mp_fixes.cpp), comes only twenty times a second,
@@ -752,6 +782,15 @@ namespace
         {
             static uint16_t was = 0;
             const uint16_t now = pad.buttons;
+            WeaponCycleInput::Observe(g_weaponCycle,now);
+#ifdef COD3_MP
+            // Observe the shared input for the reported Y / wheel failure.
+            if ((now & PadY) && !(was & PadY))
+            {
+                printf("input: weapon-cycle Y press (%s)\n", (fromPad & PadY) ? "controller" : "keyboard/wheel");
+                fflush(stdout);
+            }
+#endif
             if ((now & PadStart) && !(was & PadStart)) g_startPresses.fetch_add(1);
             if ((now & PadUp) && !(was & PadUp)) g_upPresses.fetch_add(1);
             if ((now & PadDown) && !(was & PadDown)) g_downPresses.fetch_add(1);
@@ -830,6 +869,12 @@ bool Input::MouseHeld()
     return g_mouseHeld.load();
 }
 
+void Input::SuspendMouseCapture(bool suspended)
+{
+    g_captureSuspended.store(suspended);
+    if (suspended) SetHold(false);
+}
+
 uint32_t Input::PacketNumber()
 {
     Refresh();
@@ -898,3 +943,26 @@ void Input::LookByStick()
     std::lock_guard<std::mutex> lock(g_lookMutex);
     g_lookX = g_lookY = 0;
 }
+
+void Input::SetScopedBreath(bool enabled)
+{
+    g_scopedBreath.store(enabled);
+    printf("input: scoped L3 native hold-breath %s\n",enabled?"on":"off");
+    fflush(stdout);
+}
+
+unsigned Input::TakeWeaponCyclePresses()
+{
+    Refresh();
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return WeaponCycleInput::Drain(g_weaponCycle);
+}
+void Input::SetWeaponCycleEnabled(bool enabled) { g_weaponCycleEnabled.store(enabled); }
+uint16_t Input::NativeButtons(uint16_t buttons,bool paused)
+{
+    return WeaponCycleInput::Report(buttons,g_weaponCycleEnabled.load(),paused);
+}
+
+void Input::SetTacticalPointInput(bool active,bool canReturn) {g_tacticalPointActive.store(active);g_tacticalPointCanReturn.store(canReturn);}
+bool Input::TacticalPointSaveHeld() {Refresh();return g_tacticalPointSaveHeld.load();}
+bool Input::TacticalPointReturnHeld() {Refresh();return g_tacticalPointReturnHeld.load();}

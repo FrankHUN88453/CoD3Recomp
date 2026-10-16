@@ -61,3 +61,11 @@ recomp_*.log
 CoD3-PC-Port-*/
 CoD3-for-friend/
 *.zip
+
+# Local diagnostics and packaged data
+docs/build-logs/
+*.dmp
+*.7z
+*.rar
+*.obj
+*.lib

@@ -2,6 +2,7 @@
 // Finds the addresses XenonRecomp's TOML requires and reports image layout.
 #define NOMINMAX
 #include <cstdio>
+#include <cctype>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -63,6 +64,55 @@ int main(int argc, char** argv)
     fmt::println("File: {} ({} bytes on disk)", argv[1], file.size());
 
     auto image = Image::ParseImage(file.data(), file.size());
+    if (argc >= 4 && strcmp(argv[2], "--words") == 0)
+    {
+        const size_t address = strtoull(argv[3], nullptr, 0);
+        const size_t count = argc >= 5 ? std::min<size_t>(strtoull(argv[4], nullptr, 0), 4096) : 16;
+        for (size_t i = 0; i < count; ++i)
+        {
+            const void* p = image.Find(address + i * 4);
+            if (!p) break;
+            fmt::println("0x{:08X}: {:08X}", address + i * 4, ByteSwap(*static_cast<const uint32_t*>(p)));
+        }
+        return 0;
+    }
+    if (argc >= 4 && strcmp(argv[2], "--datafind") == 0)
+    {
+        const std::string hex = argv[3];
+        std::vector<uint8_t> pattern;
+        for (size_t i = 0; i + 1 < hex.size(); i += 2)
+            pattern.push_back(uint8_t(strtoul(hex.substr(i, 2).c_str(), nullptr, 16)));
+        if (pattern.empty()) return 1;
+        for (const auto& section : image.sections)
+            if (section.name == ".rdata" && section.data)
+                for (size_t hit : FindAll(section, pattern)) fmt::println("0x{:08X}", hit);
+        return 0;
+    }
+    // Read-only string inspection; never disassemble arbitrary data as code.
+    if (argc >= 4 && strcmp(argv[2], "--ascii") == 0)
+    {
+        std::string wanted = argv[3];
+        std::transform(wanted.begin(), wanted.end(), wanted.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+        for (const auto& s : image.sections)
+        {
+            if (s.name != ".rdata" || !s.data) continue;
+            for (size_t start = 0; start < s.size; )
+            {
+                size_t end = start;
+                while (end < s.size && s.data[end] >= 32 && s.data[end] < 127) end++;
+                if (end - start >= wanted.size())
+                {
+                    std::string value(reinterpret_cast<const char*>(s.data + start), end - start);
+                    std::string lower = value;
+                    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+                    if (lower.find(wanted) != std::string::npos)
+                        fmt::println("0x{:08X}: {}", s.base + start, value);
+                }
+                start = end + 1;
+            }
+        }
+        return 0;
+    }
 
     fmt::println("");
     fmt::println("=== IMAGE ===");

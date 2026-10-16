@@ -17,6 +17,7 @@
 // is the largest single piece of work left in this project.
 
 #include "kernel.h"
+#include "input.h"
 #include "sampler.h"
 #include "audio_out.h"
 #include "scheduler.h"
@@ -44,10 +45,20 @@
 
 #ifdef COD3_MP
 void MpFixesAskVehicle(const std::string& kind);   // mp_fixes.cpp
-void BotsAsk(int count);                           // bots.cpp
+void BotsAsk(int count);
+void BotsTactics(int enabled);
+void BotsCamera(int enabled);
+void BotsSetup(int bits);                           // bots.cpp
+void BotsRemote(int enabled);                       // bots.cpp (0.5.135)
+void BotsLocal(int enabled);                        // bots.cpp (0.5.137)
 void MpFixesVehiclesEverywhere(bool on);           // mp_fixes.cpp
 void MpFixesKangaroo(bool on);                     // mp_fixes.cpp
-void MpFixesKangarooType(int type);                // mp_fixes.cpp
+void MpFixesKangarooType(int type);
+void MpFixesKangarooTread(int mode);                // mp_fixes.cpp
+void MpFixesKangarooEntry(int enabled);
+void MpFixesKangarooExit(int mode);
+void MpFixesKangarooDrop(float amount);
+void MpFixesKangarooBuild(int mode);                // mp_fixes.cpp (0.5.99)
 void MpFixesVehicleOrder(int what, const std::string& kind);   // mp_fixes.cpp
 void MpFixesGiveStreak(const std::string& kind);   // mp_fixes.cpp
 #endif
@@ -1005,6 +1016,38 @@ namespace
                     // kangaroo 0/1: the Kangaroo APC set up on the maps after
                     // (mp_fixes.cpp).
                     // kangaroo_type 1/2: the Kangaroo driven as four wheel or tank.
+                    // kangaroo_tread 0-6 (0.5.88): how the Kangaroo's right tread
+                    // is moved while it drives, for finding the right way.
+                    if (command.compare(0, 15, "kangaroo_tread ") == 0)
+                    {
+                        MpFixesKangarooTread(atoi(command.c_str() + 15));
+                        continue;
+                    }
+                    // kangaroo_build 0/1/2 (0.5.99): how the Kangaroo is made at
+                    // the map's start: 1 (the default) made a Kangaroo from the
+                    // start (its model, kind and the tanks' physics before its
+                    // physics is set up), 2 the same with the Horch's physics,
+                    // 0 the Horch made over afterwards as before.
+                    if (command.compare(0, 14, "kangaroo_drop ") == 0)
+                    {
+                        MpFixesKangarooDrop(float(atof(command.c_str() + 14)));
+                        continue;
+                    }
+                    if (command.compare(0, 14, "kangaroo_exit ") == 0)
+                    {
+                        MpFixesKangarooExit(atoi(command.c_str() + 14));
+                        continue;
+                    }
+                    if (command.compare(0, 15, "kangaroo_entry ") == 0)
+                    {
+                        MpFixesKangarooEntry(atoi(command.c_str() + 15));
+                        continue;
+                    }
+                    if (command.compare(0, 15, "kangaroo_build ") == 0)
+                    {
+                        MpFixesKangarooBuild(atoi(command.c_str() + 15));
+                        continue;
+                    }
                     if (command.compare(0, 14, "kangaroo_type ") == 0)
                     {
                         MpFixesKangarooType(atoi(command.c_str() + 14));
@@ -1052,6 +1095,38 @@ namespace
                         MpFixesGiveStreak(kind);
                         printf("video: streak_give %s asked for\n", kind.c_str());
                         fflush(stdout);
+                        continue;
+                    }
+                    if (command.compare(0, 13, "scope_breath ") == 0)
+                    {
+                        Input::SetScopedBreath(atoi(command.c_str() + 13) != 0);
+                        continue;
+                    }
+                    if (command.compare(0, 12, "bot_tactics ") == 0)
+                    {
+                        BotsTactics(atoi(command.c_str() + 12));
+                        continue;
+                    }
+                    if (command.compare(0, 11, "bot_camera ") == 0)
+                    {
+                        BotsCamera(atoi(command.c_str() + 11));
+                        continue;
+                    }
+                    // bot_setup <bits> (0.5.92): 1 the bots' kit left out, 2 their side switch.
+                    // bot_remote 0/1 (0.5.135): new bots get their own machine object.
+                    if (command.compare(0, 10, "bot_local ") == 0)
+                    {
+                        BotsLocal(atoi(command.c_str() + 10));
+                        continue;
+                    }
+                    if (command.compare(0, 11, "bot_remote ") == 0)
+                    {
+                        BotsRemote(atoi(command.c_str() + 11));
+                        continue;
+                    }
+                    if (command.compare(0, 10, "bot_setup ") == 0)
+                    {
+                        BotsSetup(atoi(command.c_str() + 10));
                         continue;
                     }
                     // bot_add <n>: bots on the host until there are n (bots.cpp).

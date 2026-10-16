@@ -29,6 +29,10 @@ namespace Input
     };
 
     Pad State();
+    // Experimental stationary L3 save/R3 return, sampled before sprint filtering.
+    void SetTacticalPointInput(bool active, bool canReturn);
+    bool TacticalPointSaveHeld();
+    bool TacticalPointReturnHeld();
 
     // The Xbox button mask the pad is currently reporting.
     uint16_t Buttons();
@@ -36,6 +40,9 @@ namespace Input
     // Whether the mouse is being held by the window and turned into the right
     // stick. Clicking in the window takes it; Escape gives it back.
     bool MouseHeld();
+    // Window management temporarily owns the pointer; no clip/recenter or
+    // automatic capture until the move, resize or mode change has finished.
+    void SuspendMouseCapture(bool suspended);
 
     // Changes only when the buttons do. Titles use it to tell a held button
     // from a new press without comparing states themselves.
@@ -73,8 +80,16 @@ namespace Input
     void TakePresses(int& start, int& up, int& down);
     // Presses of d-pad right since the last call (the killstreaks' call, 0.5.82).
     int TakeRightPresses();
+    // MP gameplay consumes each Y/wheel edge once through the native weapon
+    // command; native menu/vehicle Y remains available when the bridge is off.
+    unsigned TakeWeaponCyclePresses();
+    void SetWeaponCycleEnabled(bool enabled);
+    uint16_t NativeButtons(uint16_t buttons,bool paused);
+
 
     // Whether the player is running: the left stick (or the keys) pushed most
     // of the way, or sprint held (the tap-to-sprint's hold too).
     bool Running();
+    // Multiplayer scoped L3: native hold breath, never a latched sprint.
+    void SetScopedBreath(bool enabled);
 }

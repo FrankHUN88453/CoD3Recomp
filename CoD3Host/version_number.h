@@ -1,1 +1,1 @@
-#define COD3_VERSION "0.5.86"
+#define COD3_VERSION "0.5.183"

@@ -10,9 +10,12 @@
 #include "version.h"
 #include "kernel.h"
 #include "window.h"
+#include "log.h"
 #include "overlay.h"
 #include "settings.h"
 #include "render.h"
+#include "input.h"
+#include "window_geometry.h"
 
 #include <atomic>
 #include <chrono>
@@ -58,11 +61,27 @@ namespace
         Render::SetWindow(window, client.right - client.left, client.bottom - client.top);
     }
 
+    void KeepVisible(HWND window)
+    {
+        if (g_borderless || IsIconic(window) || IsZoomed(window)) return;
+        MONITORINFO monitor{sizeof(monitor)}; RECT frame{};
+        if (!GetWindowRect(window,&frame) ||
+            !GetMonitorInfoW(MonitorFromWindow(window,MONITOR_DEFAULTTONEAREST),&monitor)) return;
+        const auto fit=WindowGeometry::Fit({int(frame.left),int(frame.top),int(frame.right),int(frame.bottom)},
+            {int(monitor.rcWork.left),int(monitor.rcWork.top),int(monitor.rcWork.right),int(monitor.rcWork.bottom)});
+        if (fit.left==frame.left && fit.top==frame.top && fit.right==frame.right && fit.bottom==frame.bottom) return;
+        SetWindowPos(window,nullptr,fit.left,fit.top,fit.right-fit.left,fit.bottom-fit.top,
+            SWP_NOZORDER|SWP_NOOWNERZORDER|SWP_NOACTIVATE);
+        printf("window: kept window visible at %d,%d %dx%d\n",fit.left,fit.top,fit.right-fit.left,fit.bottom-fit.top);
+        fflush(stdout);
+    }
+
     // The window over the whole of its monitor with no frame, or back to
     // the plain one where it was.
     void SetBorderless(HWND window, bool borderless)
     {
         if (borderless == g_borderless) return;
+        Input::SuspendMouseCapture(true);
         g_borderless = borderless;
         if (borderless)
         {
@@ -80,12 +99,30 @@ namespace
             SetWindowLongPtrW(window, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
             SetWindowPlacement(window, &g_placement);
             SetWindowPos(window, nullptr, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER);
+            KeepVisible(window);
         }
         ReportSize(window);
+        Input::SuspendMouseCapture(false);
     }
 
     LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM w, LPARAM l)
     {
+        // Recentring a captured pointer while Windows drags a border/title bar
+        // pulls the window toward the old centre. Let Windows own that input.
+        if (message==WM_ENTERSIZEMOVE) Input::SuspendMouseCapture(true);
+        if (message==WM_EXITSIZEMOVE)
+        {
+            KeepVisible(window);
+            Input::SuspendMouseCapture(false);
+        }
+        if (message==WM_NCLBUTTONDOWN || message==WM_NCLBUTTONDBLCLK || message==WM_NCRBUTTONDOWN)
+        {
+            Input::SuspendMouseCapture(true);
+            const LRESULT result=DefWindowProcW(window,message,w,l);
+            KeepVisible(window);
+            Input::SuspendMouseCapture(false);
+            return result;
+        }
         // Alt+Enter: the other window mode, through the settings so it sticks.
         if (message == WM_SYSKEYDOWN && w == VK_RETURN && (l & (1 << 29)) != 0)
         {
@@ -108,7 +145,17 @@ namespace
             if (w != SIZE_MINIMIZED) ReportSize(window);
             return 0;
         }
-        if (message == WM_CLOSE || message == WM_DESTROY)
+        // 0.5.105: the guest's main/audio threads do not stop when only
+        // the window message loop ends. Finish the log and exit as the
+        // campaign/multiplayer handoff does, without Kernel::Exit's prompt.
+        if (message == WM_CLOSE)
+        {
+            printf("window: close requested; ending the game process\n");
+            Log::Finish();
+            ExitProcess(0);
+            return 0;
+        }
+        if (message == WM_DESTROY)
         {
             g_running.store(false);
             PostQuitMessage(0);
@@ -270,8 +317,10 @@ namespace
                     if (frameWidth > workWidth) frameWidth = workWidth;
                     if (frameHeight > workHeight) frameHeight = workHeight;
                     const int x = monitor.rcWork.left + (workWidth - frameWidth) / 2, y = monitor.rcWork.top + (workHeight - frameHeight) / 2;
+                    Input::SuspendMouseCapture(true);
                     SetWindowPos(window, nullptr, x, y, frameWidth, frameHeight, SWP_NOZORDER | SWP_NOOWNERZORDER);
                     ReportSize(window);
+                    Input::SuspendMouseCapture(false);
                 }
             }
 

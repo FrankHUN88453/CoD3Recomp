@@ -100,6 +100,9 @@ namespace Settings
         char lanAddress[16] = {};
         char systemLinkPeers[128] = {}; // addresses System Link searches also go to, one by one (for Tailscale, or past a router)     // the IPv4 address System Link gives out; empty chooses (a Hamachi or other virtual LAN's first)     // the gamertag others see in multiplayer; empty is the Windows user name
         int masterVolume = 70;        // per cent, the whole game's sound, 0 .. 100
+        int nativeVolume = 50;        // native game Options, remembered independently of F11
+        int controllerHorizontal = 100; // native percentage: 100 = level10, 150 = level15
+        int controllerVertical = 100;
         bool rumble = true;           // the title's vibration sent to the pad
         int stickDeadzone = 15;       // per cent of a stick's travel ignored around its centre, 0 .. 50
         float mouseSensitivity = 1.0f;   // both axes, 0.1 .. 3

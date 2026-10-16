@@ -124,7 +124,6 @@ void Settings::Set(const Values& values)
     }
     Save();
 }
-
 void Settings::Load(const std::filesystem::path& exeDirectory)
 {
     g_file = exeDirectory / "CoD3Recomp.ini";
@@ -230,6 +229,9 @@ void Settings::Load(const std::filesystem::path& exeDirectory)
             else if (key == "lan_address") { strncpy(v.lanAddress, value.c_str(), sizeof(v.lanAddress) - 1); v.lanAddress[sizeof(v.lanAddress) - 1] = 0; }
             else if (key == "system_link_peers") { strncpy(v.systemLinkPeers, value.c_str(), sizeof(v.systemLinkPeers) - 1); v.systemLinkPeers[sizeof(v.systemLinkPeers) - 1] = 0; }
             else if (key == "master_volume") v.masterVolume = atoi(value.c_str());
+            else if (key == "native_volume") v.nativeVolume = atoi(value.c_str());
+            else if (key == "controller_horizontal") v.controllerHorizontal = atoi(value.c_str());
+            else if (key == "controller_vertical") v.controllerVertical = atoi(value.c_str());
             else if (key == "rumble") v.rumble = atoi(value.c_str()) != 0;
             else if (key == "stick_deadzone") v.stickDeadzone = atoi(value.c_str());
             else if (key == "mouse_sensitivity") v.mouseSensitivity = float(atof(value.c_str()));
@@ -268,6 +270,9 @@ void Settings::Load(const std::filesystem::path& exeDirectory)
     }
     if (v.windowMode < 0 || v.windowMode > 1) v.windowMode = 0;
     if (v.masterVolume < 0 || v.masterVolume > 100) v.masterVolume = 70;
+    if (v.nativeVolume < 0 || v.nativeVolume > 100) v.nativeVolume = 50;
+    if (v.controllerHorizontal < 10 || v.controllerHorizontal > 200) v.controllerHorizontal = 100;
+    if (v.controllerVertical < 10 || v.controllerVertical > 200) v.controllerVertical = 100;
     if (v.stickDeadzone < 0 || v.stickDeadzone > 50) v.stickDeadzone = 15;
     if (!(v.mouseSensitivity >= 0.1f && v.mouseSensitivity <= 3.0f)) v.mouseSensitivity = 1.0f;
     std::lock_guard<std::mutex> lock(g_mutex);
@@ -303,6 +308,9 @@ void Settings::Save()
             fprintf(file, "class_%d_name = %s\nclass_%d_primary = %d\nclass_%d_sidearm = %d\nclass_%d_base = %d\nclass_%d_grenade_type = %d\nclass_%d_grenades = %d\n",
                     i + 1, v.className[i], i + 1, v.classPrimary[i], i + 1, v.classSidearm[i], i + 1, v.classBase[i], i + 1,
                     v.classGrenadeType[i], i + 1, v.classGrenades[i]);
+        fprintf(file, "[native_options]\n");
+        fprintf(file, "native_volume = %d\ncontroller_horizontal = %d\ncontroller_vertical = %d\n",
+                v.nativeVolume, v.controllerHorizontal, v.controllerVertical);
         fprintf(file, "[keys]\n");
         for (int i = 0; i < ActionCount; i++) fprintf(file, "key_%s = %d\n", ActionKeys[i], v.keys[i]);
         fclose(file);

@@ -16,6 +16,8 @@
 #include <chrono>
 #include "input.h"
 #include "settings.h"
+#include "profile_store.h"
+#include <fstream>
 
 #include <cstdio>
 #include <mutex>
@@ -139,6 +141,47 @@ PPC_FUNC(__imp__XamUserGetXUID)
     ctx.r3.u32 = X_ERROR_SUCCESS;
 }
 
+namespace
+{
+    uint32_t CompleteOverlapped(PPCContext&, uint8_t*, uint32_t, uint32_t, uint32_t length = 0);
+    std::mutex g_profileMutex;
+    std::filesystem::path ProfileFile(uint32_t user)
+    { return Kernel::SavesRoot() / "profiles" / ("user-" + std::to_string(user) + ".bin"); }
+    ProfileStore::Values ReadProfile(uint32_t user)
+    {
+        ProfileStore::Values values;
+        if (user > 3) return values;
+        std::ifstream file(ProfileFile(user), std::ios::binary | std::ios::ate);
+        if (!file) return values;
+        const auto size = file.tellg();
+        if (size < 12 || size > 9 * 1024 * 1024) return values;
+        std::vector<uint8_t> data(static_cast<size_t>(size));
+        file.seekg(0);
+        if (!file.read(reinterpret_cast<char*>(data.data()), data.size()) || !ProfileStore::Decode(data, values))
+            printf("profile: ignored invalid saved profile for user %u\n", user);
+        return values;
+    }
+    bool WriteProfile(uint32_t user, const ProfileStore::Values& values)
+    {
+        const auto data = ProfileStore::Encode(values);
+        if (data.empty()) return false;
+        const auto path = ProfileFile(user);
+        std::error_code error;
+        std::filesystem::create_directories(path.parent_path(), error);
+        if (error) return false;
+        const auto temp = std::filesystem::path(path.wstring() + L".tmp");
+        {
+            std::ofstream file(temp, std::ios::binary | std::ios::trunc);
+            if (!file.write(reinterpret_cast<const char*>(data.data()), data.size())) return false;
+            file.flush();
+            if (!file) return false;
+        }
+        return MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+    }
+    bool ProfileRange(uint32_t pointer, uint32_t size)
+    { return pointer != 0 && uint64_t(pointer) + size <= Guest::TotalSize; }
+}
+
 // X_RESULT XamUserReadProfileSettings(titleId, userIndex, unk, unk,
 //                                     settingCount, settingIds*, sizePtr*,
 //                                     buffer*, overlapped)
@@ -148,6 +191,9 @@ PPC_FUNC(__imp__XamUserReadProfileSettings)
     const uint32_t settingCount = ctx.r7.u32;
     const uint32_t sizePtr = ctx.r9.u32;
     const uint32_t buffer = ctx.r10.u32;
+    if (ctx.r4.u32 > 3 || settingCount > ProfileStore::MaxEntries || !ProfileRange(sizePtr, 4) ||
+        (settingCount && !ProfileRange(ctx.r8.u32, settingCount * 4)))
+    { ctx.r3.u32 = 87; return; }
     static std::atomic<int> announced{ 0 };
     if (announced.fetch_add(1) < 12)
     {
@@ -161,11 +207,24 @@ PPC_FUNC(__imp__XamUserReadProfileSettings)
         fflush(stdout);
     }
 
-    // The reply is a header followed by one entry per requested setting. Each
-    // entry is madeup of an id, a type, and a value union; 24 bytes covers it.
+    // Verified native consumer 82414788: source+0, user+8, id+16,
+    // XUSER_DATA type+24 and union+32. Forty bytes per entry, not24.
     constexpr uint32_t HeaderSize = 8;
-    constexpr uint32_t EntrySize = 24;
-    const uint32_t required = HeaderSize + settingCount * EntrySize;
+    constexpr uint32_t EntrySize = 40;
+    const uint32_t settingIds = ctx.r8.u32, user = ctx.r4.u32;
+    if (user > 3 || settingCount > ProfileStore::MaxEntries || !ProfileRange(sizePtr, 4) ||
+        (settingCount && !ProfileRange(settingIds, settingCount * 4)))
+    { ctx.r3.u32 = 87; return; }
+    std::unique_lock<std::mutex> lock(g_profileMutex);
+    const auto values = ReadProfile(user);
+    lock.unlock(); // Completion callbacks may issue another profile request.
+    uint32_t required = HeaderSize + settingCount * EntrySize;
+    for (uint32_t i=0;i<settingCount;++i)
+    {
+        const auto found = values.find(Guest::Read32(base, settingIds + i*4));
+        if (found != values.end() && (found->second.type == 4 || found->second.type == 6))
+            required += (uint32_t(found->second.bytes.size()) + 7) & ~7u;
+    }
 
     if (buffer == 0)
     {
@@ -182,32 +241,67 @@ PPC_FUNC(__imp__XamUserReadProfileSettings)
         ctx.r3.u32 = 0x0000007A;
         return;
     }
-
-    // Report every requested setting as present but unset. There is no profile
-    // to read, and a title that finds an empty setting falls back to its own
-    // default, which is the behaviour wanted here.
+    if (!ProfileRange(buffer, required)) { ctx.r3.u32 = 87; return; }
     memset(Guest::Ptr(buffer), 0, required);
     Guest::Write32(base, buffer + 0, settingCount);
     Guest::Write32(base, buffer + 4, buffer + HeaderSize);
 
-    const uint32_t settingIds = ctx.r8.u32;
+    uint32_t payload = buffer + HeaderSize + settingCount * EntrySize;
     for (uint32_t i = 0; i < settingCount; i++)
     {
         const uint32_t entry = buffer + HeaderSize + i * EntrySize;
-        if (settingIds != 0)
-            Guest::Write32(base, entry + 0, Guest::Read32(base, settingIds + i * 4));
-        Guest::Write32(base, entry + 4, 0);   // type: unset
+        const uint32_t id = Guest::Read32(base, settingIds + i*4);
+        Guest::Write32(base, entry + 8, user);
+        Guest::Write32(base, entry + 16, id);
+        const auto found = values.find(id);
+        if (found == values.end()) continue; // source0 means unset/default
+        const auto& value = found->second;
+        Guest::Write32(base, entry, 2);
+        Guest::Write8(base, entry + 24, uint8_t(value.type));
+        if (value.type == 4 || value.type == 6)
+        {
+            Guest::Write32(base, entry + 32, uint32_t(value.bytes.size()));
+            Guest::Write32(base, entry + 36, payload);
+            if (!value.bytes.empty()) memcpy(base + payload, value.bytes.data(), value.bytes.size());
+            payload += (uint32_t(value.bytes.size()) + 7) & ~7u;
+        }
+        else memcpy(base + entry + 32, value.bytes.data(), value.bytes.size());
     }
-
-    ctx.r3.u32 = X_ERROR_SUCCESS;
+    Guest::Write32(base, sizePtr, required);
+    printf("profile: read %u settings for user %u, %zu saved values\n", settingCount, user, values.size());
+    fflush(stdout);
+    ctx.r3.u32 = CompleteOverlapped(ctx, base, Guest::Read32(base, ctx.r1.u32 + 0x54), X_ERROR_SUCCESS);
 }
 
 // X_RESULT XamUserWriteProfileSettings(...)
 PPC_FUNC(__imp__XamUserWriteProfileSettings)
 {
     Kernel::CountImport("XamUserWriteProfileSettings");
-    // Accepted and discarded. Nothing persists a profile yet.
-    ctx.r3.u32 = X_ERROR_SUCCESS;
+    // Native writer824135D8 and wrapper8222C0C8 verify these arguments.
+    const uint32_t user=ctx.r4.u32, count=ctx.r5.u32, records=ctx.r6.u32, overlap=ctx.r7.u32;
+    if (user > 3 || count > ProfileStore::MaxEntries || (count && !ProfileRange(records, count*40)))
+    { ctx.r3.u32 = 87; return; }
+    uint32_t result = X_ERROR_SUCCESS;
+    {
+        std::lock_guard<std::mutex> lock(g_profileMutex);
+        auto values=ReadProfile(user);
+        for(uint32_t i=0;i<count;++i)
+        {
+            const uint32_t entry=records+i*40, id=Guest::Read32(base,entry+16);
+            const uint32_t type=Guest::Read8(base,entry+24);
+            if(!type) { values.erase(id); continue; }
+            uint32_t size=(type==2 || type==3)?8:4, data=entry+32;
+            if(type==4 || type==6) { size=Guest::Read32(base,entry+32); data=Guest::Read32(base,entry+36); }
+            if(size>ProfileStore::MaxPayload || (size && !ProfileRange(data,size))) { result=87; break; }
+            ProfileStore::Value value{type, {}};
+            if(size) value.bytes.assign(base+data,base+data+size);
+            if(!ProfileStore::Valid(value)) { result=87; break; }
+            values[id]=std::move(value);
+        }
+        if(!result && !WriteProfile(user,values)) result=5;
+    }
+    printf("profile: save user %u, %u settings, result %u\n",user,count,result); fflush(stdout);
+    ctx.r3.u32=CompleteOverlapped(ctx,base,overlap,result);
 }
 
 // --- Controllers -----------------------------------------------------------
@@ -315,7 +409,14 @@ PPC_FUNC(__imp__XamInputGetState)
 
         memset(Guest::Ptr(ctx.r5.u32), 0, 16);
         Guest::Write32(base, ctx.r5.u32 + 0, Input::PacketNumber());
+#ifdef COD3_MP
+        // 128: raw Y edges are consumed once per server frame. Suppress the
+        // unreliable parallel native binding only while that bridge is active;
+        // pause/menu reports keep their native Y semantics.
+        Guest::Write16(base, ctx.r5.u32 + 4, Input::NativeButtons(pad.buttons,Guest::Read8(base,0x82C73024)!=0));
+#else
         Guest::Write16(base, ctx.r5.u32 + 4, pad.buttons);
+#endif
         Guest::Write8(base, ctx.r5.u32 + 6, pad.leftTrigger);
         Guest::Write8(base, ctx.r5.u32 + 7, pad.rightTrigger);
         Guest::Write16(base, ctx.r5.u32 + 8, uint16_t(pad.thumbLX));
@@ -558,7 +659,7 @@ namespace
     // XOVERLAPPED: result, length, context, event, completion routine, its
     // context, extended error. A call given one answers through it: the
     // result goes in, the event is set, and the call itself says pending.
-    uint32_t CompleteOverlapped(PPCContext& ctx, uint8_t* base, uint32_t overlapped, uint32_t result, uint32_t length = 0)
+    uint32_t CompleteOverlapped(PPCContext& ctx, uint8_t* base, uint32_t overlapped, uint32_t result, uint32_t length)
     {
         if (overlapped == 0) return result;
         Guest::Write32(base, overlapped + 0x00, result);

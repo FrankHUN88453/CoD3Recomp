@@ -8,6 +8,7 @@
 #include "debug_probe.h"
 #include "kernel.h"
 #include "input.h"
+#include "tactical_point_input.h"
 #include "overlay.h"
 #include "render.h"
 #include "render_stats.h"
@@ -209,9 +210,60 @@ namespace
     }
 }
 
+namespace { std::string ReadText(uint8_t* base, uint32_t at, size_t most); }
+// 0.5.93: bullet holes. Justin's bullet-hole dossier: each weapon's own
+// impact records, one for each of 23 surfaces (none, bark, brick, carpet,
+// cloth, concrete, dirt, flesh, foliage, glass, grass, gravel, ice, metal, mud,
+// paper, plaster, rock, sand, snow, water, wood, asphalt), are pointers at
+// +2284 of the weapon (sub_8249A380 finds "<weapon>_<SURFACE>" for each and
+// keeps what it found; +4, +16 and +28 of a record are its resources: the
+// effect and the mark). A weapon with none never leaves a mark. A map's
+// weapons are looked over once after it loads: each weapon's surfaces with no
+// record are given the record of a weapon that has one for that surface (an
+// original rifle's first), and every weapon's count logged. Then, every five
+// seconds, what the weapon in hand has for concrete, metal and wood.
+namespace
+{
+    constexpr uint32_t DecalSlots = 2284, Surfaces = 23;
+    const char* const SurfaceNames[Surfaces] = { "none", "bark", "brick", "carpet", "cloth", "concrete", "dirt", "flesh",
+                                                  "foliage", "glass", "grass", "gravel", "ice", "metal", "mud", "paper",
+                                                  "plaster", "rock", "sand", "snow", "water", "wood", "asphalt" };
+    void WeaponMarks(uint8_t* base, uint32_t record)
+    {
+        const uint32_t list = Guest::Read32(base, 0x82BCBF9C);
+        // 0.5.98: the look over every weapon, and the filling in, are gone.
+        // It walked 255 places of the weapon list, past the list's end, took
+        // whatever lay there for weapons and wrote impact records into it:
+        // on Justin's Merville "91 weapons looked over, 466 given", and the
+        // game's memory was wrecked (the crashes at the side menu and the
+        // spawn in 0.5.95 to 0.5.97). Every real weapon has all 22 anyway.
+        const uint32_t now = GetTickCount();
+        static uint32_t lastLog = 0;
+        if (!record || now - lastLog < 5000) return;
+        lastLog = now;
+        const uint32_t held = Guest::Read32(base, record + 164);
+        const uint32_t def = (list && held && held < 256) ? Guest::Read32(base, list + 4 * held) : 0;
+        if (def < 0x40000000u || def >= 0xA0000000u) return;
+        printf("marks: in hand %s:", ReadText(base, Guest::Read32(base, def + 8), 32).c_str());
+        for (const uint32_t k : { 5u, 13u, 21u, 16u, 2u })
+        {
+            const uint32_t slot = Guest::Read32(base, def + DecalSlots + 4 * k);
+            const bool ok = slot >= 0x40000000u && slot < 0xA0000000u;
+            printf(" %s %08X (%08X %08X %08X)", SurfaceNames[k], slot, ok ? Guest::Read32(base, slot + 4) : 0,
+                   ok ? Guest::Read32(base, slot + 16) : 0, ok ? Guest::Read32(base, slot + 28) : 0);
+        }
+        printf("\n"); fflush(stdout);
+    }
+}
+
 void MpFixesFrame(uint8_t* base)
 {
     const uint32_t now = GetTickCount();
+    {
+        const uint32_t entities0 = Guest::Read32(base, 0x82BCC7FC);
+        const uint32_t self0 = entities0 ? Guest::Read32(base, entities0 + 4) : 0;
+        WeaponMarks(base, self0 ? Guest::Read32(base, self0 + 512) : 0);
+    }
     const uint32_t entities = Guest::Read32(base, 0x82BCC7FC);
     const uint32_t self = entities ? Guest::Read32(base, entities + 4) : 0;
     const uint32_t record = self ? Guest::Read32(base, self + 512) : 0;
@@ -613,6 +665,8 @@ namespace
 {
     constexpr uint32_t Calls = 0x82A98030, MakeText = 0x821E0E48, FreeText = 0x821DD938;
     bool g_launcherOut = false;
+    std::string g_launcherReturnWeapon;
+    uint32_t g_launcherReturnId = 0;
 
     uint32_t Call3(PPCContext& ctx, uint8_t* base, uint32_t function, uint32_t r3, uint32_t r4, uint32_t r5)
     {
@@ -1866,11 +1920,43 @@ void MpFixesVehicles(PPCContext& ctx, uint8_t* base)
     MpFixesKangarooWhere(base);
 }
 
+// 0.5.128: native binding dispatched only the first Y despite subsequent
+// raw press/release edges (126 trace). Bridge each physical edge to the same
+// native cycle command, retaining native ownership/ammo/animation checks.
+static void MpFixesWeaponCycle(PPCContext& ctx,uint8_t* base)
+{
+    const unsigned presses=Input::TakeWeaponCyclePresses();
+    const uint32_t entities=Guest::Read32(base,0x82BCC7FC);
+    const uint32_t own=entities?Guest::Read32(base,entities+4):0;
+    const uint32_t ps=own?Guest::Read32(base,own+512):0;
+    const bool enabled=ps && Guest::Read32(base,0x82BCBE9C)==0 &&
+        Guest::Read32(base,ps+1932)==2 && int32_t(Guest::Read32(base,ps+304))>0 &&
+        (Guest::Read32(base,ps+44)&0x80000u)!=0 &&
+        (Guest::Read32(base,ps+44)&0x4000u)==0 &&
+        (Guest::Read32(base,ps+240)&0x200000u)==0 &&
+        !Guest::Read32(base,own+900) && !Guest::Read8(base,0x82C73024) &&
+        !Overlay::IsOpen() && RenderStats::Current().triangles>=20000.0f;
+    Input::SetWeaponCycleEnabled(enabled);
+    // Drain above even in menus: no deferred switch when gameplay resumes.
+    if (!enabled) return;
+    for (unsigned i=0;i<presses;++i)
+    {
+        const uint32_t before=Guest::Read32(base,0x82B9F310);
+        Call3(ctx,base,0x82457A60,1,0,0);
+        printf("weapons: Y/wheel bridge selected %u -> %u held %u\n",before,
+               Guest::Read32(base,0x82B9F310),Guest::Read32(base,ps+164));
+        fflush(stdout);
+    }
+}
+
+static void TacticalInsertionFrame(PPCContext& ctx, uint8_t* base);
 void MpFixesLauncher(PPCContext& ctx, uint8_t* base)
 {
+    TacticalInsertionFrame(ctx, base);
     MpFixesVehicles(ctx, base);
     MpFixesKillstreaks(ctx, base);
     MpFixesCampaignGuns(ctx, base);
+    MpFixesWeaponCycle(ctx, base);
     // Picking up a gun puts down the weapon in the second slot ("primaryb",
     // +1066: sub_82502850 and the pick-up itself), whatever is in hand; a
     // custom class's second weapon (the pistol, a main weapon kind here)
@@ -1947,6 +2033,8 @@ void MpFixesLauncher(PPCContext& ctx, uint8_t* base)
     {
         g_launcherDue = false;
         g_launcherOut = false;
+        g_launcherReturnWeapon.clear();
+        g_launcherReturnId = 0;
         // Not again for an anti-armour class, whose main weapon it is.
         const uint32_t entities = Guest::Read32(base, 0x82BCC7FC);
         const uint32_t own = entities ? Guest::Read32(base, entities + 4) : 0;
@@ -2023,12 +2111,38 @@ void MpFixesLauncher(PPCContext& ctx, uint8_t* base)
     const uint16_t buttons = Input::Buttons();
     const bool pressed = (buttons & 0x0004) && !(last & 0x0004);
     last = buttons;
+    // Drain the edge above even while paused: a menu press must not equip
+    // the launcher immediately, or become a deferred press after closing.
+    if (Guest::Read8(base, 0x82C73024) != 0) return;
     if (!pressed || !Settings::Get().launcher || !g_ownHandle || g_ownPrimary[0] == 0) return;
     if (RenderStats::Current().triangles < 20000.0f) return;   // not in the menus
-    g_launcherOut = !g_launcherOut;
-    OnWeapon(ctx, base, 2692, g_launcherOut ? Launcher() : g_ownPrimary);
+    // 0.5.129: return to the weapon actually held before taking out the
+    // launcher. Read current equipment so cycling away from the launcher
+    // does not leave its toggle latched. Spawn clears the saved return.
+    const uint32_t entities=Guest::Read32(base,0x82BCC7FC);
+    const uint32_t own=entities?Guest::Read32(base,entities+4):0;
+    const uint32_t ps=own?Guest::Read32(base,own+512):0;
+    const uint32_t held=ps?Guest::Read32(base,ps+164):0;
+    const uint32_t list=Guest::Read32(base,0x82BCBF9C);
+    const uint32_t weapon=(list && held>0 && held<128)?Guest::Read32(base,list+held*4):0;
+    const std::string heldName=weapon?ReadText(base,Guest::Read32(base,weapon+8),64):std::string();
+    g_launcherOut=heldName!=Launcher();
+    std::string target=Launcher();
+    if (g_launcherOut)
+    {
+        g_launcherReturnWeapon=heldName;
+        g_launcherReturnId=held;
+    }
+    else
+    {
+        const bool owned=ps && g_launcherReturnId>0 && g_launcherReturnId<128 &&
+            (Guest::Read32(base,ps+1056+4*(g_launcherReturnId>>5)) &
+             (1u<<(g_launcherReturnId&31)))!=0;
+        target=owned && !g_launcherReturnWeapon.empty()?g_launcherReturnWeapon:g_ownPrimary;
+    }
+    OnWeapon(ctx,base,2692,target.c_str());
     static int said = 0;
-    if (said++ < 20) { printf("class: d-pad left, to %s\n", g_launcherOut ? Launcher() : g_ownPrimary); fflush(stdout); }
+    if (said++ < 20) { printf("class: d-pad left, to %s (previous %s)\n", target.c_str(),heldName.c_str()); fflush(stdout); }
 }
 #endif
 
@@ -2490,7 +2604,8 @@ namespace
     struct ExtraArchive { const char* path; const char* label; int32_t active = -1, loaded = -1; uint32_t object = 0, guestPath = 0; };
     ExtraArchive g_merville{ "mp\\mp_merv\\mp_merv.cod", "Merville's archive" };
     ExtraArchive g_kangarooFile{ "sp\\mace2\\kangaroo.cod", "the Kangaroo's archive" };
-    std::atomic<int> g_kangarooType{1};   // the vehicle type the Kangaroo is given: 1 four wheel, 2 tank
+    std::atomic<int> g_kangarooType{1};   // 0.5.101: back to 1 (Justin: 3 drove broken, 2 could not be got into)   // the vehicle type the Kangaroo is given: 1 four wheel, 2 tank,
+                                          // 3 (0.5.100, the default) four wheel kind with a tracked vehicle's physics
     std::atomic<bool> g_kangaroo{true};   // on unless the console says kangaroo 0: its archive is small (5 MB)
 
     void LoadExtra(PPCContext& saved, uint8_t* base, uint32_t manager, uint32_t bank, ExtraArchive& archive, const std::string& map)
@@ -2536,7 +2651,7 @@ namespace
     }
 }
 void MpFixesKangaroo(bool on) { g_kangaroo.store(on); }
-void MpFixesKangarooType(int type) { g_kangarooType.store(type == 2 ? 2 : 1); printf("kangaroo: type %d from the next map start\n", type == 2 ? 2 : 1); fflush(stdout); }
+void MpFixesKangarooType(int type) { const int t = type == 2 ? 2 : type == 1 ? 1 : 3; g_kangarooType.store(t); printf("kangaroo: type %d from the next map start\n", t); fflush(stdout); }
 
 namespace { uint32_t g_kangarooManager = 0, g_kangarooBank = 0; bool& g_kangarooPending = g_kangarooWaiting; }
 void MpFixesLoadVehicleArchive(PPCContext& saved, uint8_t* base, uint32_t manager, uint32_t bank)
@@ -2631,7 +2746,18 @@ namespace
     // Horch's speeds, too fast for a tank's hull, Justin) taken from the
     // Sherman's file, and its seats (+72: the Horch 3, the WC51 2) as many as
     // its model has places: the driver, the gunner and six passengers.
+    // 0.5.99: how the Kangaroo is made (kangaroo_build): 1 a Kangaroo from
+    // the start, with the tanks' physics (mp_tankdefault, the Sherman's: the
+    // Kangaroo is a Sherman's hull), 2 the same keeping the Horch's physics,
+    // 0 the Horch made over at the map's start as up to 0.5.98.
+    std::atomic<int> g_kangarooBuild{2};   // 0.5.102: the Horch's physics (Justin: the tank preset slid back and forth on hills)
+    int KangarooPrepareKind(uint8_t* base);
     void KangarooOwnKind(uint8_t* base, uint32_t record)
+    {
+        const int own = KangarooPrepareKind(base);
+        if (own >= 0) Guest::Write16(base, record + 376, uint16_t(own));
+    }
+    int KangarooPrepareKind(uint8_t* base)
     {
         // 0.5.83: the vehicle file's fields by the game's own table of them
         // (0x825FE3C8: name, offset, kind): type +32, subtype +34 (the
@@ -2653,7 +2779,7 @@ namespace
             else if (_stricmp(name.c_str(), "mp_shermanTank") == 0) sherman = def;
             else if (name.find("angaroo") != std::string::npos) campaign = def;
         }
-        if (own < 0) { printf("kangaroo: no kind of its own on this map\n"); return; }
+        if (own < 0) { printf("kangaroo: no kind of its own on this map\n"); return -1; }
         const uint32_t from = campaign ? campaign : sherman;
         if (from)
         {
@@ -2668,6 +2794,16 @@ namespace
             }
         }
         if (!campaign) Guest::Write32(base, ownDef + 68, 8);       // numSeats: driver, gunner, six passengers
+        // 0.5.99: its treads' scroll as the tanks' (texureScroll +40 1.0 and
+        // texureScrollScale +76 5.5, the Sherman's and the Panzer's). Without the
+        // campaign's file the Horch's 1.0 was kept: the distance each tread is
+        // moved by as it drives (sub_82568600, both sides from +1308 and +1312)
+        // is scaled by it, so its treads ran at a fifth of a tank's going ahead.
+        if (!campaign && sherman)
+        {
+            memcpy(base + ownDef + 40, base + sherman + 40, 4);
+            memcpy(base + ownDef + 76, base + sherman + 76, 4);
+        }
         // Its subtype the game's own Kangaroo (8), its driving curve the
         // Kangaroo's (vehicleCurveFile +508: Kangaroo.bvce is in mp\global.cod),
         // and its type 4 wheel (1) or tank (2: tracked, the treads' scroll)
@@ -2675,13 +2811,24 @@ namespace
         Guest::Write16(base, ownDef + 34, 8);
         memset(base + ownDef + 508, 0, 32);
         memcpy(base + ownDef + 508, "Kangaroo", 9);
-        Guest::Write16(base, ownDef + 32, uint16_t(g_kangarooType.load()));
-        Guest::Write16(base, record + 376, uint16_t(own));
+        Guest::Write16(base, ownDef + 32, uint16_t(g_kangarooType.load() == 2 ? 2 : 1));
+        // 0.5.99: its physics (vehiclePhysics +540, vehiclePhysicsThird +572:
+        // the preset its physics body and wheels are made from) the Sherman's
+        // (mp_tankdefault) instead of the Horch's (mp_horsch, a small car's),
+        // and a tank's +708/+712 (read for tracked kinds as it is made).
+        if (sherman && g_kangarooBuild.load() == 1)
+        {
+            memcpy(base + ownDef + 540, base + sherman + 540, 32);
+            memcpy(base + ownDef + 572, base + sherman + 572, 32);
+            memcpy(base + ownDef + 708, base + sherman + 708, 8);
+        }
         printf("kangaroo: its own kind %d (type %d, subtype 8, curve Kangaroo) from %s: seats %d, max speed %.0f, bounds %.0f %.0f %.0f, tread scroll %.2f x %.2f\n", own, g_kangarooType.load(),
                campaign ? "the campaign's Kangaroo file" : sherman ? "the Sherman's" : "the Horch's", int(Guest::Read32(base, ownDef + 68)),
                ReadF(base, ownDef + 80), ReadF(base, ownDef + 116), ReadF(base, ownDef + 120), ReadF(base, ownDef + 124),
                ReadF(base, ownDef + 40), ReadF(base, ownDef + 76));
+        printf("kangaroo: its physics '%s' (third person '%s')\n", ReadText(base, ownDef + 540, 32).c_str(), ReadText(base, ownDef + 572, 32).c_str());
         fflush(stdout);
+        return own;
     }
 
     // One of the map's own vehicles moved to a saved place, in the map's
@@ -2848,7 +2995,7 @@ PPC_FUNC(sub_82564520)
             // Horch; for the WC51 a Horch. One that is not the kind asked for
             // takes the asked for one's model.
             std::vector<std::string> kinds;
-            if (kangaroo) kinds = { "mp_horch", "mp_wc51" };
+            if (kangaroo) kinds = { "mp_kangaroo", "mp_horch", "mp_wc51" };   // 0.5.99: made one from the start first
             else if (_stricmp(p.kind.c_str(), "mp_wc51") == 0) kinds = { "mp_wc51", "mp_horch" };
             else kinds = { p.kind };
             Own* use = nullptr;
@@ -2866,7 +3013,8 @@ PPC_FUNC(sub_82564520)
                 MoveVehicle(base, use->entity, use->record, p.x, p.y, p.z, p.yaw);
                 DumpEntity(base, use->entity, use->record, kind);
                 DumpVehicleKind(base, use->record);
-                const char* model = kangaroo ? "v_Kangaroo" : (_stricmp(kind.c_str(), p.kind.c_str()) != 0 ? "v_wc51" : nullptr);
+                const bool already = kangaroo && _stricmp(kind.c_str(), "mp_kangaroo") == 0;   // 0.5.99: made a Kangaroo as it spawned
+                const char* model = already ? nullptr : kangaroo ? "v_Kangaroo" : (_stricmp(kind.c_str(), p.kind.c_str()) != 0 ? "v_wc51" : nullptr);
                 if (kangaroo) g_kangarooEntities.insert(use->entity);
                 if (model)
                 {
@@ -2885,8 +3033,13 @@ PPC_FUNC(sub_82564520)
                     // its model (setting the model sets the box from the model:
                     // 0.5.81 set it before, and Justin still walked through
                     // parts of it). The entity's mins at +240, maxs at +256.
-                    const float mins[3] = { -125.0f, -56.0f, 0.0f }, maxs[3] = { 125.0f, 56.0f, 95.0f };
-                    for (int k = 0; k < 3; k++) { WriteF(base, use->entity + 240 + 4 * k, mins[k]); WriteF(base, use->entity + 256 + 4 * k, maxs[k]); }
+                    // 0.5.99: not for one made a Kangaroo as it spawned: its box is
+                    // its model's own (-141 -60 0 to 141 68 124), set with it.
+                    if (!already)
+                    {
+                        const float mins[3] = { -125.0f, -56.0f, 0.0f }, maxs[3] = { 125.0f, 56.0f, 95.0f };
+                        for (int k = 0; k < 3; k++) { WriteF(base, use->entity + 240 + 4 * k, mins[k]); WriteF(base, use->entity + 256 + 4 * k, maxs[k]); }
+                    }
                     KangarooOwnKind(base, use->record);
                 }
                 moved++;
@@ -2916,6 +3069,139 @@ PPC_FUNC(sub_82564520)
     // already carried, is logged with the words around it.
     for (const Moved& m : g_movedFrom) ScanForPlace(base, m);
     // (Scanned again a few seconds in, by the probe, once the game is going.)
+}
+
+// 0.5.99: the Kangaroo made a Kangaroo as the map's vehicles spawn, not a
+// Horch made over afterwards. A vehicle is set up by sub_8257E3A8 (its entity
+// r3, its record r4, its kind r5): its seats' tags, then its physics object
+// (record +1304, from a pool of 15) from the kind's vehiclePhysics preset
+// (+540: the Horch's mp_horsch, the Sherman's mp_tankdefault) and its model's
+// bones and size (sub_82420998, sub_8241BF00, the body sub_8241BB90). Made
+// over at the map's start, the Kangaroo kept all of that from the Horch: a
+// Horch's physics body, car physics and the Horch's wheel bones (0.5.93's
+// spinning tread). Now, for each Kangaroo the map's saved vehicles want, one
+// of the map's Horches (or WC51s) is given the Kangaroo's model and kind just
+// before it is set up, so it is set up as the Kangaroo throughout; it is then
+// moved to its place at the map's start as before.
+namespace
+{
+    std::string g_spawnKey;
+    int g_kangaroosToMake = 0;
+}
+void MpFixesKangarooBuild(int mode)
+{
+    g_kangarooBuild.store(mode < 0 ? 0 : mode > 2 ? 2 : mode);
+    printf("kangaroo: build %d from the next map start (1 a Kangaroo from the start with a tank's physics, 2 with the Horch's, 0 the Horch made over)\n", g_kangarooBuild.load());
+    fflush(stdout);
+}
+extern "C" PPC_FUNC(__imp__sub_8257E3A8);
+PPC_FUNC(sub_8257E3A8)
+{
+    const uint32_t entity = ctx.r3.u32;
+    const int kind = int(int16_t(ctx.r5.u16));
+    if (!g_inMapStart && g_kangaroo.load() && g_kangarooBuild.load() != 0 && entity && kind >= 0 && kind < 32)
+    {
+        const std::string map = MapNow();
+        const std::string key = map + "#" + std::to_string(g_mapStarts);
+        if (key != g_spawnKey)
+        {
+            g_spawnKey = key;
+            g_kangaroosToMake = 0;
+            for (const Placed& p : ReadPlacements())
+                if (p.map == map && _stricmp(p.kind.c_str(), "mp_kangaroo") == 0) g_kangaroosToMake++;
+        }
+        const uint32_t def = Guest::Read32(base, 0x82B2DC90 + 4 * uint32_t(kind));
+        const std::string name = def ? ReadText(base, def, 32) : std::string();
+        if (g_kangaroosToMake > 0 && (_stricmp(name.c_str(), "mp_horch") == 0 || _stricmp(name.c_str(), "mp_wc51") == 0))
+        {
+            const int own = KangarooPrepareKind(base);
+            if (own >= 0)
+            {
+                g_kangaroosToMake--;
+                static uint32_t scratch = 0;
+                if (!scratch) scratch = Guest::AllocatePhysical(0x80);
+                memset(base + scratch, 0, 0x80);
+                memcpy(base + scratch + 0x40, "v_Kangaroo", 11);
+                Call3(ctx, base, MakeText, scratch, scratch + 0x40, 0);
+                Call3(ctx, base, 0x824CE130, Guest::Read32(base, entity + 484), scratch, 0);
+                Call3(ctx, base, FreeText, scratch, 0, 0);
+                printf("kangaroo: the map's %s made a Kangaroo as it is set up (kind %d, its model first; box %.0f %.0f %.0f to %.0f %.0f %.0f)\n",
+                       name.c_str(), own, ReadF(base, entity + 240), ReadF(base, entity + 244), ReadF(base, entity + 248),
+                       ReadF(base, entity + 256), ReadF(base, entity + 260), ReadF(base, entity + 264));
+                fflush(stdout);
+                ctx.r5.u64 = uint64_t(own);
+                const uint32_t record = ctx.r4.u32;
+                // 0.5.100: known as a Kangaroo before it is set up, so its seats'
+                // tags (looked up here, once: tag_enter_left/right and the rest)
+                // get their stand-ins (sub_82434E60's hook only answers for
+                // the Kangaroos' entities). 0.5.99 put it in only at the map's
+                // start, after: the side ways in found none, and Justin could
+                // get in only at the gun at the back.
+                g_kangarooEntities.insert(entity);
+                __imp__sub_8257E3A8(ctx, base);
+                const uint32_t physics = Guest::Read32(base, record + 1304);
+                // 0.5.100: its physics driven as a tracked vehicle's (the flag
+                // 0x20 its physics object is given for a type 2 kind, read by the
+                // driving, sub_82423660, and the posing, sub_8242B938). Justin, on
+                // 0.5.99: with the tanks' preset driven as a four wheeler it was
+                // slow and stuck going up out of a ravine. Its kind stays a four
+                // wheeler's, so its seats and ways in stay as they were.
+                if (physics && g_kangarooType.load() == 3)
+                    Guest::Write32(base, physics + 640, Guest::Read32(base, physics + 640) | 0x20u);
+                const uint32_t preset = physics ? Guest::Read32(base, physics + 0x250) : 0;
+                printf("kangaroo: set up: physics object %08X, preset '%s', flags %08X, wheel bones", physics,
+                       preset ? ReadText(base, preset + 0x70, 32).c_str() : "none", physics ? Guest::Read32(base, physics + 640) : 0);
+                for (int i = 0; physics && i < 8; i++) printf(" %d", int32_t(Guest::Read32(base, physics + 36 + 4 * uint32_t(i))));
+                printf("\n");
+                fflush(stdout);
+                return;
+            }
+        }
+    }
+    __imp__sub_8257E3A8(ctx, base);
+}
+
+// 0.5.112: the Horch's contact wheels hold this hull a little high.
+// Native physics fields at 825FEAF0 explicitly name wheel_radius at +20.
+// Copy only the verified preset span (0..200 inclusive), and change the
+// Kangaroo's private copy BEFORE the native vehicle physics is initialized.
+namespace {
+    std::atomic<float> g_kangarooDrop{5.0f};
+    std::map<uint32_t,uint32_t> g_kangarooPhysicsCopies;
+}
+void MpFixesKangarooDrop(float amount)
+{
+    if (!std::isfinite(amount)) return;
+    g_kangarooDrop.store(std::clamp(amount,0.0f,8.0f));
+    printf("kangaroo: contact height drop %.1f from next map start (0 original)\n",g_kangarooDrop.load());
+    fflush(stdout);
+}
+extern "C" PPC_FUNC(__imp__sub_82420998);
+PPC_FUNC(sub_82420998)
+{
+    const uint32_t object=ctx.r3.u32,entity=ctx.r4.u32,preset=ctx.r5.u32;
+    const float drop=g_kangarooDrop.load();
+    if (object && preset && drop>0 && g_kangarooEntities.count(entity) &&
+        ReadText(base,preset+112,32)=="mp_horsch")
+    {
+        const float radius=ReadF(base,preset+20);
+        if (std::isfinite(radius) && radius>=8.0f && radius<=64.0f)
+        {
+            uint32_t& copy=g_kangarooPhysicsCopies[object];
+            if (!copy) copy=Guest::AllocatePhysical(208);
+            if (copy)
+            {
+                memset(base+copy,0,208);
+                memcpy(base+copy,base+preset,204); // constructor's last field is float +200
+                const float adjusted=std::max(8.0f,radius-drop);
+                WriteF(base,copy+20,adjusted);
+                ctx.r5.u64=copy;
+                printf("kangaroo: private contact radius %.1f -> %.1f (requested height drop %.1f)\n",radius,adjusted,drop);
+                fflush(stdout);
+            }
+        }
+    }
+    __imp__sub_82420998(ctx,base);
 }
 
 // 0.5.76: a tank's tags each frame (sub_82570558, its entity in r3): its
@@ -3093,6 +3379,223 @@ PPC_FUNC(sub_82434E60)
     }
 }
 
+// 0.5.104: a side-entry stand-in is a rotating road wheel. Keep its
+// position, but use the hull's orientation when it is the player's link.
+// sub_82571A58 returns a 48-byte matrix (rotation +0..32, origin +36..44),
+// verified against the generated implementation; never alter wheel poses.
+namespace {
+    std::atomic<bool> g_kangarooEntry{true};
+    std::mutex g_kangarooApproachMutex;
+    struct KangarooApproach { uint32_t vehicle; int direction; };
+    std::map<uint32_t, KangarooApproach> g_kangarooApproaches;
+}
+void MpFixesKangarooEntry(int enabled)
+{
+    g_kangarooEntry.store(enabled != 0);
+    printf("kangaroo: stable entry orientation %s\n", enabled ? "on" : "off");
+    fflush(stdout);
+}
+extern "C" PPC_FUNC(__imp__sub_82571A58);
+
+PPC_FUNC(sub_82571A58)
+{
+    const uint32_t player = ctx.r3.u32, out = ctx.r4.u32;
+    const uint32_t link = player ? Guest::Read32(base, player + 900) : 0;
+    const uint32_t vehicle = link ? Guest::Read32(base, link) : 0;
+    const uint32_t hash = link ? Guest::Read32(base, link + 8) : 0;
+    if (g_kangarooEntities.count(vehicle))
+    {
+        int direction = 0;
+        if (hash == TagHash("tag_enter_left")) direction = 1;
+        if (hash == TagHash("tag_enter_right")) direction = -1;
+        if (hash == TagHash("tag_enter_back") || hash == TagHash("tag_enter_back_left") ||
+            hash == TagHash("tag_enter_back_right") || hash == TagHash("tag_enter_turret")) direction = 3;
+        if (direction) {
+            std::lock_guard<std::mutex> guard(g_kangarooApproachMutex);
+            g_kangarooApproaches[player] = {vehicle, direction};
+        }
+    }
+    const bool side = hash == TagHash("tag_enter_left") || hash == TagHash("tag_enter_right");
+    __imp__sub_82571A58(ctx, base);
+    if (!out || !side || !g_kangarooEntry.load() || !g_kangarooEntities.count(vehicle)) return;
+    // The game's own angle-to-axis routine writes exactly nine floats.
+    // Use a copied context so the original function's return is preserved.
+    PPCContext axis = ctx;
+    axis.r3.u64 = vehicle + 352;
+    axis.r4.u64 = out;
+    sub_82551D60(axis, base);
+    static std::set<uint32_t> logged;
+    if (logged.insert(hash).second)
+    {
+        printf("kangaroo: %s link uses hull orientation, retaining entry position\n", TagName(hash).c_str());
+        fflush(stdout);
+    }
+}
+// 0.5.106: finish a dismount outside the hull, regardless of the seat's
+// inherited Horch animation. Only the two verified exit-completion callers
+// of Unlink are intercepted; seat changes and attachment setup are untouched.
+namespace
+{
+    std::atomic<int> g_kangarooExit{1}; // 0 native, 1 prefer left, 2 prefer right
+    std::mutex g_kangarooExitMutex;
+
+    bool KangarooExitPoint(PPCContext& ctx, uint8_t* base, uint32_t player,
+                           uint32_t vehicle, int preferred, uint32_t& position, int& side)
+    {
+        // Private scratch and a separate guest stack. Vectors are 16-byte
+        // aligned: the native traces load four words even for a vec3.
+        static uint32_t memory = 0;
+        if (!memory) memory = Guest::AllocatePhysical(0x21000);
+        if (!memory) return false;
+        const uint32_t sp = memory + 0x1FF00, scratch = memory + 0x20000;
+        const uint32_t result = scratch, start = scratch + 96, end = scratch + 112;
+        const uint32_t mins = scratch + 128, maxs = scratch + 144, filter = scratch + 160;
+        position = scratch + 192;
+        memset(base + scratch, 0, 256);
+        float lower[3], upper[3], hullMin[3], hullMax[3], origin[3];
+        for (int k = 0; k < 3; k++)
+        {
+            lower[k] = ReadF(base, player + 240 + 4 * k);
+            upper[k] = ReadF(base, player + 256 + 4 * k);
+            hullMin[k] = ReadF(base, vehicle + 240 + 4 * k);
+            hullMax[k] = ReadF(base, vehicle + 256 + 4 * k);
+            origin[k] = ReadF(base, vehicle + 336 + 4 * k);
+            if (!std::isfinite(lower[k]) || !std::isfinite(upper[k]) ||
+                !std::isfinite(hullMin[k]) || !std::isfinite(hullMax[k]) ||
+                !std::isfinite(origin[k]) || lower[k] > upper[k] || hullMin[k] > hullMax[k] ||
+                fabsf(lower[k]) > 128 || fabsf(upper[k]) > 128 ||
+                fabsf(hullMin[k]) > 512 || fabsf(hullMax[k]) > 512) return false;
+            WriteF(base, mins + 4 * k, lower[k]);
+            WriteF(base, maxs + 4 * k, upper[k]);
+        }
+        const float yaw = ReadF(base, vehicle + 356);
+        if (!std::isfinite(yaw)) return false;
+        const float radians = yaw * 0.01745329252f;
+        const float fx = cosf(radians), fy = sinf(radians), lx = -fy, ly = fx;
+        const float radius = sqrtf(std::max(lower[0] * lower[0], upper[0] * upper[0]) +
+                                   std::max(lower[1] * lower[1], upper[1] * upper[1]));
+        if (radius < 4.0f || upper[2] - lower[2] < 24.0f) return false;
+        float ahead = (ReadF(base, player + 336) - origin[0]) * fx +
+                      (ReadF(base, player + 340) - origin[1]) * fy;
+        if (!std::isfinite(ahead) || hullMax[0] - hullMin[0] < 2 * radius) return false;
+        ahead = std::clamp(ahead, hullMin[0] + radius, hullMax[0] - radius);
+
+        // Ordinary native trace filter from sub_82583Cxx: 24 bytes, vtable
+        // +0, ignored entity's handle +4, contents mask +20. Trace arguments
+        // are result/start/mins/maxs/end/filter/r9/r10, then stack +84/+92.
+        // Result is 80 bytes: hit position +0, normal +16, fraction +32, solid +60/+61,
+        // hit handle +48. These layouts were checked in the generated code.
+        Guest::Write32(base, filter, 0x82065DCCu);
+        Guest::Write32(base, filter + 4, Guest::Read32(base, player + 484));
+        Guest::Write32(base, filter + 20, 0x00210011u);
+        auto trace = [&](float sx, float sy, float sz, float ex, float ey, float ez)
+        {
+            memset(base + result, 0, 80);
+            WriteF(base, result + 32, 1.0f);
+            WriteF(base, start, sx); WriteF(base, start + 4, sy); WriteF(base, start + 8, sz);
+            WriteF(base, end, ex); WriteF(base, end + 4, ey); WriteF(base, end + 8, ez);
+            Guest::Write32(base, sp, 0);
+            Guest::Write32(base, sp + 84, 0);
+            Guest::Write32(base, sp + 92, 0);
+            PPCContext call = ctx;
+            call.r1.u64 = sp; call.lr = 0;
+            call.r3.u64 = result; call.r4.u64 = start; call.r5.u64 = mins;
+            call.r6.u64 = maxs; call.r7.u64 = end; call.r8.u64 = filter;
+            call.r9.u64 = 0; call.r10.u64 = 0; call.f1.f64 = 0;
+            sub_82534200(call, base);
+            return std::isfinite(ReadF(base, result + 32)) &&
+                   !base[result + 60] && !base[result + 61];
+        };
+        const float cx = origin[0] + fx * ahead, cy = origin[1] + fy * ahead;
+        const float top = origin[2] + hullMax[2] - lower[2] + 24.0f;
+        const float bottom = origin[2] + hullMin[2] - 192.0f;
+        for (int attempt = 0; attempt < 2; attempt++)
+        {
+            side = preferred == 3 ? (attempt == 0 ? 3 : 1) : (attempt == 0 ? preferred : -preferred);
+            for (float extra : { 24.0f, 48.0f, 72.0f })
+            {
+                const float across = side > 0 ? hullMax[1] + radius + extra : hullMin[1] - radius - extra;
+                const float behind = hullMin[0] - radius - extra;
+                const float x = side == 3 ? origin[0] + fx * behind : cx + lx * across;
+                const float y = side == 3 ? origin[1] + fy * behind : cy + ly * across;
+                // Sweep over the hull, then down to the ground with the full
+                // player box. Reject walls, solid starts, steep faces, void,
+                // and a landing on this vehicle itself.
+                if (!trace(cx, cy, top, x, y, top) || ReadF(base, result + 32) < 1.0f) continue;
+                if (!trace(x, y, top, x, y, bottom)) continue;
+                const float fraction = ReadF(base, result + 32);
+                const float normalZ = ReadF(base, result + 24); // +0 is hit position, +16 is normal
+                printf("kangaroo: exit trace: direction %d, clearance %.0f, fraction %.3f, ground Z %.1f, normal Z %.3f\n", side, extra, fraction, ReadF(base, result + 8), normalZ);
+                if (fraction < 0 || fraction >= 1 || !std::isfinite(normalZ) || normalZ < 0.6f ||
+                    Guest::Read32(base, result + 48) == Guest::Read32(base, vehicle + 484)) continue;
+                WriteF(base, position, x); WriteF(base, position + 4, y);
+                WriteF(base, position + 8, top + (bottom - top) * fraction + 1.0f);
+                return true;
+            }
+        }
+        return false;
+    }
+}
+void MpFixesKangarooExit(int mode)
+{
+    g_kangarooExit.store(std::clamp(mode, 0, 2));
+    printf("kangaroo: exit mode %d (0 native, 1 prefer left, 2 prefer right)\n", g_kangarooExit.load());
+    fflush(stdout);
+}
+extern "C" PPC_FUNC(__imp__sub_8255AFF0);
+PPC_FUNC(sub_8255AFF0)
+{
+    const uint32_t player = ctx.r3.u32, caller = uint32_t(ctx.lr);
+    const uint32_t link = player ? Guest::Read32(base, player + 900) : 0;
+    const uint32_t vehicle = link ? Guest::Read32(base, link) : 0;
+    const uint32_t client = player ? Guest::Read32(base, player + 512) : 0;
+    const bool kangaroo = client && g_kangarooEntities.count(vehicle) != 0;
+    __imp__sub_8255AFF0(ctx, base);
+    if (!kangaroo || Guest::Read32(base, player + 900) != 0) return;
+    printf("kangaroo: unlink player %08X from %08X at %08X, seat %d\n", player, vehicle, caller,
+           int32_t(Guest::Read32(base, client + 1300)));
+    fflush(stdout);
+}
+
+// 0.5.107: the live game's dismount path is 8257ABF0. It unlinks at
+// 8257AD34, chooses an exit, then sets origin at 8257B180. Apply AFTER
+// the whole function, only when its in-vehicle bit and link are cleared.
+extern "C" PPC_FUNC(__imp__sub_8257ABF0);
+PPC_FUNC(sub_8257ABF0)
+{
+    const uint32_t player = ctx.r3.u32;
+    const uint32_t client = player ? Guest::Read32(base, player + 512) : 0;
+    const uint32_t link = player ? Guest::Read32(base, player + 900) : 0;
+    const uint32_t vehicle = link ? Guest::Read32(base, link) : 0;
+    const bool wasMounted = client && (Guest::Read32(base, client + 240) & 0x100000u);
+    int preferred = g_kangarooExit.load() == 2 ? -1 : 1;
+    {
+        std::lock_guard<std::mutex> guard(g_kangarooApproachMutex);
+        auto found = g_kangarooApproaches.find(player);
+        if (found != g_kangarooApproaches.end() && found->second.vehicle == vehicle)
+            preferred = found->second.direction;
+    }
+    __imp__sub_8257ABF0(ctx, base);
+    if (!wasMounted || !g_kangarooEntities.count(vehicle) || !g_kangarooExit.load() ||
+        Guest::Read32(base, player + 900) || (Guest::Read32(base, client + 240) & 0x100000u)) return;
+    std::lock_guard<std::mutex> lock(g_kangarooExitMutex);
+    uint32_t position = 0;
+    int side = 0;
+    if (!KangarooExitPoint(ctx, base, player, vehicle, preferred, position, side))
+    {
+        printf("kangaroo: exit: no clear grounded landing for direction %d; native position retained\n", preferred);
+        fflush(stdout);
+        return;
+    }
+    PPCContext place = ctx;
+    place.r1.u64 = position - 448; place.lr = 0;
+    place.r3.u64 = player; place.r4.u64 = position;
+    sub_8255E118(place, base);
+    printf("kangaroo: exit: placed on %s at %.1f %.1f %.1f\n", side == 3 ? "rear" : side > 0 ? "left" : "right",
+           ReadF(base, player + 336), ReadF(base, player + 340), ReadF(base, player + 344));
+    fflush(stdout);
+}
+
 // 0.5.78: who asks which tag of which vehicle (sub_82435668, the caller
 // its return address), every vehicle's model, not only the Kangaroo's: with
 // Use pressed next to the jeep and next to the Kangaroo, what getting in
@@ -3127,6 +3630,34 @@ void MpFixesKangarooWhere(uint8_t* base)
         last[0] = x; last[1] = y; last[2] = z;
         printf("kangaroo: at %.0f %.0f %.0f, facing %.0f\n", x, y, z, ReadF(base, entity + 356));
         fflush(stdout);
+    }
+    // 0.5.92: both treads' bone matrices as last worked out (the model
+    // object's matrices, +112, 64 bytes a bone, as sub_8241E908 writes them),
+    // and the four wheels next to them, to see what sets the bad tread apart.
+    for (const uint32_t entity : g_kangarooEntities)
+    {
+        const uint32_t dobj = Guest::Read32(base, entity + 492);
+        const uint32_t model = dobj ? Guest::Read32(base, dobj + 128) : 0;
+        uint32_t skeleton = 0;
+        for (int k = 0; model && k < 8 && !skeleton; k++) skeleton = Guest::Read32(base, model + 36 + 4 * uint32_t(k));
+        const uint32_t table = skeleton ? Guest::Read32(base, skeleton + 8) : 0;
+        const uint32_t count = table ? Guest::Read32(base, table + 16) : 0;
+        const uint32_t names = table ? Guest::Read32(base, table + 20) : 0;
+        const uint32_t matrices = dobj ? Guest::Read32(base, dobj + 112) : 0;
+        if (!names || !matrices || count > 160) continue;
+        static const char* const wanted[] = { "tag_tread_left", "tag_tread_right", "tag_gear_left", "tag_gear_right",
+                                              "tag_wheel_middle_left", "tag_wheel_middle_right" };
+        for (const char* name : wanted)
+            for (uint32_t i = 0; i < count; i++)
+            {
+                if (Guest::Read32(base, names + 12 * i + 4) != TagHash(name)) continue;
+                printf("kangaroo: bone %s (%u) speed %.1f:", name, i, ReadF(base, entity + 716));
+                for (uint32_t w = 0; w < 16; w++) printf(" %.2f", ReadF(base, matrices + i * 64 + 4 * w));
+                printf("\n");
+                break;
+            }
+        fflush(stdout);
+        break;
     }
 }
 
@@ -3179,6 +3710,12 @@ void MpFixesKangarooProbe(PPCContext& ctx, uint8_t* base)
             char word[12];
             for (uint32_t at = 0; dobj && at < 256; at += 4) { snprintf(word, sizeof(word), " %08X", Guest::Read32(base, dobj + at)); words += word; }
             printf("kangaroo: %s's model object:%s\n", name.c_str(), words.c_str());
+            // 0.5.88: the entity's own words around its box, to find what
+            // makes a player bump into a vehicle (Justin walks into the
+            // Kangaroo's hull but not the tanks').
+            words.clear();
+            for (uint32_t at = 200; at < 340; at += 4) { snprintf(word, sizeof(word), " %08X", Guest::Read32(base, entity + at)); words += word; }
+            printf("kangaroo: %s's entity +200..+336:%s\n", name.c_str(), words.c_str());
             DumpVehicleKind(base, record);
         }
     }
@@ -4437,17 +4974,348 @@ PPC_FUNC(sub_8254D180)
 // place. Each frame its right side's distance is kept the left side's.
 void MpFixesKangarooTreads(uint8_t* base)
 {
-    for (const uint32_t entity : g_kangarooEntities)
+    (void)base;   // 0.5.87: the right side's distance is left alone again
+}
+
+// 0.5.87: 0.5.86's copy did nothing for it: the right tread still stood out
+// of the hull, and the more so the further it drove. sub_82434918 (the
+// entity r3, the tag r4, the tag list r5) gives a tread or gear tag a moved
+// pose of its own while the vehicle drives; it returns 1 when it gave one.
+// The Kangaroo's tag_tread_right isn't posed as the tanks' is, and a moved
+// pose throws it out. For a Kangaroo that tag keeps the model's own pose
+// (the call answered 0, as when standing still). Its left tread, gears and
+// wheels go on as before. The tag's id is the game's own, kept at 82C9E59C.
+// 0.5.88: the console's kangaroo_tread N picks how the right tread is moved,
+// for finding the way that rolls it in place: 0 kept in place (0.5.87's),
+// 1 the game's own, 2 to 5 the game's movement along -X, +Y, -Y and +Z of the
+// tread's own bone instead of +X, 6 the left tread's own movement given to
+// the right tread too.
+// 0.5.99: 10 (the game's own tread and sprocket poses, with the wheel list
+// put right) is the default: 0.5.98's real crash was the weapon look, not
+// these poses, and Justin's test of 10 on 0.5.98 ran and rolled the treads.
+namespace { std::atomic<int> g_treadMode{10}; }
+void MpFixesKangarooTread(int mode)
+{
+    g_treadMode.store(mode < 0 ? 0 : mode > 10 ? 10 : mode);
+    printf("kangaroo: right tread mode %d\n", g_treadMode.load()); fflush(stdout);
+}
+extern "C" PPC_FUNC(__imp__sub_82434918);
+PPC_FUNC(sub_82434918)
+{
+    const uint32_t entity = ctx.r3.u32, tag = ctx.r4.u32, list = ctx.r5.u32;
+    const uint32_t right = Guest::Read32(base, 0x82C9E59Cu);
+    const bool kangaroo = !g_kangarooEntities.empty() && g_kangarooEntities.count(entity) != 0;
+    const bool kangarooRight = kangaroo && right != 0 && tag == right;
+    const int mode = g_treadMode.load();
+    // 0.5.88: Justin's video of 0.5.87: with the right tread held, the left
+    // tread was thrown off whole, out past the front and over the top, and a
+    // drive sprocket stood out of the hull at the back. The moved poses this
+    // gives (made for the tanks' models) carry the Kangaroo's tread and gear
+    // parts bodily. So in mode 0 none of its four tags (both treads, both
+    // gears: the ids at 82C9E594..82C9E5A0) is given one.
+    // 0.5.90: what the tests add up to. The left tread sits right only with
+    // the game's pose: Justin's 0.5.85 (both posed: left right, right off),
+    // 0.5.87's video (left posed, but only while moving: parked, it lay thrown
+    // off), 0.5.88 and 0.5.89 (left never posed: always thrown off). The
+    // right tread sits right only without one. The pose is given only while
+    // the vehicle moves (its speed, entity +716, above nought), so the left
+    // tread is now always given it: a parked Kangaroo's speed is made a hair
+    // above nought for that one call.
+    const uint32_t leftTread = Guest::Read32(base, 0x82C9E5A0u);
+    if (kangaroo && mode == 8 && tag != 0 && tag == leftTread)
     {
-        const uint32_t record = Guest::Read32(base, entity + 524);
-        if (record < 0x40000000u || record >= 0x90000000u) continue;
-        const uint32_t left = Guest::Read32(base, record + 1312);
-        if (Guest::Read32(base, record + 1308) != left)
+        const uint32_t speedBits = Guest::Read32(base, entity + 716);
+        float speed; memcpy(&speed, &speedBits, 4);
+        if (!(speed > 0.0f)) { const float tiny = 0.001f; uint32_t bits; memcpy(&bits, &tiny, 4); Guest::Write32(base, entity + 716, bits); }
+        __imp__sub_82434918(ctx, base);
+        Guest::Write32(base, entity + 716, speedBits);
+        static bool said = false;
+        if (!said) { said = true; printf("kangaroo: left tread always posed, right tread and gears kept in place\n"); fflush(stdout); }
+        return;
+    }
+    // 0.5.95: with the wheel list put right (0.5.93), the game's own tread
+    // and sprocket poses are given again in mode 0: the treads' texture runs
+    // with how far each side has gone (the v_tracked_tread shader reads the
+    // tread bone's pose) and the sprockets turn, as on the campaign's tanks.
+    // They were only ever thrown off by the Horch's wheel at bone 4. Mode 9
+    // keeps all four still, as 0.5.93 did.
+    // 0.5.97: 0.5.95's giving them in mode 0 crashed the game at the spawn
+    // (Justin, 0.5.95 and 0.5.96), so mode 0 holds all four still again, as
+    // 0.5.94 did, and mode 10 gives the game's poses with the wheel list put
+    // right, for trying.
+    if (kangaroo && mode != 10 && (mode == 0 || mode == 9))
+    {
+        const bool part = tag != 0 && (tag == right || tag == leftTread ||
+                                       tag == Guest::Read32(base, 0x82C9E598u) || tag == Guest::Read32(base, 0x82C9E594u));
+        if (part)
         {
-            static int said = 0;
-            if (said++ < 5) { uint32_t w = Guest::Read32(base, record + 1308); float r, l; memcpy(&r, &w, 4); memcpy(&l, &left, 4); printf("kangaroo: right tread's distance %.1f set to the left's %.1f\n", r, l); fflush(stdout); }
-            Guest::Write32(base, record + 1308, left);
+            static bool said = false;
+            if (!said) { said = true; printf("kangaroo: treads and gears kept in the model's own place\n"); fflush(stdout); }
+            ctx.r3.u64 = 0;
+            return;
         }
     }
+    if (kangarooRight && mode == 6)
+    {
+        const uint32_t left = Guest::Read32(base, 0x82C9E5A0u);   // tag_tread_left's id
+        if (left != 0) ctx.r4.u64 = left;
+    }
+    __imp__sub_82434918(ctx, base);
+    if (!kangarooRight || mode < 2 || mode > 5 || ctx.r3.u32 == 0) return;
+    // The pose it gave: an identity turn moved by (d, 0, 0), its pointer in
+    // the tag list's slot (bone + 2) (the bone at 82A86B80, as the call had it).
+    const uint32_t slots = list ? Guest::Read32(base, list) : 0;
+    const uint32_t bone = Guest::Read32(base, 0x82A86B80u);
+    const uint32_t matrix = slots ? Guest::Read32(base, slots + (bone + 2) * 4) : 0;
+    if (matrix < 0x40000000u || matrix >= 0xA0000000u) return;
+    uint32_t bits = Guest::Read32(base, matrix + 48);
+    float d; memcpy(&d, &bits, 4);
+    float moved[3] = { 0, 0, 0 };
+    if (mode == 2) moved[0] = -d;
+    else if (mode == 3) moved[1] = d;
+    else if (mode == 4) moved[1] = -d;
+    else moved[2] = d;
+    for (int i = 0; i < 3; i++) { memcpy(&bits, &moved[i], 4); Guest::Write32(base, matrix + 48 + 4 * i, bits); }
+    static int said = 0;
+    if (said++ < 3) { printf("kangaroo: right tread (mode %d) moved %.2f, bone %u, pose at %08X\n", mode, d, bone, matrix); fflush(stdout); }
+}
+
+// 0.5.89: the other thing that throws the Kangaroo's tread off. Justin, on
+// 0.5.88: with the tread mover off, the left tread is still thrown off the
+// same way, and the wheels never turn. A vehicle's parts are posed each frame
+// by sub_8242B938 (its physics object r3: the entity at +624, the flags at
+// +640). With the flags' 0x10 (a tracked vehicle, the Sherman's kind the
+// Kangaroo's is copied from) it calls sub_8241E908, which aims each tread
+// between three of the vehicle's wheel points (+800..+820) and writes the
+// tread's bone outright: on the Kangaroo, built from the Horch's record, those
+// points aren't its own, and the tread is laid along the wrong line. Without
+// 0x10 it poses each wheel instead (the bones at +36.., sub_8241D168: the
+// turning and the springs), as for the jeeps.
+// kangaroo_tread 0 (the default): the Kangaroo posed as a wheeled vehicle:
+// its wheels turn, its treads stay where its model has them. 1: the game's
+// own. 7: the tank's way, with only the tread aiming left out.
+// 0.5.93: the left tread spun because it was turned as a wheel. Justin's
+// Kangaroo dossier: the Kangaroo is a Horch made over (its model swapped in
+// on the map's Horch) and posed as a four-wheeler. A vehicle's wheel bones
+// are kept as bone numbers at +36 of its physics object (up to eight, -1 for
+// none; sub_8242B938 turns and springs each), found once by name in the order
+// of the game's wheel-name table (0x825D5C6C: front left, front right, back
+// left, back right, middle left, middle right). They were found on the
+// Horch's model: on the Kangaroo's skeleton bone 4 is tag_tread_left, so the
+// Horch's wheel there turned the tread. Each frame the Kangaroo's list is put
+// right by the names on its own skeleton.
+namespace
+{
+    int32_t KangarooBone(uint8_t* base, uint32_t dobj, const char* name)
+    {
+        const uint32_t model = dobj ? Guest::Read32(base, dobj + 128) : 0;
+        uint32_t skeleton = 0;
+        for (int k = 0; model && k < 8 && !skeleton; k++) skeleton = Guest::Read32(base, model + 36 + 4 * uint32_t(k));
+        const uint32_t table = skeleton ? Guest::Read32(base, skeleton + 8) : 0;
+        const uint32_t count = table ? Guest::Read32(base, table + 16) : 0;
+        const uint32_t names = table ? Guest::Read32(base, table + 20) : 0;
+        if (!names || count > 160) return -1;
+        const uint32_t hash = TagHash(name);
+        for (uint32_t i = 0; i < count; i++) if (Guest::Read32(base, names + 12 * i + 4) == hash) return int32_t(i);
+        return -1;
+    }
+    void FixKangarooWheels(uint8_t* base, uint32_t object, uint32_t entity)
+    {
+        static const char* const order[6] = { "tag_wheel_front_left", "tag_wheel_front_right", "tag_wheel_back_left",
+                                              "tag_wheel_back_right", "tag_wheel_middle_left", "tag_wheel_middle_right" };
+        const uint32_t dobj = Guest::Read32(base, entity + 492);
+        static std::set<uint32_t> told;
+        const bool tell = told.insert(object).second;
+        std::string before, after;
+        char text[16];
+        for (uint32_t i = 0; i < 8; i++)
+        {
+            const int32_t was = int32_t(Guest::Read32(base, object + 36 + 4 * i));
+            snprintf(text, sizeof(text), " %d", was); before += text;
+            if (was < 0 || i >= 6) { after += text; continue; }   // only the slots the vehicle uses
+            const int32_t bone = KangarooBone(base, dobj, order[i]);
+            if (bone >= 0 && bone != was) Guest::Write32(base, object + 36 + 4 * i, uint32_t(bone));
+            snprintf(text, sizeof(text), " %d", bone >= 0 ? bone : was); after += text;
+        }
+        if (tell) { printf("kangaroo: wheel bones were%s, now%s (its own by name)\n", before.c_str(), after.c_str()); fflush(stdout); }
+    }
+}
+// 0.5.103: the Kangaroo's treads going straight. Each frame sub_82568600
+// (the entity r3; its record at +524) adds the distance driven to the treads'
+// distances (record +1308 right, +1312 left), which sub_82434918 turns into
+// the treads' and sprockets' poses. On the Kangaroo (the Horch's physics)
+// that only moved them while turning (Justin, 0.5.102): going straight, the
+// treads stood still. So after it, the distance the Kangaroo moved along its
+// facing since the last frame is added to both sides (backwards takes away).
+namespace { struct TreadLast { float x, y; bool set; }; std::map<uint32_t, TreadLast> g_treadLast; }
+extern "C" PPC_FUNC(__imp__sub_82568600);
+PPC_FUNC(sub_82568600)
+{
+    const uint32_t entity = ctx.r3.u32;
+    __imp__sub_82568600(ctx, base);
+    if (!entity || g_kangarooEntities.empty() || g_kangarooEntities.count(entity) == 0) return;
+    const uint32_t record = Guest::Read32(base, entity + 524);
+    if (record < 0x40000000u || record >= 0xA0000000u) return;
+    const float x = ReadF(base, entity + 336), y = ReadF(base, entity + 340);
+    TreadLast& last = g_treadLast[entity];
+    if (!last.set) { last = { x, y, true }; return; }
+    const float dx = x - last.x, dy = y - last.y;
+    last.x = x; last.y = y;
+    if (fabsf(dx) + fabsf(dy) > 200.0f) return;   // a jump (moved or respawned), not driving
+    const float yaw = ReadF(base, entity + 356) * 3.14159265f / 180.0f;
+    const float ahead = dx * cosf(yaw) + dy * sinf(yaw);
+    if (ahead == 0.0f) return;
+    WriteF(base, record + 1308, ReadF(base, record + 1308) + ahead);
+    WriteF(base, record + 1312, ReadF(base, record + 1312) + ahead);
+}
+
+extern "C" PPC_FUNC(__imp__sub_8242B938);
+PPC_FUNC(sub_8242B938)
+{
+    const uint32_t object = ctx.r3.u32;
+    const uint32_t entity = object ? Guest::Read32(base, object + 624) : 0;
+    const bool kangaroo = entity && !g_kangarooEntities.empty() && g_kangarooEntities.count(entity) != 0;
+    if (kangaroo && g_treadMode.load() != 1) FixKangarooWheels(base, object, entity);
+    const uint32_t flags = kangaroo ? Guest::Read32(base, object + 640) : 0;
+    if (kangaroo && g_treadMode.load() == 0 && (flags & 0x10))
+    {
+        static bool said = false;
+        if (!said)
+        {
+            said = true;
+            printf("kangaroo: posed as a wheeled vehicle (flags %08X): wheels turn, treads in place; its wheel bones", flags);
+            for (uint32_t i = 0; i < 8; i++) printf(" %d", int32_t(Guest::Read32(base, object + 36 + 4 * i)));
+            printf("\n"); fflush(stdout);
+        }
+        Guest::Write32(base, object + 640, flags & ~0x10u);
+        __imp__sub_8242B938(ctx, base);
+        Guest::Write32(base, object + 640, Guest::Read32(base, object + 640) | 0x10u);
+        return;
+    }
+    __imp__sub_8242B938(ctx, base);
+}
+extern "C" PPC_FUNC(__imp__sub_8241E908);
+PPC_FUNC(sub_8241E908)
+{
+    const uint32_t object = ctx.r3.u32;
+    const uint32_t entity = object ? Guest::Read32(base, object + 624) : 0;
+    if (entity && g_treadMode.load() == 7 && g_kangarooEntities.count(entity) != 0) return;
+    __imp__sub_8241E908(ctx, base);
+}
+#endif
+
+#ifdef COD3_MP
+namespace {
+    // Full player-box clearance and grounded landing using the same native
+    // trace layout as the verified Kangaroo exits, on a private guest stack.
+    bool TacticalLanding(PPCContext& ctx,uint8_t* base,uint32_t player,const float saved[3],uint32_t& position) {
+        static uint32_t memory=0;
+        if(!memory) memory=Guest::AllocatePhysical(0x21000);
+        if(!memory) return false;
+        const uint32_t sp=memory+0x1FF00, scratch=memory+0x20000;
+        const uint32_t start=scratch+96,end=scratch+112,mins=scratch+128,maxs=scratch+144,filter=scratch+160;
+        position=scratch+192;
+        memset(base+scratch,0,256);
+        for(int k=0;k<3;++k) {
+            float lo=ReadF(base,player+240+4*k),hi=ReadF(base,player+256+4*k);
+            if(!std::isfinite(saved[k])||!std::isfinite(lo)||!std::isfinite(hi)||lo>hi||fabsf(lo)>128||fabsf(hi)>128) return false;
+            WriteF(base,mins+4*k,lo);WriteF(base,maxs+4*k,hi);
+            WriteF(base,start+4*k,saved[k]);WriteF(base,end+4*k,saved[k]);
+        }
+        WriteF(base,start+8,saved[2]+8);WriteF(base,end+8,saved[2]-16);
+        Guest::Write32(base,filter,0x82065DCC);
+        Guest::Write32(base,filter+4,Guest::Read32(base,player+484));
+        Guest::Write32(base,filter+20,0x00210011);
+        Guest::Write32(base,sp,0);Guest::Write32(base,sp+84,0);Guest::Write32(base,sp+92,0);
+        PPCContext call=ctx;call.r1.u64=sp;call.lr=0;
+        call.r3.u64=scratch;call.r4.u64=start;call.r5.u64=mins;call.r6.u64=maxs;
+        call.r7.u64=end;call.r8.u64=filter;call.r9.u64=0;call.r10.u64=0;call.f1.f64=0;
+        sub_82534200(call,base);
+        const float fraction=ReadF(base,scratch+32),nz=ReadF(base,scratch+24);
+        if(!std::isfinite(fraction)||fraction<0||fraction>=1||!std::isfinite(nz)||nz<0.6f||base[scratch+60]||base[scratch+61]) return false;
+        for(int k=0;k<3;++k) {float v=ReadF(base,scratch+4*k);if(!std::isfinite(v))return false;WriteF(base,position+4*k,v);}
+        return true;
+    }
+}
+static void TacticalInsertionFrame(PPCContext& ctx,uint8_t* base) {
+    static TacticalPointInput::Hold hold,returnHold;
+    static bool saved=false;
+    static float point[3]={};
+    static uint32_t hostBefore=0,levelBefore=0;
+    const uint32_t list=Guest::Read32(base,0x82BCC7FC);
+    const uint32_t host=list?Guest::Read32(base,list+4):0;
+    const uint32_t ps=host?Guest::Read32(base,host+512):0;
+    const uint32_t levelTime=Guest::Read32(base,0x82C2826C);
+    if(host!=hostBefore || levelTime<levelBefore) {saved=false;hold={};returnHold={};}
+    hostBefore=host;levelBefore=levelTime;
+    bool eligible=host>=0x40000000u && host<0xA0000000u && ps>=0x40000000u && ps<0xA0000000u &&
+        Guest::Read32(base,0x82BCBE9C)==0 && !Guest::Read8(base,0x82C73024) && !Overlay::IsOpen() &&
+        Guest::Read32(base,0x82C7A270+0xB8)==2;
+    if(eligible) {
+        eligible=int32_t(Guest::Read32(base,ps+304))>0 && Guest::Read32(base,ps+1924)==3 &&
+            !(Guest::Read32(base,ps+240)&0x100000u) &&
+            !Guest::Read32(base,host+900) && ReadF(base,ps+172)<0.01f;
+        // Horizontal stillness; ordinary vertical gravity samples must not
+        // restart the timer every frame while standing on the floor.
+        for(int k=0;k<3;++k) {const float v=ReadF(base,ps+16+4*k);eligible=eligible&&std::isfinite(v)&&fabsf(v)<(k==2?40.0f:5.0f);}
+    }
+    // 0.5.181: (the return is held X now, input.cpp.) Justin: R3 said "RETURN POINT BLOCKED" (and often the hold was
+    // rejected): he wants to go back to wherever he saved, from wherever he
+    // is. Returning needs only: alive and in play, out of menus and out of a
+    // vehicle; moving, ADS or odd ground no longer stop it. (The strict
+    // stillness above still decides the L3 save and when L3/R3 are kept
+    // from the game, so sprint and melee work as normal while moving.)
+    bool canReturn=host>=0x40000000u && host<0xA0000000u && ps>=0x40000000u && ps<0xA0000000u &&
+        Guest::Read32(base,0x82BCBE9C)==0 && !Guest::Read8(base,0x82C73024) && !Overlay::IsOpen() &&
+        Guest::Read32(base,0x82C7A270+0xB8)==2;
+    if(canReturn) canReturn=int32_t(Guest::Read32(base,ps+304))>0 && Guest::Read32(base,ps+1924)==3 &&
+        !(Guest::Read32(base,ps+240)&0x100000u) && !Guest::Read32(base,host+900);
+    Input::SetTacticalPointInput(eligible,saved);
+    const bool down=Input::TacticalPointSaveHeld();
+    const bool back=Input::TacticalPointReturnHeld();
+    const bool starting=eligible&&down&&!hold.timing;
+    if(starting)Overlay::Notice("SAVING RETURN POINT - hold L3",1100);
+    if(TacticalPointInput::Save(hold,eligible,down,GetTickCount())) {
+        bool finite=true;
+        for(int k=0;k<3;++k)finite=finite&&std::isfinite(ReadF(base,ps+4*k));
+        if(finite) {
+            for(int k=0;k<3;++k)point[k]=ReadF(base,ps+4*k);
+            saved=true;Overlay::Notice("RETURN POINT SAVED - hold X for 2 seconds to return",4000);
+            printf("tactical point: saved %.1f %.1f %.1f\n",point[0],point[1],point[2]);fflush(stdout);
+        }
+    }
+    const bool returning=TacticalPointInput::Save(returnHold,canReturn,back,GetTickCount(),2000);
+    // X is also reload/use: the notice only once X has been held half a
+    // second, so an ordinary reload shows nothing.
+    {
+        static bool told=false;
+        if(!returnHold.timing) told=false;
+        else if(saved&&!told&&uint32_t(GetTickCount()-returnHold.began)>=500) {told=true;Overlay::Notice("RETURNING - keep holding X",1800);}
+    }
+    if(down&&!eligible) {
+        static uint32_t lastRejected=0;
+        const uint32_t now=GetTickCount();
+        if(now-lastRejected>1000) {
+            lastRejected=now;
+            printf("tactical point: hold rejected; local state %u pause %u current %u host %08X ps %08X\n",Guest::Read32(base,0x82C7A270+0xB8),Guest::Read8(base,0x82C73024),Guest::Read32(base,0x82BCBE9C),host,ps);fflush(stdout);
+            Overlay::Notice("RETURN POINT: stop moving, leave ADS and menus",1500);
+        }
+    }
+    if(!canReturn||!saved||!returning)return;
+    uint32_t position=0;
+    // 0.5.181: the grounded landing trace is only a refinement now. If it
+    // finds no clear floor (odd geometry), he goes to the exact spot he
+    // saved: it is where he stood when he saved it.
+    if(!TacticalLanding(ctx,base,host,point,position)) {
+        if(!position) {Overlay::Notice("RETURN POINT: no memory",2500);return;}
+        for(int k=0;k<3;++k)WriteF(base,position+4*k,point[k]);
+        WriteF(base,position+8,point[2]+1.0f);
+        printf("tactical point: landing trace found no floor; returning to the exact saved spot\n");fflush(stdout);
+    }
+    PPCContext place=ctx;place.r1.u64=position-448;place.lr=0;place.r3.u64=host;place.r4.u64=position;
+    sub_8255E118(place,base);
+    for(int k=0;k<3;++k)WriteF(base,ps+16+4*k,0);
+    Overlay::Notice("RETURNED TO SAVED POINT",2000);
+    printf("tactical point: returned %.1f %.1f %.1f\n",point[0],point[1],point[2]);fflush(stdout);
 }
 #endif

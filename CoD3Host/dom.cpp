@@ -1018,6 +1018,36 @@ void Domination::OnState(const uint8_t* packet, int size, unsigned int)
     g_stateNew = true;
 }
 
+// 0.5.88: a bot's flag. The flags his side doesn't hold, nearest first, each
+// bot leaning toward a different one by his slot so they spread out; with
+// every flag held, the nearest one his side holds that the other side is
+// taking, else the nearest one to stand at.
+bool Domination::BotGoal(uint32_t side, uint32_t slot, const float me[3], float out[3], bool& atFlag)
+{
+    atFlag = false;
+    if (!g_active || !g_ready || g_placed < Flags || !LobbyIsHost() || (side != 1 && side != 2)) return false;
+    int best = -1;
+    float bestScore = 1e30f;
+    for (int pass = 0; pass < 3 && best < 0; pass++)
+        for (int i = 0; i < Flags; i++)
+        {
+            const Flag& flag = g_flags[i];
+            const bool want = pass == 0 ? flag.owner != side
+                            : pass == 1 ? (flag.owner == side && flag.taker != 0 && flag.taker != side)
+                                        : true;
+            if (!want) continue;
+            const float dx = g_at[i][0] - me[0], dy = g_at[i][1] - me[1];
+            const float lean = 1.0f + 0.35f * float((slot + uint32_t(i)) % 3);
+            const float score = std::sqrt(dx * dx + dy * dy) * lean;
+            if (score < bestScore) { bestScore = score; best = i; }
+        }
+    if (best < 0) return false;
+    memcpy(out, g_at[best], sizeof(float) * 3);
+    const float dx = g_at[best][0] - me[0], dy = g_at[best][1] - me[1];
+    atFlag = dx * dx + dy * dy <= (Radius * 0.6f) * (Radius * 0.6f);
+    return true;
+}
+
 // The script's team scores back to nothing: a match begins.
 PPC_FUNC(sub_824B4730)
 {

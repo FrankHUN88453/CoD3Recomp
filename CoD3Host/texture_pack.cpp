@@ -269,6 +269,12 @@ std::string TexturePack::Key(uint32_t format, uint32_t width, uint32_t height, c
 void TexturePack::Dump(const std::string& key, uint32_t format, uint32_t width, uint32_t height, const std::vector<uint8_t>& linear)
 {
     if (!Settings::Get().textureDump || width < 8 || height < 8 || width > 4096 || height > 4096) return;
+    // 0.5.87: a playing movie gives a new texture every frame (640x360 and
+    // 1280x720, format 2), and writing each one out held up the drawing
+    // thread long enough to stall the campaign's start-up movies. Those are
+    // never dumped, and no more than 3000 textures are dumped in one run.
+    if (format == 2 && ((width == 640 && height == 360) || (width == 1280 && height == 720))) return;
+    if (g_dumps >= 3000) return;
     {
         std::lock_guard<std::mutex> lock(g_lock);
         Scan();
@@ -300,6 +306,28 @@ bool TexturePack::Load(const std::string& key, ID3D11Device* device, ID3D11Devic
         std::lock_guard<std::mutex> lock(g_lock);
         Scan();
         const auto found = g_replacements.find(key);
+        // 0.5.168: every texture of 128 or more across that the game
+        // uploads, once, into textures\used.txt: when (seconds since the
+        // start), its key, and whether a replacement was there. Visiting the
+        // menus then shows which of their pictures (banners, backgrounds)
+        // still have no upscaled copy (Justin: check the Create Lobby and
+        // System Link screens).
+        {
+            static std::set<std::string> seen;
+            static const ULONGLONG start = GetTickCount64();
+            unsigned w = 0, h = 0;
+            if (seen.insert(key).second && sscanf(key.c_str(), "%ux%u", &w, &h) == 2 && (w >= 128 || h >= 128))
+            {
+                static bool started = false;
+                if (FILE* f = _wfopen((g_root / L"used.txt").c_str(), started ? L"a" : L"w"))
+                {
+                    started = true;
+                    fprintf(f, "%6.1f %s %s\n", double(GetTickCount64() - start) / 1000.0, key.c_str(),
+                            found == g_replacements.end() ? "NOT-REPLACED" : "replaced");
+                    fclose(f);
+                }
+            }
+        }
         if (found == g_replacements.end()) return false;
         file = found->second;
     }

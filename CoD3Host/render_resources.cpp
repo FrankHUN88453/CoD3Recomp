@@ -351,6 +351,7 @@ namespace
         uint32_t bytes = 0;             // the buffer's size
         uint32_t seen = 0;              // the largest size a fetch asked for
         uint64_t watchedSince = 0;      // COD3_WRITEWATCH: its pages watched from this write sequence on, 0 not
+        uint64_t liveSince = 0;         // 0.5.99: a big buffer's pages watched within the frame from this sequence on
         bool live = false;
         std::vector<uint8_t> shadow;    // a big buffer: what went up, to send only what changed
     };
@@ -1326,6 +1327,60 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
             // its size, looked at by every draw, and the ones found changing
             // within a frame named with their size.
             static const bool audit = getenv("COD3_VBAUDIT") != nullptr;
+            // 0.5.99: the bullet holes' flicker. A buffer over a quarter
+            // megabyte was looked at only by the frame's first draw. The
+            // title writes its dynamic geometry (the marks among it) into a
+            // big pool a piece at a time through the frame, each piece just
+            // before the draw that uses it, so a later draw of the frame got
+            // what that place held a frame or more before: a mark drawn with
+            // last frame's vertices there (another mark, or nothing), in and
+            // out until the pool's layout settled. Now such a buffer's pages
+            // are watched from the frame's first look (the page protection
+            // of COD3_WRITEWATCH), and each later draw sends up just the
+            // pieces written since: no byte compared, only what changed sent.
+            // COD3_NOLIVEBUFFERS=1: as before.
+            static const bool noLive = getenv("COD3_NOLIVEBUFFERS") != nullptr;
+            const uint64_t since = entry.liveSince != 0 ? entry.liveSince : entry.watchedSince;
+            if (!once && !noLive && since != 0 && entry.seen > AlwaysDenseBytes && entry.buffer)
+            {
+                const uint32_t span = std::min(entry.seen, entry.bytes);
+                if (WriteWatch::Clean(physical, span, since)) return handle;
+                const uint64_t now = WriteWatch::Sequence();
+                uint64_t sent = 0;
+                uint32_t runStart = 0xFFFFFFFFu;
+                for (uint32_t at = 0; at < span; at += BufferPieceBytes)
+                {
+                    const uint32_t length = std::min(BufferPieceBytes, span - at);
+                    const bool written = !WriteWatch::Clean(physical + at, length, since);
+                    if (written && runStart == 0xFFFFFFFFu) runStart = at;
+                    const bool last = at + length >= span;
+                    if (runStart != 0xFFFFFFFFu && (!written || last))
+                    {
+                        const uint32_t end = written ? at + length : at;
+                        D3D11_BOX box{ runStart, 0, 0, end, 1, 1 };
+                        g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data + runStart, 0, 0);
+                        if (entry.shadow.size() >= end) memcpy(entry.shadow.data() + runStart, data + runStart, end - runStart);
+                        sent += end - runStart;
+                        runStart = 0xFFFFFFFFu;
+                    }
+                }
+                entry.watchedSince = 0;
+                entry.stable = 0;
+                entry.liveSince = WriteWatch::Arm(physical, span) ? now : 0;
+                if (entry.dense) entry.fingerprint = 0;   // the next frame's look sends it whole if it is not the same
+                static int told = 0;
+                if (told++ < 8)
+                    printf("render: the vertex buffer at %08X (%u bytes) was written within a frame: %llu bytes of it sent again for a later draw\n",
+                        physical, span, (unsigned long long)sent);
+                if (sent != 0)
+                {
+                    g_bufferUploads.fetch_add(1, std::memory_order_relaxed);
+                    g_bufferBytes.fetch_add(sent, std::memory_order_relaxed);
+                    RenderStats::Frame().bufferUploads++;
+                    RenderStats::Frame().uploadBytes += sent;
+                }
+                return handle;
+            }
             if (once || (entry.seen > AlwaysDenseBytes && !audit) || !entry.dense) return handle;
             if (audit && entry.seen > AlwaysDenseBytes && !entry.midFrame)
             {
@@ -1353,6 +1408,14 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
         if (!look) return handle;
         entry.checkedFrame = g_frame;
         wanted = std::max(bytes, entry.seen);
+        // 0.5.99: a big buffer's pages watched from before this look, so a
+        // write later in the frame is seen by the draws after it (above).
+        entry.liveSince = 0;
+        if (WriteWatch::Enabled() && wanted > AlwaysDenseBytes && entry.bytes >= wanted && getenv("COD3_NOLIVEBUFFERS") == nullptr)
+        {
+            const uint64_t since = WriteWatch::Sequence();
+            if (WriteWatch::Arm(physical, wanted)) entry.liveSince = since;
+        }
         static const bool noDiff = getenv("COD3_NOBUFFERDIFF") != nullptr;
         if (!noDiff && wanted >= BigBufferBytes && entry.bytes >= wanted)
         {
@@ -1442,12 +1505,20 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
         {
             MissAudit("vertex buffer", physical, data, wanted, entry.dense, entry.auditDense);
             if (entry.stable < StableLooks) entry.stable++;
-            const bool wantDense = WantDense(entry.stable, wanted);
+            // 0.5.94: a vertex or index buffer under the big-buffer size is
+            // always hashed whole and never left to the page watch. The
+            // bullet holes: the game keeps every mark's few vertices in one
+            // pool of a few hundred kilobytes, and a new mark is a handful of
+            // them. Once the pool had been still eight looks it was sampled
+            // (sixty four words) or left to its pages, and a new mark's
+            // vertices were seen only when a sample happened on them: marks
+            // showed late, and flickered between the old pool and the new.
+            const bool wantDense = WantDense(entry.stable, wanted) || wanted < BigBufferBytes;
             if (wantDense != entry.dense) { if (!wantDense) entry.auditDense = entry.fingerprint; entry.dense = wantDense; entry.fingerprint = Fingerprint(data, wanted, wantDense); }
             if (!entry.midFrame && wanted <= AlwaysDenseBytes) entry.sampled = Fingerprint(data, wanted, false);
             // Still for long enough: its pages watched from now on, and
             // looked at once more after they are, for a write in between.
-            if (WriteWatch::Enabled() && entry.stable >= StableLooks && !entry.midFrame)
+            if (WriteWatch::Enabled() && entry.stable >= StableLooks && !entry.midFrame && wanted > AlwaysDenseBytes && wanted >= BigBufferBytes)
             {
                 const uint64_t since = WriteWatch::Sequence();
                 if (WriteWatch::Arm(physical, wanted) && Fingerprint(data, wanted, entry.dense) == entry.fingerprint)

@@ -10,7 +10,7 @@ and the installer all come from his project.
 > missions. In this fork **the whole campaign plays through**, and **multiplayer works** — System Link
 > over LAN or Tailscale, with bots, custom classes, DLC maps and restored cut content.
 >
-> Current version: **0.5.86**. Every change since 0.4.0 is logged in
+> Current source version: **0.5.183**. Every change since 0.4.0 is logged in
 > [docs/PATCH-NOTES.md](docs/PATCH-NOTES.md).
 
 You need your **own** Xbox 360 disc image of Call of Duty 3. No game files are included in this repository.
@@ -44,6 +44,23 @@ You need your **own** Xbox 360 disc image of Call of Duty 3. No game files are i
 
 **Menus and textures**
 - Texture replacement packs; the menu art, banners, fonts, controller diagrams and HUD icons upscaled 4×
+
+## Recent work (0.5.87�0.5.183)
+
+- Kangaroo entry/exit improvements, native controller sensitivity up to 200%,
+  persistent audio/controller settings, and menu input fixes.
+- Sniper steady aim and experimental saved-position controls: hold L3 for
+  one second while stationary to save; hold X for two seconds to return.
+- Bot input/session isolation, combat diagnostics and owned-weapon recovery.
+  New bots balance across teams, including connected humans, and retain
+  their assigned team through respawns.
+- **Experimental:** 0.5.183 team assignment awaits live testing. Remote bot
+  visibility from both teams, held/dropped weapon visibility, combat crashes,
+  unintended movement and bot UAV markers remain under investigation.
+
+See [patch notes](docs/PATCH-NOTES.md) for build history and
+[handoff](docs/HANDOFF.md) for the current checkpoint. This is a source
+update; no game data or compiled game executables are published here.
 
 ## Original README (Frank's project)
 

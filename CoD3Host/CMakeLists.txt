@@ -86,7 +86,8 @@ set(COD3_HOST_SOURCES
     "bots.cpp"
     "dom.cpp"
     "class_editor.cpp"
-    "mouse_look.cpp")
+    "mouse_look.cpp"
+    "native_options.cpp")
 add_executable(CoD3 WIN32 ${COD3_HOST_SOURCES} "resources/CoD3.rc")
 
 # A console application: setup is interactive and the import trap has to be

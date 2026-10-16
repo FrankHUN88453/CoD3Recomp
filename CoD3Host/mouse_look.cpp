@@ -66,9 +66,15 @@ namespace
     }
 }
 
+#ifdef COD3_MP
+void NativeOptionsTracePad(PPCContext& ctx,uint8_t* base);
+#endif
 extern "C" PPC_FUNC(__imp__sub_8250FF48);
 PPC_FUNC(sub_8250FF48)
 {
+#ifdef COD3_MP
+    NativeOptionsTracePad(ctx,base);
+#endif
     __imp__sub_8250FF48(ctx, base);
 
     long dx = 0, dy = 0;
