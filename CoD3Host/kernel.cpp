@@ -670,7 +670,11 @@ namespace
                     }
                     else if (strcmp(name, "ExLoadedCommandLine") == 0)
                     {
+#ifdef COD3_MP
+                        const char* line = "codmp_xenonf.xex";
+#else
                         const char* line = "default.xex";
+#endif
                         memcpy(Guest::Base + variable, line, strlen(line) + 1);
                     }
                     else if (strcmp(name, "VdGpuClockInMHz") == 0)

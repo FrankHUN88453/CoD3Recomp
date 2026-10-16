@@ -21,6 +21,8 @@
 #include "settings.h"
 #include "kernel.h"
 #include "gpu.h"
+#include "debug_probe.h"
+#include "parallel.h"
 
 #include <algorithm>
 #include <atomic>
@@ -1007,12 +1009,168 @@ namespace
 
     // --- the resolve ----------------------------------------------------------------------------------
 
+    // The console's 24 bit float depth, 20e4: the host's float cut to four
+    // bits of exponent and twenty of mantissa, as Xenia does it.
+    uint32_t Float32To20e4(float value)
+    {
+        if (!(value > 0.0f)) return 0;
+        uint32_t bits;
+        memcpy(&bits, &value, 4);
+        bits = std::min(bits, 0x3FFFFFF8u);
+        if (bits < 0x38800000u)
+        {
+            const uint32_t shift = std::min(113u - (bits >> 23), 24u);
+            bits = (0x800000u | (bits & 0x7FFFFFu)) >> shift;
+        }
+        else bits += 0xC8000000u;
+        bits += 3u + ((bits >> 3) & 1u);
+        return (bits >> 3) & 0xFFFFFFu;
+    }
+
+    // A texel's place in the console's 2D tiled surface, in bytes (as
+    // render_resources.cpp's, from Xenia).
+    uint32_t TiledByteOffset(uint32_t x, uint32_t y, uint32_t pitch, uint32_t bytesPerTexelLog2)
+    {
+        const uint32_t alignedPitch = (pitch + 31u) & ~31u;
+        const uint32_t macro = ((x >> 5) + (y >> 5) * (alignedPitch >> 5)) << (bytesPerTexelLog2 + 7);
+        const uint32_t micro = ((x & 7u) + ((y & 0xEu) << 2)) << bytesPerTexelLog2;
+        const uint32_t offset = macro + ((micro & ~0xFu) << 1) + (micro & 0xFu) + ((y & 1u) << 4);
+        return ((offset & ~0x1FFu) << 3) + ((y & 16u) << 7) + ((offset & 0x1C0u) << 2)
+             + (((((y & 8u) >> 2) + (x >> 3)) & 3u) << 6) + (offset & 0x3Fu);
+    }
+
+    // The depth copies written back into the title's memory, where the
+    // console's resolve leaves them. The title reads the depth there itself:
+    // it decides on the CPU whether each light's glow is hidden (the glows
+    // are drawn in front of everything, at depth 1, and left out when
+    // covered), and with nothing written there every glow on the map shone
+    // through the walls. The copy goes to a staging texture and is read
+    // a frame or two later, when the GPU is done with it, so the frame does
+    // not wait; the title sees the depth that late, as glows fading in and
+    // out a frame behind, which is not to be seen.
+    // debug.txt depth_writeback 0 leaves it out, to compare.
+    struct DepthWriteback
+    {
+        ComPtr<ID3D11Texture2D> staging;
+        D3D11_TEXTURE2D_DESC desc{};
+        bool pending = false;
+        uint64_t order = 0;
+        uint32_t hostWidth = 0, hostHeight = 0;
+        uint32_t guestBase = 0, guestPitch = 0, guestWidth = 0, guestHeight = 0, guestEndian = 0;
+        bool guestFloatDepth = false;
+    };
+    constexpr int DepthWritebackSlots = 6;
+    DepthWriteback g_depthWritebacks[DepthWritebackSlots];
+    uint64_t g_depthWritebackOrder = 0;
+
+    void FinishDepthWriteback(DepthWriteback& slot, bool wait)
+    {
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        const HRESULT hr = g_context->Map(slot.staging.Get(), 0, D3D11_MAP_READ, wait ? 0 : D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
+        if (hr == DXGI_ERROR_WAS_STILL_DRAWING) return;
+        slot.pending = false;
+        if (FAILED(hr)) return;
+        uint8_t* destination = Guest::Base + Guest::PhysicalAlias(slot.guestBase);
+        const DepthWriteback& w = slot;
+        // Which host column each of the title's columns reads, worked out
+        // once rather than with a division for every pixel; and the depth's
+        // conversion and byte order with no double or branch per pixel
+        // either. This ran on the command processor's critical path, a
+        // depth copy or more a frame, and was a fifteenth of its time.
+        static thread_local std::vector<uint32_t> columns;
+        columns.resize(w.guestWidth);
+        for (uint32_t x = 0; x < w.guestWidth; x++)
+            columns[x] = std::min(w.hostWidth - 1, uint32_t(uint64_t(x) * w.hostWidth / w.guestWidth));
+        const uint32_t* column = columns.data();
+        Parallel::For(0, int(w.guestHeight), 32, [&](int first, int last)
+        {
+            for (uint32_t y = uint32_t(first); y < uint32_t(last); y++)
+            {
+                const uint32_t hy = std::min(w.hostHeight - 1, uint32_t(uint64_t(y) * w.hostHeight / w.guestHeight));
+                const float* row = reinterpret_cast<const float*>(static_cast<const uint8_t*>(mapped.pData) + size_t(hy) * mapped.RowPitch);
+                for (uint32_t x = 0; x < w.guestWidth; x++)
+                {
+                    const float z = row[column[x]];
+                    const uint32_t depth = w.guestFloatDepth ? Float32To20e4(z)
+                        : uint32_t(std::min(std::max(z, 0.0f), 1.0f) * 16777215.0f + 0.5f);
+                    uint32_t value = depth << 8;
+                    switch (w.guestEndian)
+                    {
+                    case 1: value = ((value & 0xFF00FF00u) >> 8) | ((value & 0x00FF00FFu) << 8); break;
+                    case 2: value = __builtin_bswap32(value); break;
+                    case 3: value = (value >> 16) | (value << 16); break;
+                    default: break;
+                    }
+                    memcpy(destination + TiledByteOffset(x, y, w.guestPitch, 2), &value, 4);
+                }
+            }
+        });
+        g_context->Unmap(slot.staging.Get(), 0);
+    }
+
+    // The copies the GPU has finished, oldest first, into the title's memory.
+    void PollDepthWritebacks()
+    {
+        for (;;)
+        {
+            DepthWriteback* oldest = nullptr;
+            for (DepthWriteback& slot : g_depthWritebacks)
+                if (slot.pending && (oldest == nullptr || slot.order < oldest->order)) oldest = &slot;
+            if (oldest == nullptr) return;
+            FinishDepthWriteback(*oldest, false);
+            if (oldest->pending) return;   // still drawing: the later ones are too
+        }
+    }
+
+    void WriteDepthBack(const RenderState::ResolveCommand& command)
+    {
+        if (command.destinationResource == nullptr || command.guestWidth == 0 || command.guestHeight == 0) return;
+        ComPtr<ID3D11Resource> resource;
+        command.destinationResource->GetResource(&resource);
+        ComPtr<ID3D11Texture2D> texture;
+        if (FAILED(resource.As(&texture))) return;
+        D3D11_TEXTURE2D_DESC desc{};
+        texture->GetDesc(&desc);
+        if (desc.Format != DXGI_FORMAT_R32_FLOAT && desc.Format != DXGI_FORMAT_R32_TYPELESS)
+        {
+            static bool said = false;
+            if (!said) { said = true; printf("render: a depth copy of format %u is not written back to the title's memory\n", unsigned(desc.Format)); }
+            return;
+        }
+        PollDepthWritebacks();
+        // The slot used longest ago; if the GPU still has it, this waits.
+        DepthWriteback* slot = &g_depthWritebacks[0];
+        for (DepthWriteback& candidate : g_depthWritebacks)
+        {
+            if (!candidate.pending) { if (slot->pending || candidate.order < slot->order) slot = &candidate; }
+            else if (slot->pending && candidate.order < slot->order) slot = &candidate;
+        }
+        if (slot->pending) FinishDepthWriteback(*slot, true);
+        if (!slot->staging || slot->desc.Width != desc.Width || slot->desc.Height != desc.Height || slot->desc.Format != desc.Format)
+        {
+            slot->staging.Reset();
+            D3D11_TEXTURE2D_DESC s = desc;
+            s.MipLevels = 1; s.ArraySize = 1; s.SampleDesc.Count = 1; s.SampleDesc.Quality = 0;
+            s.Usage = D3D11_USAGE_STAGING; s.BindFlags = 0; s.CPUAccessFlags = D3D11_CPU_ACCESS_READ; s.MiscFlags = 0;
+            if (FAILED(g_device->CreateTexture2D(&s, nullptr, &slot->staging))) return;
+            slot->desc = s;
+        }
+        g_context->CopySubresourceRegion(slot->staging.Get(), 0, 0, 0, 0, texture.Get(), 0, nullptr);
+        slot->pending = true;
+        slot->order = ++g_depthWritebackOrder;
+        slot->hostWidth = std::max(1u, std::min<uint32_t>(command.width ? command.width : desc.Width, desc.Width));
+        slot->hostHeight = std::max(1u, std::min<uint32_t>(command.height ? command.height : desc.Height, desc.Height));
+        slot->guestBase = command.guestBase;
+        slot->guestPitch = command.guestPitch;
+        slot->guestWidth = command.guestWidth;
+        slot->guestHeight = command.guestHeight;
+        slot->guestEndian = command.guestEndian;
+        slot->guestFloatDepth = command.guestFloatDepth;
+    }
+
     void ExecuteResolve(const RenderState::ResolveCommand& command)
     {
-        // Timed as a resolve, by its size, samples and kind (COD3_GPU_DRAWS).
-        struct ResolveStamp { uint64_t key; ~ResolveStamp() { RenderStats::DrawTimed(key); } } resolveStamp{
-            (uint64_t(command.width) << 48) | (uint64_t(command.height) << 32) | (uint64_t(command.sourceSamples) << 8) | (command.fromDepth ? 0x1000u : 0u) |
-            (command.copy ? 0x2000u : 0u) | (command.colorClear || command.depthClear ? 0x4000u : 0u) | 4u };
+        struct ResolveStamp { ~ResolveStamp() { RenderStats::DrawTimed(1); } } resolveStamp;
         if (command.bindingsLost) ForgetBindings();
         if (command.copy)
         {
@@ -1029,6 +1187,7 @@ namespace
             if (copy != nullptr)
                 DrawQuad(command.source, command.sourceWidth, command.sourceHeight, command.x0, command.y0, float(command.width), float(command.height),
                          command.destination, viewport, copy, g_pointSampler.Get());
+            if (command.writeBack) WriteDepthBack(command);
         }
         if (command.colorClear)
         {
@@ -1173,6 +1332,27 @@ namespace
         // COD3_VSYNC=0|1 over the settings.
         static const int vsyncOverride = []() { const char* t = getenv("COD3_VSYNC"); return t ? (t[0] == '0' ? 0 : 1) : -1; }();
         const bool vsync = vsyncOverride >= 0 ? vsyncOverride != 0 : settings.vsync;
+        // The frame rate cap (F11, "Frame rate cap"): each frame shown no
+        // sooner than its turn on an even clock, so the pace stays the same
+        // whatever the scene costs below the cap. The wait is here, at the
+        // swap, which the title's next frame waits for anyway. A sleep for
+        // most of it and a spin for the last bit: Windows' sleep is late by
+        // up to a millisecond even at its finest.
+        if (settings.frameCap > 0)
+        {
+            using clock = std::chrono::steady_clock;
+            static clock::time_point due = clock::now();
+            const auto period = std::chrono::nanoseconds(1000000000ll / settings.frameCap);
+            auto now = clock::now();
+            if (now - due > period * 2) due = now;   // behind by more than a frame: start the clock again
+            while (now < due)
+            {
+                if (due - now > std::chrono::microseconds(1500)) Sleep(1);
+                else YieldProcessor();
+                now = clock::now();
+            }
+            due += period;
+        }
         const HRESULT hr = g_swapChain->Present(vsync ? 1 : 0, (!vsync && g_tearing) ? DXGI_PRESENT_ALLOW_TEARING : 0);
         if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET)
         {
@@ -1278,7 +1458,7 @@ void Render::MemoryFreed(uint32_t address, uint32_t size)
 {
     if (size == 0) return;
     std::lock_guard<std::mutex> lock(g_freedMutex);
-    g_freed.emplace_back(address & 0x1FFFFFFFu, size);
+    g_freed.emplace_back(Guest::GpuOffset(address), size);
     g_freedPending.store(true, std::memory_order_release);
 }
 
@@ -1367,7 +1547,9 @@ void Render::Swap(uint32_t frontBufferPhysical, uint32_t width, uint32_t height)
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     if (!Start()) return;
     Overlay::NoteFrame();
-    g_frontBuffer = frontBufferPhysical & 0x1FFFFFFFu;
+    DebugProbe::Poll();
+    PollDepthWritebacks();
+    g_frontBuffer = Guest::GpuOffset(frontBufferPhysical);
     if (FrameLogged()) printf("frame: swap %llu of %08X\n", (unsigned long long)g_swaps.load(std::memory_order_relaxed), frontBufferPhysical);
 
     // The frame's end: onto the window, the counters closed, the next

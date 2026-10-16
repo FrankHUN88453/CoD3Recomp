@@ -67,7 +67,9 @@ namespace
 
     inline void NoteConstantWrite(uint32_t range, uint32_t offset)
     {
-        g_constantWrites[range].fetch_add(1, std::memory_order_relaxed);
+        // A count nobody reads now; kept, but without the locked add that
+        // made every constant written cost a tenth of a microsecond.
+        g_constantWrites[range].store(g_constantWrites[range].load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
         uint32_t low = g_constantDirtyLow[range].load(std::memory_order_relaxed);
         while (offset < low && !g_constantDirtyLow[range].compare_exchange_weak(low, offset, std::memory_order_relaxed)) {}
         uint32_t high = g_constantDirtyHigh[range].load(std::memory_order_relaxed);
@@ -88,16 +90,22 @@ namespace
     // What actually flows through the pipe, by packet type. A frame of GPU
     // work is mostly register writes, so seeing which type 3 opcodes appear is
     // the only way to tell a real command stream from a walk over noise.
-    std::mutex g_histogramMutex;
-    std::map<uint32_t, uint64_t> g_type3Opcodes;
-    uint64_t g_type0 = 0, g_type2 = 0, g_type3 = 0;
+    // Counted without a lock: this runs for every packet, some fifty
+    // thousand a frame, and a lock and a map lookup each time were a tenth
+    // of the command processor's time. The command processor is the one
+    // counting; a count a little off from a rare packet elsewhere is no harm.
+    std::atomic<uint64_t> g_type3Opcodes[128];
+    std::atomic<uint64_t> g_type0{ 0 }, g_type2{ 0 }, g_type3{ 0 };
 
+    inline void Bump(std::atomic<uint64_t>& counter)
+    {
+        counter.store(counter.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+    }
     void CountPacket(uint32_t type, uint32_t opcode)
     {
-        std::lock_guard<std::mutex> lock(g_histogramMutex);
-        if (type == 0) g_type0++;
-        else if (type == 2) g_type2++;
-        else if (type == 3) { g_type3++; g_type3Opcodes[opcode]++; }
+        if (type == 0) Bump(g_type0);
+        else if (type == 2) Bump(g_type2);
+        else if (type == 3) { Bump(g_type3); Bump(g_type3Opcodes[opcode & 127]); }
     }
 
     // Discovery. Every distinct aperture address the driver touches is reported
@@ -213,28 +221,6 @@ namespace
         g_predicatedOut.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
-    // The mask a native list's predicated item carries: the mask itself, or
-    // with COD3_MASKCHECK=1 compared with the one the packets set.
-    bool MaskCheckWanted()
-    {
-        static const bool on = getenv("COD3_MASKCHECK") != nullptr;
-        return on;
-    }
-    void MaskForItem(uint64_t mask)
-    {
-        if (!MaskCheckWanted() && Gpu::KeepBinMaskPackets()) return;
-        if (!MaskCheckWanted()) { g_binMask.store(mask, std::memory_order_relaxed); return; }
-        static std::atomic<uint64_t> checked{ 0 }, differed{ 0 };
-        const uint64_t now = g_binMask.load(std::memory_order_relaxed);
-        if (now != mask && differed.fetch_add(1) < 10)
-            printf("gpu: a native item's bin mask %016llX, the packets set %016llX\n", (unsigned long long)mask, (unsigned long long)now);
-        if (((checked.fetch_add(1) + 1) & 0x3FFFF) == 0)
-        {
-            printf("gpu: native items' bin masks: %llu checked, %llu differed\n", (unsigned long long)checked.load(), (unsigned long long)differed.load());
-            fflush(stdout);
-        }
-    }
-
     void SetBin(uint32_t opcode, uint32_t value)
     {
         std::atomic<uint64_t>& target = (opcode == 0x60 || opcode == 0x61) ? g_binMask : g_binSelect;
@@ -1094,12 +1080,6 @@ namespace
     std::map<uint32_t, uint64_t> g_registerWrites;   // under g_registerMutex
 }
 
-bool Gpu::KeepBinMaskPackets()
-{
-    static const bool keep = getenv("COD3_NATIVEMASKS") != nullptr || getenv("COD3_MASKCHECK") != nullptr;
-    return keep;
-}
-
 void Gpu::WriteRegister(uint32_t address, uint32_t value)
 {
     uint32_t mirrorTo = 0;
@@ -1627,15 +1607,7 @@ namespace
             {
                 t_native = true;
                 for (const NativeState::Item& item : items)
-                {
-                    // A predicated packet runs by the bin mask the stream had
-                    // set when it reached it: the lists leave the mask
-                    // packets out. COD3_MASKCHECK=1 runs them still and
-                    // compares.
-                    const uint32_t header = Guest::Read32(Guest::Base, Guest::PhysicalAlias(item.physical));
-                    if ((header >> 30) == 3 && (header & 1) != 0) MaskForItem(item.mask);
                     ExecuteBuffer(Guest::PhysicalAlias(item.physical), item.dwords, local, depth);
-                }
                 if (covered < dwords) ExecuteBuffer(base + covered * 4, dwords - covered, local, depth);
                 t_native = false;
                 items.swap(t_items);
@@ -2037,12 +2009,11 @@ void Gpu::ReportPacketMix()
             printf("\n");
         }
     }
-    std::lock_guard<std::mutex> lock(g_histogramMutex);
-    if (g_type0 + g_type2 + g_type3 == 0) return;
+    if (g_type0.load() + g_type2.load() + g_type3.load() == 0) return;
 
     printf("packets: %llu register writes, %llu filler, %llu commands\n",
-        (unsigned long long)g_type0, (unsigned long long)g_type2,
-        (unsigned long long)g_type3);
+        (unsigned long long)g_type0.load(), (unsigned long long)g_type2.load(),
+        (unsigned long long)g_type3.load());
 
     {
         std::lock_guard<std::mutex> draws(g_drawMutex);
@@ -2071,13 +2042,14 @@ void Gpu::ReportPacketMix()
     if (g_fences.load() != 0)
         printf("fences: %llu written\n", (unsigned long long)g_fences.load());
 
-    if (g_type3Opcodes.empty()) return;
     printf("commands:");
-    for (const auto& entry : g_type3Opcodes)
+    for (uint32_t opcode = 0; opcode < 128; opcode++)
     {
-        const char* name = Type3Name(entry.first);
-        if (name) printf(" %s x%llu", name, (unsigned long long)entry.second);
-        else      printf(" 0x%02X x%llu", entry.first, (unsigned long long)entry.second);
+        const uint64_t count = g_type3Opcodes[opcode].load(std::memory_order_relaxed);
+        if (count == 0) continue;
+        const char* name = Type3Name(opcode);
+        if (name) printf(" %s x%llu", name, (unsigned long long)count);
+        else      printf(" 0x%02X x%llu", opcode, (unsigned long long)count);
     }
     printf("\n");
     fflush(stdout);

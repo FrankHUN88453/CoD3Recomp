@@ -65,3 +65,23 @@ endif()
 # that were recompiled; the host links whatever is there.
 add_subdirectory(levels)
 set(COD3_LEVEL_LIBRARIES ${COD3_LEVEL_LIBRARIES} PARENT_SCOPE)
+
+# The multiplayer executable, codmp_xenonf.xex, recompiled into ppc_mp by
+# scripts/recompile_mp.py: a library of its own, built the same way, for
+# CoD3MP.exe. Without it only the single player program is built.
+file(GLOB PPC_MP_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/ppc_mp/*.cpp")
+list(LENGTH PPC_MP_SOURCES PPC_MP_SOURCE_COUNT)
+if (PPC_MP_SOURCE_COUNT GREATER 0)
+    message(STATUS "CoD3RecompLibMP: ${PPC_MP_SOURCE_COUNT} recompiled translation units")
+    add_library(CoD3RecompLibMP STATIC ${PPC_MP_SOURCES})
+    target_include_directories(CoD3RecompLibMP PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/ppc_mp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../tools/XenonRecomp/thirdparty/simde")
+    target_compile_options(CoD3RecompLibMP PRIVATE
+        -fno-strict-aliasing -Wno-unused-variable -Wno-unused-but-set-variable -FIcod3_mmio.h)
+    target_compile_options(CoD3RecompLibMP PUBLIC -march=x86-64-v2)
+    if (COD3_TRAP_ON_UNIMPLEMENTED)
+        target_compile_definitions(CoD3RecompLibMP PUBLIC COD3_TRAP_ON_UNIMPLEMENTED)
+    endif()
+endif()

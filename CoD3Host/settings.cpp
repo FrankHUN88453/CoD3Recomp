@@ -17,10 +17,12 @@ namespace
     const char* const ActionNames[Settings::ActionCount] = {
         "Fire", "Aim", "Jump", "Crouch", "Use", "Reload", "Weapon", "Melee", "Sprint",
         "Grenade", "Smoke", "Objectives", "Pause", "Forward", "Backward", "Left", "Right",
+        "Binoculars out", "Binoculars away",
     };
     const char* const ActionKeys[Settings::ActionCount] = {
         "fire", "aim", "jump", "crouch", "use", "reload", "weapon", "melee", "sprint",
         "grenade", "smoke", "objectives", "pause", "forward", "backward", "left", "right",
+        "binoculars_out", "binoculars_away",
     };
 
     std::string Trim(const std::string& text)
@@ -94,6 +96,7 @@ Settings::Values Settings::Defaults()
     v.keys[Weapon] = 'F';
     v.keys[Melee] = 'V';
     v.keys[Sprint] = VK_SHIFT;
+    for (int i = 0; i < Values::CustomClasses; i++) snprintf(v.className[i], sizeof(v.className[i]), "CUSTOM %d", i + 1);
     v.keys[Grenade] = 'G';
     v.keys[Smoke] = '4';
     v.keys[Objectives] = VK_TAB;
@@ -102,6 +105,8 @@ Settings::Values Settings::Defaults()
     v.keys[Backward] = 'S';
     v.keys[Left] = 'A';
     v.keys[Right] = 'D';
+    v.keys[BinocularsOut] = 'B';
+    v.keys[BinocularsAway] = 'N';
     return v;
 }
 
@@ -119,7 +124,6 @@ void Settings::Set(const Values& values)
     }
     Save();
 }
-
 void Settings::Load(const std::filesystem::path& exeDirectory)
 {
     g_file = exeDirectory / "CoD3Recomp.ini";
@@ -146,11 +150,18 @@ void Settings::Load(const std::filesystem::path& exeDirectory)
             else if (key == "anisotropy") v.anisotropy = atoi(value.c_str());
             else if (key == "vsync") v.vsync = atoi(value.c_str()) != 0;
             else if (key == "unlock_frame_rate") v.unlockFrameRate = atoi(value.c_str()) != 0;
+            else if (key == "frame_cap") v.frameCap = std::clamp(atoi(value.c_str()), 0, 1000);
             else if (key == "antialiasing") v.antialiasing = atoi(value.c_str());
             else if (key == "texture_quality") v.textureQuality = atoi(value.c_str());
             else if (key == "fov") v.fov = atoi(value.c_str());
             else if (key == "model_detail") v.modelDetail = atoi(value.c_str());
-            else if (key == "aim_blur") v.aimBlur = atoi(value.c_str()) != 0;
+            else if (key == "fog") v.fog = atoi(value.c_str()) != 0;
+            else if (key == "draw_distance") v.drawDistance = atoi(value.c_str());
+            else if (key == "effects") v.effects = atoi(value.c_str());
+            else if (key == "dynamic_lights") v.dynamicLights = atoi(value.c_str()) != 0;
+            // aim_blur, the key before this one, is left unread: it was on by
+            // default, and a file saved then would keep the ghost outline.
+            else if (key == "aim_depth_of_field") v.aimBlur = atoi(value.c_str()) != 0;
             else if (key == "console_depth") v.consoleDepth = atoi(value.c_str()) != 0;
             else if (key == "native_commands") v.nativeCommands = atoi(value.c_str()) != 0;
             else if (key == "watch_writes") v.watchWrites = atoi(value.c_str()) != 0;
@@ -158,9 +169,71 @@ void Settings::Load(const std::filesystem::path& exeDirectory)
             else if (key == "fps_overlay") v.fpsOverlay = atoi(value.c_str()) != 0;
             else if (key == "stats_overlay") v.statsOverlay = atoi(value.c_str()) != 0;
             else if (key == "aim_assist") v.aimAssist = atoi(value.c_str()) != 0;
-            else if (key == "subtitles") v.subtitles = atoi(value.c_str()) != 0;
-            else if (key == "console") v.console = atoi(value.c_str()) != 0;
+            else if (key == "bounces") v.bounces = atoi(value.c_str()) != 0;
+            else if (key == "quick_landing") v.quickLanding = atoi(value.c_str()) != 0;
+            else if (key == "quick_sprint") v.quickSprint = atoi(value.c_str()) != 0;
+            else if (key == "custom_primary") v.customPrimary = atoi(value.c_str());
+            else if (key == "active_class") v.activeClass = atoi(value.c_str());
+            else if (key == "two_grenades") v.twoGrenades = atoi(value.c_str()) != 0;
+            else if (key == "faster_ads") v.fasterAds = atoi(value.c_str()) != 0;
+            else if (key == "campaign_test") v.campaignTest = atoi(value.c_str());
+            else if (key == "campaign_guns") v.campaignGuns = atoi(value.c_str()) != 0;
+            else if (key == "big_memory") v.bigMemory = atoi(value.c_str()) != 0;
+            else if (key == "campaign_sounds") v.campaignSounds = atoi(value.c_str()) != 0;
+            else if (key == "campaign_gunshots") v.campaignGunshots = atoi(value.c_str()) != 0;
+            else if (key == "campaign_icons") v.campaignIcons = atoi(value.c_str()) != 0;
+            else if (key == "campaign_shot_sounds") v.campaignShotSounds = atoi(value.c_str()) != 0;
+            else if (key == "campaign_shot_events") v.campaignShotEvents = std::clamp(atoi(value.c_str()), 0, 15);
+            else if (key == "ads_in_air") v.adsInAir = atoi(value.c_str()) != 0;
+            else if (key == "sten_reload") v.stenReload = std::clamp(float(atof(value.c_str())), 0.0f, 10.0f);
+            else if (key == "fg42_reload") v.fg42Reload = std::clamp(float(atof(value.c_str())), 0.0f, 10.0f);
+            else if (key == "fg42_ads_fov") v.fg42AdsFov = std::clamp(float(atof(value.c_str())), 0.0f, 90.0f);
+            else if (key == "sten_ads_fov") v.stenAdsFov = std::clamp(float(atof(value.c_str())), 0.0f, 90.0f);
+            else if (key == "bren_ads_fov") v.brenAdsFov = std::clamp(float(atof(value.c_str())), 0.0f, 90.0f);
+            else if (key == "enfield_ads_fov") v.enfieldAdsFov = std::clamp(float(atof(value.c_str())), 0.0f, 90.0f);
+            else if (key == "bren_reload") v.brenReload = std::clamp(float(atof(value.c_str())), 0.0f, 10.0f);
+            else if (key == "extra_map_memory") v.extraMapMemory = std::clamp(atoi(value.c_str()), 0, 18);
+            else if (key == "launcher") v.launcher = atoi(value.c_str()) != 0;
+            else if (key == "texture_dump") v.textureDump = atoi(value.c_str()) != 0;
+            else if (key == "texture_replace") v.textureReplace = atoi(value.c_str()) != 0;
+            else if (key == "binoculars") v.binoculars = atoi(value.c_str()) != 0;
+            else if (key == "killstreak_artillery") v.killstreakArtillery = atoi(value.c_str()) != 0;
+            else if (key == "killstreak_kills" || key == "killstreak_artillery_kills") v.killstreakKills = std::clamp(atoi(value.c_str()), 1, 30);
+            else if (key == "killstreak_uav_kills") v.killstreakUav = std::clamp(atoi(value.c_str()), 1, 30);
+            else if (key == "killstreak_typhoon_kills") v.killstreakTyphoon = std::clamp(atoi(value.c_str()), 1, 30);
+            else if (key == "uav_seconds") v.uavSeconds = std::clamp(atoi(value.c_str()), 5, 120);
+            else if (key == "four_secondary") v.fourSecondary = atoi(value.c_str()) != 0;
+            else if (key == "aim_walk") v.aimWalk = atoi(value.c_str());
+            else if (key == "ability_recharge") v.abilityRecharge = atoi(value.c_str());
+            else if (key.compare(0, 6, "class_") == 0 && key.size() > 7)
+            {
+                // class_<n>_name, class_<n>_primary, class_<n>_sidearm
+                const int n = key[6] - '1';
+                if (n >= 0 && n < Values::CustomClasses)
+                {
+                    const std::string field = key.substr(8);
+                    if (field == "name") { strncpy(v.className[n], value.c_str(), sizeof(v.className[n]) - 1); v.className[n][sizeof(v.className[n]) - 1] = 0; }
+                    else if (field == "primary") v.classPrimary[n] = atoi(value.c_str());
+                    else if (field == "sidearm") v.classSidearm[n] = atoi(value.c_str());
+                    else if (field == "base") v.classBase[n] = atoi(value.c_str());
+                    else if (field == "grenade_type") v.classGrenadeType[n] = atoi(value.c_str());
+                    else if (field == "grenades") v.classGrenades[n] = atoi(value.c_str());
+                }
+            }
+            else if (key == "direct_mouse") v.directMouse = atoi(value.c_str()) != 0;
+            else if (key == "toggle_sprint") v.toggleSprint = atoi(value.c_str()) != 0;
+            else if (key == "shell_shock_blur") v.shellShockBlur = atoi(value.c_str()) != 0;
+            else if (key == "melee_lunge") v.meleeLunge = atoi(value.c_str()) != 0;
             else if (key == "controller") v.controller = atoi(value.c_str()) != 0;
+            else if (key == "player_name") { strncpy(v.playerName, value.c_str(), sizeof(v.playerName) - 1); v.playerName[sizeof(v.playerName) - 1] = 0; }
+            else if (key == "lan_address") { strncpy(v.lanAddress, value.c_str(), sizeof(v.lanAddress) - 1); v.lanAddress[sizeof(v.lanAddress) - 1] = 0; }
+            else if (key == "system_link_peers") { strncpy(v.systemLinkPeers, value.c_str(), sizeof(v.systemLinkPeers) - 1); v.systemLinkPeers[sizeof(v.systemLinkPeers) - 1] = 0; }
+            else if (key == "master_volume") v.masterVolume = atoi(value.c_str());
+            else if (key == "native_volume") v.nativeVolume = atoi(value.c_str());
+            else if (key == "controller_horizontal") v.controllerHorizontal = atoi(value.c_str());
+            else if (key == "controller_vertical") v.controllerVertical = atoi(value.c_str());
+            else if (key == "rumble") v.rumble = atoi(value.c_str()) != 0;
+            else if (key == "stick_deadzone") v.stickDeadzone = atoi(value.c_str());
             else if (key == "mouse_sensitivity") v.mouseSensitivity = float(atof(value.c_str()));
             else if (key == "raw_mouse") v.rawMouse = atoi(value.c_str()) != 0;
             else if (key.compare(0, 4, "key_") == 0)
@@ -180,7 +253,27 @@ void Settings::Load(const std::filesystem::path& exeDirectory)
     if (v.textureQuality < 0 || v.textureQuality > 2) v.textureQuality = 2;
     if (v.fov < 65 || v.fov > 100) v.fov = 65;
     if (v.modelDetail < 0 || v.modelDetail > 1) v.modelDetail = 1;
+    if (v.drawDistance < 0 || v.drawDistance > 3) v.drawDistance = 0;
+    if (v.effects < 0 || v.effects > 2) v.effects = 0;
+    if (v.customPrimary < 0 || v.customPrimary > 13) v.customPrimary = 0;
+    if (v.activeClass < 0 || v.activeClass > Values::CustomClasses) v.activeClass = 0;
+    if (v.aimWalk < 40 || v.aimWalk > 100) v.aimWalk = 80;
+    if (v.abilityRecharge < 10 || v.abilityRecharge > 100) v.abilityRecharge = 50;
+    for (int i = 0; i < Values::CustomClasses; i++)
+    {
+        if (v.classPrimary[i] < 0 || v.classPrimary[i] > 18) v.classPrimary[i] = 0;
+        if (v.classSidearm[i] < 0 || v.classSidearm[i] > 20) v.classSidearm[i] = 0;
+        if (v.classBase[i] < 0 || v.classBase[i] > 7) v.classBase[i] = 0;
+        if (v.classGrenadeType[i] < 0 || v.classGrenadeType[i] > 3) v.classGrenadeType[i] = 0;
+        if (v.classGrenades[i] < 0 || v.classGrenades[i] > 4) v.classGrenades[i] = 0;
+        if (!v.className[i][0]) snprintf(v.className[i], sizeof(v.className[i]), "CUSTOM %d", i + 1);
+    }
     if (v.windowMode < 0 || v.windowMode > 1) v.windowMode = 0;
+    if (v.masterVolume < 0 || v.masterVolume > 100) v.masterVolume = 70;
+    if (v.nativeVolume < 0 || v.nativeVolume > 100) v.nativeVolume = 50;
+    if (v.controllerHorizontal < 10 || v.controllerHorizontal > 200) v.controllerHorizontal = 100;
+    if (v.controllerVertical < 10 || v.controllerVertical > 200) v.controllerVertical = 100;
+    if (v.stickDeadzone < 0 || v.stickDeadzone > 50) v.stickDeadzone = 15;
     if (!(v.mouseSensitivity >= 0.1f && v.mouseSensitivity <= 3.0f)) v.mouseSensitivity = 1.0f;
     std::lock_guard<std::mutex> lock(g_mutex);
     g_values = v;
@@ -196,10 +289,28 @@ void Settings::Save()
         char resolution[32];
         if (v.resolutionWidth > 0 && v.resolutionHeight > 0) snprintf(resolution, sizeof(resolution), "%dx%d", v.resolutionWidth, v.resolutionHeight);
         else snprintf(resolution, sizeof(resolution), "desktop");
-        fprintf(file, "[graphics]\nrenderer = %d\nresolution = %s\nresolution_scale = %d\ntexture_filter = %d\nanisotropy = %d\nvsync = %d\nunlock_frame_rate = %d\nantialiasing = %d\ntexture_quality = %d\nfov = %d\nmodel_detail = %d\naim_blur = %d\nconsole_depth = %d\nnative_commands = %d\nwatch_writes = %d\nwindow_mode = %d\nfps_overlay = %d\nstats_overlay = %d\n",
-            v.renderer, resolution, v.resolutionScale, v.textureFilter, v.anisotropy, v.vsync ? 1 : 0, v.unlockFrameRate ? 1 : 0, v.antialiasing, v.textureQuality, v.fov, v.modelDetail, v.aimBlur ? 1 : 0, v.consoleDepth ? 1 : 0, v.nativeCommands ? 1 : 0, v.watchWrites ? 1 : 0, v.windowMode, v.fpsOverlay ? 1 : 0, v.statsOverlay ? 1 : 0);
-        fprintf(file, "[game]\naim_assist = %d\nsubtitles = %d\nconsole = %d\ncontroller = %d\nmouse_sensitivity = %.2f\nraw_mouse = %d\n", v.aimAssist ? 1 : 0,
-            v.subtitles ? 1 : 0, v.console ? 1 : 0, v.controller ? 1 : 0, v.mouseSensitivity, v.rawMouse ? 1 : 0);
+        fprintf(file, "[graphics]\nrenderer = %d\nresolution = %s\nresolution_scale = %d\ntexture_filter = %d\nanisotropy = %d\nvsync = %d\nunlock_frame_rate = %d\nframe_cap = %d\nantialiasing = %d\ntexture_quality = %d\nfov = %d\nmodel_detail = %d\naim_depth_of_field = %d\nconsole_depth = %d\nnative_commands = %d\nwatch_writes = %d\nwindow_mode = %d\nfps_overlay = %d\nstats_overlay = %d\n",
+            v.renderer, resolution, v.resolutionScale, v.textureFilter, v.anisotropy, v.vsync ? 1 : 0, v.unlockFrameRate ? 1 : 0, v.frameCap, v.antialiasing, v.textureQuality, v.fov, v.modelDetail, v.aimBlur ? 1 : 0, v.consoleDepth ? 1 : 0, v.nativeCommands ? 1 : 0, v.watchWrites ? 1 : 0, v.windowMode, v.fpsOverlay ? 1 : 0, v.statsOverlay ? 1 : 0);
+        fprintf(file, "fog = %d\ndraw_distance = %d\neffects = %d\ndynamic_lights = %d\n", v.fog ? 1 : 0, v.drawDistance, v.effects,
+                v.dynamicLights ? 1 : 0);
+        fprintf(file, "[game]\nplayer_name = %s\nlan_address = %s\nsystem_link_peers = %s\nmaster_volume = %d\naim_assist = %d\nbounces = %d\ncontroller = %d\nrumble = %d\nstick_deadzone = %d\nmouse_sensitivity = %.2f\nraw_mouse = %d\ndirect_mouse = %d\ntoggle_sprint = %d\nshell_shock_blur = %d\nmelee_lunge = %d\n", v.playerName, v.lanAddress, v.systemLinkPeers, v.masterVolume, v.aimAssist ? 1 : 0, v.bounces ? 1 : 0, v.controller ? 1 : 0, v.rumble ? 1 : 0, v.stickDeadzone, v.mouseSensitivity, v.rawMouse ? 1 : 0, v.directMouse ? 1 : 0, v.toggleSprint ? 1 : 0, v.shellShockBlur ? 1 : 0, v.meleeLunge ? 1 : 0);
+        fprintf(file, "quick_landing = %d\nquick_sprint = %d\ncustom_primary = %d\n", v.quickLanding ? 1 : 0, v.quickSprint ? 1 : 0,
+                v.customPrimary);
+        fprintf(file, "active_class = %d\ntwo_grenades = %d\nfaster_ads = %d\nfour_secondary = %d\n", v.activeClass, v.twoGrenades ? 1 : 0,
+                v.fasterAds ? 1 : 0, v.fourSecondary ? 1 : 0);
+        fprintf(file, "texture_dump = %d\ntexture_replace = %d\n", v.textureDump ? 1 : 0, v.textureReplace ? 1 : 0);
+        fprintf(file, "binoculars = %d\nkillstreak_artillery = %d\nkillstreak_uav_kills = %d\nkillstreak_artillery_kills = %d\nkillstreak_typhoon_kills = %d\nuav_seconds = %d\n",
+                v.binoculars ? 1 : 0, v.killstreakArtillery ? 1 : 0, v.killstreakUav, v.killstreakKills, v.killstreakTyphoon, v.uavSeconds);
+        fprintf(file, "ability_recharge = %d\naim_walk = %d\nlauncher = %d\ncampaign_guns = %d\ncampaign_test = %d\nextra_map_memory = %d\nbig_memory = %d\ncampaign_sounds = %d\ncampaign_gunshots = %d\ncampaign_icons = %d\n", v.abilityRecharge, v.aimWalk, v.launcher ? 1 : 0, v.campaignGuns ? 1 : 0, v.campaignTest, v.extraMapMemory, v.bigMemory ? 1 : 0, v.campaignSounds ? 1 : 0, v.campaignGunshots ? 1 : 0, v.campaignIcons ? 1 : 0);
+        fprintf(file, "campaign_shot_sounds = %d\ncampaign_shot_events = %d\nads_in_air = %d\nsten_reload = %.2f\nfg42_reload = %.2f\nbren_reload = %.2f\nfg42_ads_fov = %.1f\nsten_ads_fov = %.1f\nbren_ads_fov = %.1f\nenfield_ads_fov = %.1f\n", v.campaignShotSounds ? 1 : 0, v.campaignShotEvents,
+                v.adsInAir ? 1 : 0, v.stenReload, v.fg42Reload, v.brenReload, v.fg42AdsFov, v.stenAdsFov, v.brenAdsFov, v.enfieldAdsFov);
+        for (int i = 0; i < Values::CustomClasses; i++)
+            fprintf(file, "class_%d_name = %s\nclass_%d_primary = %d\nclass_%d_sidearm = %d\nclass_%d_base = %d\nclass_%d_grenade_type = %d\nclass_%d_grenades = %d\n",
+                    i + 1, v.className[i], i + 1, v.classPrimary[i], i + 1, v.classSidearm[i], i + 1, v.classBase[i], i + 1,
+                    v.classGrenadeType[i], i + 1, v.classGrenades[i]);
+        fprintf(file, "[native_options]\n");
+        fprintf(file, "native_volume = %d\ncontroller_horizontal = %d\ncontroller_vertical = %d\n",
+                v.nativeVolume, v.controllerHorizontal, v.controllerVertical);
         fprintf(file, "[keys]\n");
         for (int i = 0; i < ActionCount; i++) fprintf(file, "key_%s = %d\n", ActionKeys[i], v.keys[i]);
         fclose(file);
@@ -272,7 +383,7 @@ std::string Settings::TitleCommandsChanged()
     // default.cfg (it only checks the file is there), so lines added to
     // it did nothing.
     static int appliedFov = 65, appliedDetail = 0;
-    static bool appliedAimAssist = true, appliedSubtitles = true;
+    static bool appliedAimAssist = true;
     const Values v = Get();
     std::string commands;
     if (v.fov != appliedFov)
@@ -295,12 +406,32 @@ std::string Settings::TitleCommandsChanged()
         const char* on = v.aimAssist ? "1" : "0";
         commands += std::string("set aim_slowdown_enabled ") + on + "\nset aim_lockon_enabled " + on + "\nset aim_autoaim_enabled " + on + "\n";
     }
-    // The subtitles: the title's cg_subtitles (its dvar table at 0x825CE180
-    // gives it "1"), the same switch as its own Gameplay page.
-    if (v.subtitles != appliedSubtitles)
+    // Fog, draw distance, effects and dynamic lights: the title's own
+    // switches, from the menu's Graphics page. The first ask sends only what
+    // differs from the title's own.
+    static bool appliedFog = true, appliedLights = true;
+    static int appliedDistance = 0, appliedEffects = 0;
+    if (v.fog != appliedFog)
     {
-        appliedSubtitles = v.subtitles;
-        commands += std::string("set cg_subtitles ") + (v.subtitles ? "1" : "0") + "\n";
+        appliedFog = v.fog;
+        commands += std::string("set r_fog ") + (v.fog ? "1" : "0") + "\n";
+    }
+    if (v.drawDistance != appliedDistance)
+    {
+        appliedDistance = v.drawDistance;
+        static const char* const distances[] = { "0", "9000", "6000", "3500" };
+        commands += std::string("set r_zfar ") + distances[v.drawDistance] + "\n";
+    }
+    if (v.effects != appliedEffects)
+    {
+        appliedEffects = v.effects;
+        commands += std::string("set fx_enable ") + (v.effects == 2 ? "0" : "1") + "\nset fx_cullscale " +
+                    (v.effects == 1 ? "0.5" : "1") + "\n";
+    }
+    if (v.dynamicLights != appliedLights)
+    {
+        appliedLights = v.dynamicLights;
+        commands += std::string("set r_dynamiclight ") + (v.dynamicLights ? "1" : "0") + "\n";
     }
     if (!commands.empty()) commands.pop_back();   // the last line's end: the queue adds its own
     return commands;

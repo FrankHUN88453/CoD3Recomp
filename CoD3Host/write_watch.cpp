@@ -12,7 +12,10 @@ namespace
 {
     constexpr uint32_t PageShift = 12;
     constexpr uint32_t WindowSize = 0x20000000u;           // 512 MB of physical memory
-    constexpr uint32_t Pages = WindowSize >> PageShift;
+    // The pages: the 512 MB of physical memory, then the extended window
+    // (kernel.h; GPU addresses 0x20000000 to 0x3F000000, one view each).
+    constexpr uint32_t Pages = 0x40000000u >> PageShift;
+    constexpr uint32_t PhysicalPages = WindowSize >> PageShift;
     constexpr uint32_t Windows[] = { 0xA0000000u, 0xC0000000u, 0xE0000000u };
 
     std::atomic<uint8_t> g_armed[Pages];
@@ -23,6 +26,17 @@ namespace
     bool Protect(uint32_t firstPage, uint32_t count, DWORD protection)
     {
         bool all = true;
+        // The extended window's part: one view, at its processor address.
+        if (firstPage + count > PhysicalPages)
+        {
+            const uint32_t from = firstPage > PhysicalPages ? firstPage : PhysicalPages;
+            DWORD was = 0;
+            if (!VirtualProtect(Guest::Base + (size_t(from) << PageShift) + Guest::ExtendedShift,
+                                size_t(firstPage + count - from) << PageShift, protection, &was))
+                all = false;
+            if (firstPage >= PhysicalPages) return all;
+            count = PhysicalPages - firstPage;
+        }
         for (const uint32_t window : Windows)
         {
             DWORD was = 0;
@@ -61,9 +75,10 @@ namespace
         if (bytes == 0) return false;
         uint32_t offset = address;
         if (address >= Windows[0]) offset = address & (WindowSize - 1);
+        else if (Guest::IsExtendedCpu(address) || Guest::IsExtendedGpu(address)) offset = Guest::GpuOffset(address);
         else if (address >= WindowSize) return false;   // the virtual heap and below: not physical memory
         const uint64_t last = uint64_t(offset) + bytes - 1;
-        if (last >= WindowSize) return false;
+        if (offset < WindowSize ? last >= WindowSize : last >= uint64_t(Guest::ExtendedCpuLimit - Guest::ExtendedShift)) return false;
         first = offset >> PageShift;
         end = uint32_t(last >> PageShift) + 1;
         return true;
@@ -88,7 +103,7 @@ bool WriteWatch::Arm(uint32_t physical, uint32_t bytes)
 {
     if (!Enabled()) return false;
     uint32_t first, end;
-    if (!PagesOf(physical & (WindowSize - 1), bytes, first, end)) return false;
+    if (!PagesOf(Guest::GpuOffset(physical), bytes, first, end)) return false;
     std::lock_guard<std::mutex> lock(g_lock);
     uint32_t page = first;
     while (page < end)
@@ -117,7 +132,7 @@ bool WriteWatch::Arm(uint32_t physical, uint32_t bytes)
 bool WriteWatch::Clean(uint32_t physical, uint32_t bytes, uint64_t since)
 {
     uint32_t first, end;
-    if (!PagesOf(physical & (WindowSize - 1), bytes, first, end)) return false;
+    if (!PagesOf(Guest::GpuOffset(physical), bytes, first, end)) return false;
     for (uint32_t page = first; page < end; page++)
         if (g_armed[page].load(std::memory_order_acquire) == 0 || g_written[page].load(std::memory_order_relaxed) > since)
             return false;
@@ -140,6 +155,7 @@ bool WriteWatch::HandleFault(const void* hostAddress)
     uint32_t page = Pages;
     for (const uint32_t window : Windows)
         if (at >= window && at < uint64_t(window) + WindowSize) page = uint32_t((at - window) >> PageShift);
+    if (at >= Guest::ExtendedCpuBase && at < Guest::ExtendedCpuLimit) page = uint32_t((at - Guest::ExtendedShift) >> PageShift);
     if (page >= Pages) return false;
     {
         std::lock_guard<std::mutex> lock(g_lock);

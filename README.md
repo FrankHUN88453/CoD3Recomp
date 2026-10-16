@@ -1,10 +1,76 @@
+# CoD3Recomp  full campaign + multiplayer fork
+
+**Call of Duty 3 (Xbox 360), statically recompiled to run natively on Windows PC.**
+This is a fork of **[FrankHUN88453/CoD3Recomp](https://github.com/FrankHUN88453/CoD3Recomp)**,
+built on Frank's recompilation work (made with [XenonRecomp](https://github.com/hedge-dev/XenonRecomp)).
+Full credit to Frank for the original port: the recompiled engine, the kernel, the Direct3D 11 renderer
+and the installer all come from his project.
+
+> **Where this fork is at:** Frank's public 0.4.0 build only let me play through the first 4-5 campaign
+> missions. In this fork **the whole campaign plays through**, and **multiplayer works** ” System Link
+> over LAN or Tailscale, with bots, custom classes, DLC maps and restored cut content.
+>
+> Current source version: **0.5.183**. Every change since 0.4.0 is logged in
+> [docs/PATCH-NOTES.md](docs/PATCH-NOTES.md).
+
+You need your **own** Xbox 360 disc image of Call of Duty 3. No game files are included in this repository.
+
+## What this fork adds since 0.4.0
+
+**Multiplayer (0.4.1 - 0.4.10)**
+- Multiplayer runs: System Link between PCs (LAN or Tailscale), the F11 settings menu for addresses and options
+- DLC maps and bots (experimental), custom rules for everyone
+- **Domination**, the cut game mode, restored
+- Custom classes, loadout extras, aiming and ability tweaks, graphics options and movement fixes
+
+**Campaign weapons in multiplayer (0.5.0 - 0.5.56)**
+- The campaign's Lee-Enfield, Sten, FG42 (and scoped FG42), Bren and Mills bomb usable in multiplayer,
+  with their models, arms, reload timing, gunshots, reload sounds and pick-up icons
+- Memory past 512 MB (big memory), so Poissons and other big maps load whole with the campaign guns
+- Pick up and swap the gun in your hands; dying drops the gun you are holding; aim in the air
+
+**Console, binoculars and killstreaks (0.5.57 - 0.5.84)**
+- The developer console works in multiplayer (`devmap`, `god`, `noclip`, `setviewpos`, ...)
+- Binoculars for every class (d-pad up / down, light zoom)
+- **Killstreaks**: UAV (enemies on the compass), artillery barrage, and the **Typhoon strafing run**
+- A **killstreak box** on the HUD (MW2 style): d-pad down picks, d-pad right calls in;
+  strikes are marked with the spotter's binoculars. Players who join get their artillery/Typhoon armed too.
+- `streak_give uav|artillery|typhoon` for testing
+
+**Vehicles and the Kangaroo APC (0.5.59 - 0.5.86)**
+- `spawnvehicle`, vehicles on any map (`vehicles_everywhere`), saved vehicle spots (`vehicle_mark`, `vehicle_clear`, `vehicle_list`)
+- The campaign's **Kangaroo APC** brought into multiplayer as its own vehicle: drivable, mountable gun,
+  six passenger seats, its own driving curve, wheels, suspension and treads drawn
+
+**Menus and textures**
+- Texture replacement packs; the menu art, banners, fonts, controller diagrams and HUD icons upscaled 4x
+
+## Recent work (0.5.87 – 0.5.183)
+
+- Kangaroo entry/exit improvements, native controller sensitivity up to 200%,
+  persistent audio/controller settings, and menu input fixes.
+- Sniper steady aim and experimental saved-position controls: hold L3 for
+  one second while stationary to save; hold X for two seconds to return.
+- Bot input/session isolation, combat diagnostics and owned-weapon recovery.
+  New bots balance across teams, including connected humans, and retain
+  their assigned team through respawns.
+- **Experimental:** 0.5.183 team assignment awaits live testing. Remote bot
+  visibility from both teams, held/dropped weapon visibility, combat crashes,
+  unintended movement and bot UAV markers remain under investigation.
+
+See [patch notes](docs/PATCH-NOTES.md) for build history and
+[handoff](docs/HANDOFF.md) for the current checkpoint. This is a source
+update; no game data or compiled game executables are published here.
+
+## Original README (Frank's project)
+
 # CoD3Recomp
 
 > **Still in development: bugs can and will occur.** A build ready to play,
 > with your own Xbox 360 disc image, is on the
 > [releases page](https://github.com/FrankHUN88453/CoD3Recomp/releases).
 >
-> *Még fejlesztés alatt: hibák előfordulhatnak.*
+> *MÃ©g fejlesztÃ©s alatt: hibÃ¡k elÅ‘fordulhatnak.*
 
 Static recompilation of Call of Duty 3 (Xbox 360) to native x86-64, using
 [XenonRecomp](https://github.com/hedge-dev/XenonRecomp).
@@ -15,7 +81,7 @@ implemented, memory mapped I/O reaches the GPU register file, and a command
 processor decodes the packets the graphics driver queues.
 
 `CoD3.exe` installs the game from your own disc image and boots it into a window.
-The first level, Saint-Lô, is playable: the menus, the loading screen, the
+The first level, Saint-LÃ´, is playable: the menus, the loading screen, the
 opening cutscene and the fighting run at the title's own 60 frames a second
 on the host's GPU through a Direct3D 11 renderer built for a PC (see
 [docs/renderer.md](docs/renderer.md)), drawn from the title's own shaders

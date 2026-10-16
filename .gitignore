@@ -35,3 +35,37 @@ shots/
 
 # Python bytecode.
 __pycache__/
+
+# --- fork additions: never upload game data or generated game code ---
+# Multiplayer's generated code (XenonRecomp output from the game's executable)
+CoD3RecompLib/ppc_mp/
+CoD3RecompLib/ppc*/
+# Game files, disc images and archives
+*.iso
+*.xex
+*.cod
+*.wbk
+*.bin
+# Built programs and debug files
+*.exe
+*.pdb
+*.dll
+# Dumped and upscaled game textures, captures, logs
+textures/
+*.png.bak
+CoD3MP.log
+build-mp-log.txt
+build-log.txt
+recomp_*.log
+# Port folders and friend packages
+CoD3-PC-Port-*/
+CoD3-for-friend/
+*.zip
+
+# Local diagnostics and packaged data
+docs/build-logs/
+*.dmp
+*.7z
+*.rar
+*.obj
+*.lib

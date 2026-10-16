@@ -67,7 +67,11 @@ void Log::Start()
     if (GetModuleFileNameW(nullptr, exe, MAX_PATH) == 0) return;
     const std::filesystem::path directory = std::filesystem::path(exe).parent_path();
     const std::filesystem::path path = setting != nullptr && setting[0] != 0 && strcmp(setting, "1") != 0
+#ifdef COD3_MP
+        ? std::filesystem::path(setting) : directory / L"CoD3MP.log";
+#else
         ? std::filesystem::path(setting) : directory / L"CoD3.log";
+#endif
     std::error_code ignored;
     std::filesystem::path previous = path;
     previous.replace_filename(path.stem().wstring() + L".previous" + path.extension().wstring());

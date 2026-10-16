@@ -1,6 +1,6 @@
 # Terv: natív D3D11 a játék D3D-hívásainál, Xenos-emuláció nélkül
 
-*2026-09-30, frissítve 2026-10-12. Állapot: F0, F1, N1–N3 kész (natív listák, kísérleti beállítás); a renderelő tartomány visszafejtve; következik N4 (lásd „N4–N7”).*
+*2026-09-30, frissítve 2026-10-06. Állapot: F0 és F1 kész; a D3D könyvtár visszafejtve (privát CoD3Decomp); N1 (a rajzolás állapota a rajzhíváskor, paritással) kész, következik N2.*
 
 ## Mi a cél
 
@@ -277,82 +277,6 @@ Később ugyanaznap:
   a négy munkaszál felváltva): ~60%-a a játék saját kódja, ~40%-a még a
   csomagolvasás (a darabok másolása az arénába, a lapjegyzetek, a
   shaderek hash-e).
-
-## N4–N7: az emuláció kiirtása (terv, 2026-10-12)
-
-A játékos kérése: „teljesen ki kéne irtani az emulálást, hogy natív
-legyen”. A renderelő tartomány visszafejtése ehhez kész (46/46 függvény,
-CoD3Decomp 9f87613); a D3D-könyvtár 540/597.
-
-**Mit futtat még a parancsfeldolgozó az N3-mal** (`COD3_NATIVECENSUS=1`,
-erdő, képkockánként): a ~1740 rajzolás már a rekordokból megy, de a
-parancsfolyamot még csomagról csomagra járja, és futtat:
-
-| csomag / regiszter | db/képkocka | mi ez | natívan |
-| --- | ---: | --- | --- |
-| 0x5000.. írás | ~2100 | a fetch-gyorsítótár ürítése | semmi |
-| SET_BIN_MASK lo/hi | ~1530 | a rajzolások menete (Z / szín) | a rekord viszi a maszkját |
-| SET_BIN_SELECT, SWAP | 1–1 | a menet kiválasztása, a csere | natív menetválasztás, `Present` |
-| 0x1925 + COND_WRITE | 128–128 | a kijelző színtáblája (gamma) | a gamma-textúra közvetlenül |
-| INVALIDATE_STATE | 76 | állapot érvénytelenítése | semmi (a rekordban teljes az állapot) |
-| WAIT_REG_MEM, WAIT_UNTIL | 28 + 24 | a GPU vár memóriára / jelre | gazdaoldali várakozás, vagy semmi |
-| EVENT_WRITE | 21 | gyorsítótár-ürítés, kerítés | a kerítés értéke a natív sorban |
-| COHER_* (0x0A2F/31) | 19 | resolve → textúra koherencia | a resolve natív másolása |
-| INTERRUPT | 3 | a CPU visszahívása (csere kész) | natív jelzés |
-| 0x0D00, 0x05xx, 0x18xx, 0x19xx | ~60 | vezérlő, kijelző, karcregiszterek | egyenként megnézni |
-
-**A lépések** (mindegyik után játszható build, a régi út egy kapcsolóval
-visszahozható, ahogy eddig):
-
-- **N4 – a parancsfeldolgozó nem értelmez csomagot.** A beolvasáskor (`Scan`)
-  minden puffer egy natív műveletlistát kap: rajzolás (rekord + a menet
-  maszkja), resolve, törlés, kerítés, várakozás, megszakítás, csere,
-  gamma. A parancsfeldolgozó szála csak ezt a listát hajtja végre; a fenti
-  táblázat „semmi” sorai kimaradnak. Ellenőrzés: a képösszevetés
-  (`COD3_IMAGECHECK`) és a kerítések sorrendje a régi úttal.
-- **N5 – nincs PM4.** A visszafejtett D3D-könyvtár a csomagok írása helyett
-  közvetlenül a natív műveletlistába ír (a rekord ma is a rajzhíváskor
-  készül); a `Scan` megszűnik. A rögzített parancspufferek (a jelenet egyszer
-  rögzítve, a Z- és a színmenetben kétszer lejátszva) natív listaként
-  rögzülnek, a lejátszás a menet szerint szűr. A gyűrű, a kick és a
-  GPU-olvasómutató könyvelése natív.
-- **N6 – a célok és a resolve natívan.** A `SetRenderTarget`, a `Clear` és a
-  `Resolve` paraméteréből natív D3D11-célok és másolások; az EDRAM-modell
-  (felületek sorokban, pitch) megszűnik.
-- **N7 – a régi út törlése.** A PM4-dekódolók (`gpu.cpp`), a regiszterfájl,
-  a predikáció és az EDRAM-modell kódja törlődik; a VBlank-, swap- és
-  kerítésemuláció helyett natív képütemezés.
-
-Ami marad: a shaderek fordítása (a mikrokódnak nincs forrása; fordítás,
-nem emuláció) és a textúrák átalakítása betöltéskor.
-
-
-### Állás 2026-10-13
-
-- **N4 első lépése kész** (efa78d0): a natív listák viszik a menetmaszkjukat;
-  a maszkcsomagok, a fetch-gyorsítótár ürítése, az INVALIDATE_STATE és a NOP
-  kimarad. A parancsfeldolgozó csomagjai ~45%-kal kevesebbek.
-- **A natív út az alapértelmezett** (92c0668): a játékos beállításaival
-  (2560×1440, 200%, MSAA 4x + FXAA) az erdő mérőjelenete 101 → 114 fps; mind a
-  15 pálya hibátlan.
-- **N6 első lépése** (dde71b3): MSAA csak ott, ahol a konzol is használta
-  (RB_SURFACE_INFO 16–17. bit: a jelenet 2x, minden más 1x), a felületek ezzel
-  az osztállyal együtt különülnek el. Az erdő 1024-es árnyékkaszkádja már nem
-  4x-es, a jelenet felülete nem nő 1024 sorra; 113,7 → 116,1 fps.
-- **Olcsóbb beolvasás**: az állapotcsomagok szakaszonként egy jegyzetet kapnak
-  (fejléc-hash-sel ellenőrizve), a programhash memóban (cb01e24, 1029fb3,
-  f7d260e). 1080p-n 186 → ~190 fps.
-- **Hol a korlát most:** 1080p-n a parancsfeldolgozó szála (~90%): a
-  rajzolásonkénti előkészítés (PrepareDraw ~40%, a rekord képe ~22%, a
-  konstansfeltöltés). A játékos beállításain a GPU: ott a konzolos
-  mélységpontosság a legnagyobb tétel (bekapcsolva ~115, kikapcsolva
-  ~152 fps a mérőjeleneten), mert a pixel shader mélységírása kikapcsolja a
-  mélységtömörítést. A vibrálás egyik oka (Z-menet ↔ színmenet) azóta
-  natívan megoldott (79a7435); a „távoli domboldal a saját alacsonyabb
-  részletessége fölött” esetet a játékosnak kell kipróbálnia nélküle.
-- A resolve-ok a GPU-idő 14–19%-a; a hardveres `ResolveSubresource`
-  kipróbálva lassabb volt (a teljes forrást oldja fel), ezért maradt a
-  shaderes másolás.
 
 ## Felépítés
 

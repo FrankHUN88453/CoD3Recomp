@@ -1,5 +1,6 @@
 #include "audio_out.h"
 #include "kernel.h"
+#include "settings.h"
 
 #include <algorithm>
 #include <cmath>
@@ -94,11 +95,13 @@ namespace
         return value;
     }
 
-    int16_t ToPcm(float value)
+    int16_t ToPcm(float value, float volume)
     {
         // A little headroom, because six channels folded into two can add up to
         // more than one and clipping is far more audible than being quiet.
-        const float scaled = value * 0.8f * 32767.0f;
+        // The settings menu's master volume on top, on a curve so the slider's
+        // middle sounds like half as loud rather than nearly full.
+        const float scaled = value * 0.8f * volume * 32767.0f;
         return int16_t(std::clamp(scaled, -32768.0f, 32767.0f));
     }
 }
@@ -197,6 +200,8 @@ bool Audio::SubmitFrame(uint32_t guestAddress)
         for (uint32_t i = 0; i < SamplesPerChannel * Channels * 4; i++) nonzero += bytes[i] != 0;
         if (nonzero > g_nonzeroBytes.load(std::memory_order_relaxed)) g_nonzeroBytes.store(nonzero, std::memory_order_relaxed);
     }
+    const float percent = float(Settings::Get().masterVolume) / 100.0f;
+    const float volume = percent * percent;
     for (uint32_t i = 0; i < SamplesPerChannel; i++)
     {
         const uint32_t offset = guestAddress + i * 4;
@@ -206,8 +211,8 @@ bool Audio::SubmitFrame(uint32_t guestAddress)
         const float ls = GuestFloat(offset + 4 * channelBytes);
         const float rs = GuestFloat(offset + 5 * channelBytes);
 
-        block.samples[i * 2 + 0] = ToPcm(l + 0.707f * c + 0.707f * ls);
-        block.samples[i * 2 + 1] = ToPcm(r + 0.707f * c + 0.707f * rs);
+        block.samples[i * 2 + 0] = ToPcm(l + 0.707f * c + 0.707f * ls, volume);
+        block.samples[i * 2 + 1] = ToPcm(r + 0.707f * c + 0.707f * rs, volume);
 
         const int left = std::abs(int(block.samples[i * 2 + 0]));
         const int right = std::abs(int(block.samples[i * 2 + 1]));

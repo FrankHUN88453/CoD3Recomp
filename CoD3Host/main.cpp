@@ -1,3 +1,4 @@
+#include "version.h"
 #include "log.h"
 #include "installer.h"
 #include "kernel.h"
@@ -32,7 +33,11 @@ namespace
 
     void Banner()
     {
-        printf("Call of Duty 3 - static recompilation\n");
+#ifdef COD3_MP
+        printf("Call of Duty 3 multiplayer - static recompilation, version %s\n", COD3_VERSION);
+#else
+        printf("Call of Duty 3 - static recompilation, version %s\n", COD3_VERSION);
+#endif
         printf("Recompiled from the Xbox 360 executable with XenonRecomp.\n");
         printf("\n");
     }
@@ -262,7 +267,13 @@ int Run(int argc, char** argv)
     Settings::Load(exeDirectory);
     Kernel::InitializeFileSystem(exeDirectory);
 
-    if (!Guest::Initialize(game.executable.string().c_str()))
+#ifdef COD3_MP
+    // CoD3MP.exe: the multiplayer executable from the same installed game.
+    const std::filesystem::path executable = game.root / "codmp_xenonf.xex";
+#else
+    const std::filesystem::path executable = game.executable;
+#endif
+    if (!Guest::Initialize(executable.string().c_str()))
     {
         fprintf(stderr, "\nCould not set up the guest address space.\n");
         Guest::Shutdown();

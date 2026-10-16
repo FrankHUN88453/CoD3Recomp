@@ -8,12 +8,16 @@
 // cancelled it immediately. Those answers are chosen to be the ones a title
 // handles as a normal case rather than an error.
 
+#include "debug_probe.h"
 #include "kernel.h"
 #include "log.h"
 #include "sampler.h"
 #include <atomic>
 #include <chrono>
 #include "input.h"
+#include "settings.h"
+#include "profile_store.h"
+#include <fstream>
 
 #include <cstdio>
 #include <mutex>
@@ -39,8 +43,51 @@ namespace
     constexpr uint32_t X_ERROR_IO_PENDING         = 0x000003E5;
 
     constexpr uint32_t SignedInUser = 0;
-    constexpr uint64_t PlayerXuid = 0xE000000000000001ull;
-    constexpr char PlayerName[] = "Player";
+    // The bot experiment (debug.txt bot_pads): players 2 to 4 as controllers
+    // this runtime drives itself, signed in locally as "Bot 1" to "Bot 3".
+    bool IsBot(uint32_t userIndex)
+    {
+        return userIndex >= 1 && userIndex <= 3 && int(userIndex) <= DebugProbe::BotPads();
+    }
+    // Who the player is. On the console a profile; here this machine's
+    // Windows user. The XUID has to differ from one machine to the next:
+    // two players with one XUID are one player to the title, and the second
+    // to join a System Link game would be refused as already in it. An
+    // offline XUID (0xE000...) made from the computer's and the user's
+    // names stays the same on this machine from one run to the next.
+    uint64_t PlayerXuid()
+    {
+        static const uint64_t xuid = [] {
+            char computer[MAX_COMPUTERNAME_LENGTH + 1] = {};
+            DWORD computerLength = sizeof(computer);
+            GetComputerNameA(computer, &computerLength);
+            char user[257] = {};
+            DWORD userLength = sizeof(user);
+            GetUserNameA(user, &userLength);
+            uint64_t hash = 0xCBF29CE484222325ull;   // FNV-1a
+            for (const char* text : { static_cast<const char*>(computer), "/", static_cast<const char*>(user) })
+                for (const char* c = text; *c != 0; c++) { hash ^= uint8_t(*c); hash *= 0x100000001B3ull; }
+            return 0xE000000000000000ull | (hash & 0x0000FFFFFFFFFFFFull);
+        }();
+        return xuid;
+    }
+
+    // The gamertag: the settings menu's, or the Windows user name, in the
+    // characters a gamertag can have and no longer than one (15).
+    std::string PlayerName()
+    {
+        std::string name = Settings::Get().playerName;
+        if (name.empty())
+        {
+            char user[257] = {};
+            DWORD length = sizeof(user);
+            if (GetUserNameA(user, &length)) name = user;
+        }
+        std::string clean;
+        for (char c : name)
+            if (c >= 0x20 && c < 0x7F && clean.size() < 15) clean.push_back(c);
+        return clean.empty() ? std::string("Player") : clean;
+    }
 }
 
 // --- The signed in user ----------------------------------------------------
@@ -50,7 +97,7 @@ PPC_FUNC(__imp__XamUserGetSigninState)
 {
     Kernel::CountImport("XamUserGetSigninState");
     // 0 not signed in, 1 signed in locally, 2 signed in to Live.
-    ctx.r3.u32 = (ctx.r3.u32 == SignedInUser) ? 1 : 0;
+    ctx.r3.u32 = (ctx.r3.u32 == SignedInUser || IsBot(ctx.r3.u32)) ? 1 : 0;
 }
 
 // X_RESULT XamUserGetName(ULONG userIndex, char* buffer, ULONG length)
@@ -61,15 +108,16 @@ PPC_FUNC(__imp__XamUserGetName)
     const uint32_t buffer = ctx.r4.u32;
     const uint32_t length = ctx.r5.u32;
 
-    if (userIndex != SignedInUser || buffer == 0 || length == 0)
+    if ((userIndex != SignedInUser && !IsBot(userIndex)) || buffer == 0 || length == 0)
     {
         ctx.r3.u32 = X_ERROR_NO_SUCH_USER;
         return;
     }
 
-    const uint32_t copy = length < sizeof(PlayerName) ? length : uint32_t(sizeof(PlayerName));
-    memcpy(Guest::Ptr(buffer), PlayerName, copy);
-    *(Guest::Ptr(buffer) + copy - 1) = '\0';
+    const std::string name = IsBot(userIndex) ? "Bot " + std::to_string(userIndex) : PlayerName();
+    const uint32_t copy = std::min<uint32_t>(length - 1, uint32_t(name.size()));
+    memcpy(Guest::Ptr(buffer), name.data(), copy);
+    *(Guest::Ptr(buffer) + copy) = '\0';
     ctx.r3.u32 = X_ERROR_SUCCESS;
 }
 
@@ -84,13 +132,54 @@ PPC_FUNC(__imp__XamUserGetXUID)
             ctx.r3.u32, ctx.r4.u32, uint32_t(ctx.lr));
         fflush(stdout);
     }
-    if (ctx.r3.u32 != SignedInUser || ctx.r5.u32 == 0)
+    if ((ctx.r3.u32 != SignedInUser && !IsBot(ctx.r3.u32)) || ctx.r5.u32 == 0)
     {
         ctx.r3.u32 = X_ERROR_NO_SUCH_USER;
         return;
     }
-    Guest::Write64(base, ctx.r5.u32, PlayerXuid);
+    Guest::Write64(base, ctx.r5.u32, PlayerXuid() + (IsBot(ctx.r3.u32) ? ctx.r3.u32 * 0x1000 : 0));
     ctx.r3.u32 = X_ERROR_SUCCESS;
+}
+
+namespace
+{
+    uint32_t CompleteOverlapped(PPCContext&, uint8_t*, uint32_t, uint32_t, uint32_t length = 0);
+    std::mutex g_profileMutex;
+    std::filesystem::path ProfileFile(uint32_t user)
+    { return Kernel::SavesRoot() / "profiles" / ("user-" + std::to_string(user) + ".bin"); }
+    ProfileStore::Values ReadProfile(uint32_t user)
+    {
+        ProfileStore::Values values;
+        if (user > 3) return values;
+        std::ifstream file(ProfileFile(user), std::ios::binary | std::ios::ate);
+        if (!file) return values;
+        const auto size = file.tellg();
+        if (size < 12 || size > 9 * 1024 * 1024) return values;
+        std::vector<uint8_t> data(static_cast<size_t>(size));
+        file.seekg(0);
+        if (!file.read(reinterpret_cast<char*>(data.data()), data.size()) || !ProfileStore::Decode(data, values))
+            printf("profile: ignored invalid saved profile for user %u\n", user);
+        return values;
+    }
+    bool WriteProfile(uint32_t user, const ProfileStore::Values& values)
+    {
+        const auto data = ProfileStore::Encode(values);
+        if (data.empty()) return false;
+        const auto path = ProfileFile(user);
+        std::error_code error;
+        std::filesystem::create_directories(path.parent_path(), error);
+        if (error) return false;
+        const auto temp = std::filesystem::path(path.wstring() + L".tmp");
+        {
+            std::ofstream file(temp, std::ios::binary | std::ios::trunc);
+            if (!file.write(reinterpret_cast<const char*>(data.data()), data.size())) return false;
+            file.flush();
+            if (!file) return false;
+        }
+        return MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+    }
+    bool ProfileRange(uint32_t pointer, uint32_t size)
+    { return pointer != 0 && uint64_t(pointer) + size <= Guest::TotalSize; }
 }
 
 // X_RESULT XamUserReadProfileSettings(titleId, userIndex, unk, unk,
@@ -102,6 +191,9 @@ PPC_FUNC(__imp__XamUserReadProfileSettings)
     const uint32_t settingCount = ctx.r7.u32;
     const uint32_t sizePtr = ctx.r9.u32;
     const uint32_t buffer = ctx.r10.u32;
+    if (ctx.r4.u32 > 3 || settingCount > ProfileStore::MaxEntries || !ProfileRange(sizePtr, 4) ||
+        (settingCount && !ProfileRange(ctx.r8.u32, settingCount * 4)))
+    { ctx.r3.u32 = 87; return; }
     static std::atomic<int> announced{ 0 };
     if (announced.fetch_add(1) < 12)
     {
@@ -115,11 +207,24 @@ PPC_FUNC(__imp__XamUserReadProfileSettings)
         fflush(stdout);
     }
 
-    // The reply is a header followed by one entry per requested setting. Each
-    // entry is madeup of an id, a type, and a value union; 24 bytes covers it.
+    // Verified native consumer 82414788: source+0, user+8, id+16,
+    // XUSER_DATA type+24 and union+32. Forty bytes per entry, not24.
     constexpr uint32_t HeaderSize = 8;
-    constexpr uint32_t EntrySize = 24;
-    const uint32_t required = HeaderSize + settingCount * EntrySize;
+    constexpr uint32_t EntrySize = 40;
+    const uint32_t settingIds = ctx.r8.u32, user = ctx.r4.u32;
+    if (user > 3 || settingCount > ProfileStore::MaxEntries || !ProfileRange(sizePtr, 4) ||
+        (settingCount && !ProfileRange(settingIds, settingCount * 4)))
+    { ctx.r3.u32 = 87; return; }
+    std::unique_lock<std::mutex> lock(g_profileMutex);
+    const auto values = ReadProfile(user);
+    lock.unlock(); // Completion callbacks may issue another profile request.
+    uint32_t required = HeaderSize + settingCount * EntrySize;
+    for (uint32_t i=0;i<settingCount;++i)
+    {
+        const auto found = values.find(Guest::Read32(base, settingIds + i*4));
+        if (found != values.end() && (found->second.type == 4 || found->second.type == 6))
+            required += (uint32_t(found->second.bytes.size()) + 7) & ~7u;
+    }
 
     if (buffer == 0)
     {
@@ -136,32 +241,67 @@ PPC_FUNC(__imp__XamUserReadProfileSettings)
         ctx.r3.u32 = 0x0000007A;
         return;
     }
-
-    // Report every requested setting as present but unset. There is no profile
-    // to read, and a title that finds an empty setting falls back to its own
-    // default, which is the behaviour wanted here.
+    if (!ProfileRange(buffer, required)) { ctx.r3.u32 = 87; return; }
     memset(Guest::Ptr(buffer), 0, required);
     Guest::Write32(base, buffer + 0, settingCount);
     Guest::Write32(base, buffer + 4, buffer + HeaderSize);
 
-    const uint32_t settingIds = ctx.r8.u32;
+    uint32_t payload = buffer + HeaderSize + settingCount * EntrySize;
     for (uint32_t i = 0; i < settingCount; i++)
     {
         const uint32_t entry = buffer + HeaderSize + i * EntrySize;
-        if (settingIds != 0)
-            Guest::Write32(base, entry + 0, Guest::Read32(base, settingIds + i * 4));
-        Guest::Write32(base, entry + 4, 0);   // type: unset
+        const uint32_t id = Guest::Read32(base, settingIds + i*4);
+        Guest::Write32(base, entry + 8, user);
+        Guest::Write32(base, entry + 16, id);
+        const auto found = values.find(id);
+        if (found == values.end()) continue; // source0 means unset/default
+        const auto& value = found->second;
+        Guest::Write32(base, entry, 2);
+        Guest::Write8(base, entry + 24, uint8_t(value.type));
+        if (value.type == 4 || value.type == 6)
+        {
+            Guest::Write32(base, entry + 32, uint32_t(value.bytes.size()));
+            Guest::Write32(base, entry + 36, payload);
+            if (!value.bytes.empty()) memcpy(base + payload, value.bytes.data(), value.bytes.size());
+            payload += (uint32_t(value.bytes.size()) + 7) & ~7u;
+        }
+        else memcpy(base + entry + 32, value.bytes.data(), value.bytes.size());
     }
-
-    ctx.r3.u32 = X_ERROR_SUCCESS;
+    Guest::Write32(base, sizePtr, required);
+    printf("profile: read %u settings for user %u, %zu saved values\n", settingCount, user, values.size());
+    fflush(stdout);
+    ctx.r3.u32 = CompleteOverlapped(ctx, base, Guest::Read32(base, ctx.r1.u32 + 0x54), X_ERROR_SUCCESS);
 }
 
 // X_RESULT XamUserWriteProfileSettings(...)
 PPC_FUNC(__imp__XamUserWriteProfileSettings)
 {
     Kernel::CountImport("XamUserWriteProfileSettings");
-    // Accepted and discarded. Nothing persists a profile yet.
-    ctx.r3.u32 = X_ERROR_SUCCESS;
+    // Native writer824135D8 and wrapper8222C0C8 verify these arguments.
+    const uint32_t user=ctx.r4.u32, count=ctx.r5.u32, records=ctx.r6.u32, overlap=ctx.r7.u32;
+    if (user > 3 || count > ProfileStore::MaxEntries || (count && !ProfileRange(records, count*40)))
+    { ctx.r3.u32 = 87; return; }
+    uint32_t result = X_ERROR_SUCCESS;
+    {
+        std::lock_guard<std::mutex> lock(g_profileMutex);
+        auto values=ReadProfile(user);
+        for(uint32_t i=0;i<count;++i)
+        {
+            const uint32_t entry=records+i*40, id=Guest::Read32(base,entry+16);
+            const uint32_t type=Guest::Read8(base,entry+24);
+            if(!type) { values.erase(id); continue; }
+            uint32_t size=(type==2 || type==3)?8:4, data=entry+32;
+            if(type==4 || type==6) { size=Guest::Read32(base,entry+32); data=Guest::Read32(base,entry+36); }
+            if(size>ProfileStore::MaxPayload || (size && !ProfileRange(data,size))) { result=87; break; }
+            ProfileStore::Value value{type, {}};
+            if(size) value.bytes.assign(base+data,base+data+size);
+            if(!ProfileStore::Valid(value)) { result=87; break; }
+            values[id]=std::move(value);
+        }
+        if(!result && !WriteProfile(user,values)) result=5;
+    }
+    printf("profile: save user %u, %u settings, result %u\n",user,count,result); fflush(stdout);
+    ctx.r3.u32=CompleteOverlapped(ctx,base,overlap,result);
 }
 
 // --- Controllers -----------------------------------------------------------
@@ -202,6 +342,24 @@ PPC_FUNC(__imp__XamInputGetState)
         }
     }
 
+    if (IsBot(ctx.r3.u32))
+    {
+        if (ctx.r5.u32 != 0)
+        {
+            static uint32_t packet = 0;
+            int16_t lx, ly, rx, ry;
+            DebugProbe::BotSticks(lx, ly, rx, ry);
+            memset(Guest::Ptr(ctx.r5.u32), 0, 16);
+            Guest::Write32(base, ctx.r5.u32 + 0, ++packet);
+            Guest::Write16(base, ctx.r5.u32 + 4, DebugProbe::BotButtons());
+            Guest::Write16(base, ctx.r5.u32 + 8, uint16_t(lx));
+            Guest::Write16(base, ctx.r5.u32 + 10, uint16_t(ly));
+            Guest::Write16(base, ctx.r5.u32 + 12, uint16_t(rx));
+            Guest::Write16(base, ctx.r5.u32 + 14, uint16_t(ry));
+        }
+        ctx.r3.u32 = X_ERROR_SUCCESS;
+        return;
+    }
     if (ctx.r3.u32 != SignedInUser)
     {
         if (ctx.r5.u32 != 0) memset(Guest::Ptr(ctx.r5.u32), 0, 16);
@@ -251,7 +409,14 @@ PPC_FUNC(__imp__XamInputGetState)
 
         memset(Guest::Ptr(ctx.r5.u32), 0, 16);
         Guest::Write32(base, ctx.r5.u32 + 0, Input::PacketNumber());
+#ifdef COD3_MP
+        // 128: raw Y edges are consumed once per server frame. Suppress the
+        // unreliable parallel native binding only while that bridge is active;
+        // pause/menu reports keep their native Y semantics.
+        Guest::Write16(base, ctx.r5.u32 + 4, Input::NativeButtons(pad.buttons,Guest::Read8(base,0x82C73024)!=0));
+#else
         Guest::Write16(base, ctx.r5.u32 + 4, pad.buttons);
+#endif
         Guest::Write8(base, ctx.r5.u32 + 6, pad.leftTrigger);
         Guest::Write8(base, ctx.r5.u32 + 7, pad.rightTrigger);
         Guest::Write16(base, ctx.r5.u32 + 8, uint16_t(pad.thumbLX));
@@ -267,7 +432,7 @@ PPC_FUNC(__imp__XamInputGetCapabilities)
 {
     Kernel::CountImport("XamInputGetCapabilities");
 
-    if (ctx.r3.u32 != SignedInUser)
+    if (ctx.r3.u32 != SignedInUser && !IsBot(ctx.r3.u32))
     {
         if (ctx.r5.u32 != 0) memset(Guest::Ptr(ctx.r5.u32), 0, 20);
         ctx.r3.u32 = X_ERROR_DEVICE_NOT_CONNECTED;
@@ -292,8 +457,16 @@ PPC_FUNC(__imp__XamInputGetCapabilities)
 PPC_FUNC(__imp__XamInputSetState)
 {
     Kernel::CountImport("XamInputSetState");
-    ctx.r3.u32 = (ctx.r3.u32 == SignedInUser)
-        ? X_ERROR_SUCCESS : X_ERROR_DEVICE_NOT_CONNECTED;
+    if (ctx.r3.u32 != SignedInUser)
+    {
+        ctx.r3.u32 = X_ERROR_DEVICE_NOT_CONNECTED;
+        return;
+    }
+    // XINPUT_VIBRATION: the left (low frequency) motor's speed, then the
+    // right's, big endian. Passed on to the real pad.
+    if (ctx.r5.u32 != 0)
+        Input::SetRumble(Guest::Read16(base, ctx.r5.u32 + 0), Guest::Read16(base, ctx.r5.u32 + 2));
+    ctx.r3.u32 = X_ERROR_SUCCESS;
 }
 
 // --- Notifications ---------------------------------------------------------
@@ -332,6 +505,19 @@ PPC_FUNC(__imp__XamNotifyCreateListener)
 PPC_FUNC(__imp__XNotifyGetNext)
 {
     Kernel::CountImport("XNotifyGetNext");
+    // The bot experiment: players signed in or out tell the title so.
+    {
+        static int bots = 0;
+        const int now = DebugProbe::BotPads();
+        if (now != bots)
+        {
+            bots = now;
+            uint32_t mask = 1u << SignedInUser;
+            for (int i = 1; i <= now; i++) mask |= 1u << i;
+            std::lock_guard<std::mutex> lock(g_notifyMutex);
+            g_notifications.push_back({ XN_SYS_SIGNINCHANGED, mask });
+        }
+    }
     const uint32_t wanted = ctx.r4.u32;
     Notification next{ 0, 0 };
     bool found = false;
@@ -473,7 +659,7 @@ namespace
     // XOVERLAPPED: result, length, context, event, completion routine, its
     // context, extended error. A call given one answers through it: the
     // result goes in, the event is set, and the call itself says pending.
-    uint32_t CompleteOverlapped(PPCContext& ctx, uint8_t* base, uint32_t overlapped, uint32_t result, uint32_t length = 0)
+    uint32_t CompleteOverlapped(PPCContext& ctx, uint8_t* base, uint32_t overlapped, uint32_t result, uint32_t length)
     {
         if (overlapped == 0) return result;
         Guest::Write32(base, overlapped + 0x00, result);
@@ -671,7 +857,7 @@ PPC_FUNC(__imp__XamContentGetCreator)
 {
     Kernel::CountImport("XamContentGetCreator");
     if (ctx.r5.u32 != 0) Guest::Write32(base, ctx.r5.u32, 1);
-    if (ctx.r6.u32 != 0) Guest::Write64(base, ctx.r6.u32, PlayerXuid);
+    if (ctx.r6.u32 != 0) Guest::Write64(base, ctx.r6.u32, PlayerXuid());
     ctx.r3.u32 = CompleteOverlapped(ctx, base, ctx.r7.u32, X_ERROR_SUCCESS);
 }
 
@@ -785,6 +971,26 @@ namespace
 
     // This executable again, with the launch data in a file and the scripted
     // run's knobs left out (the relaunched title goes where its data says).
+    // Starts another program from this one's folder, with this process's
+    // environment and none of its arguments.
+    bool StartSibling(const wchar_t* name)
+    {
+        wchar_t executable[MAX_PATH] = {};
+        GetModuleFileNameW(nullptr, executable, MAX_PATH);
+        const std::filesystem::path other = std::filesystem::path(executable).parent_path() / name;
+        std::wstring commandLine = L"\"" + other.wstring() + L"\"";
+        STARTUPINFOW startup{};
+        startup.cb = sizeof(startup);
+        PROCESS_INFORMATION process{};
+        const std::wstring folder = other.parent_path().wstring();
+        if (!CreateProcessW(other.c_str(), commandLine.data(), nullptr, nullptr, FALSE, CREATE_NEW_CONSOLE,
+                            nullptr, folder.c_str(), &startup, &process))
+            return false;
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+        return true;
+    }
+
     bool Relaunch()
     {
         std::filesystem::path file = Kernel::SavesRoot();
@@ -889,10 +1095,36 @@ PPC_FUNC(__imp__XamLoaderLaunchTitle)
     }
     printf(", flags 0x%08X, from 0x%08X.\n", ctx.r4.u32, uint32_t(ctx.lr));
 
-    // Itself: the next mission. Started again, and this process ends.
     std::string lower(path);
     for (char& c : lower) c = char(tolower(static_cast<unsigned char>(c)));
-    if (lower.size() >= 11 && lower.compare(lower.size() - 11, 11, "default.xex") == 0)
+    const auto endsWith = [&](const char* tail) {
+        const size_t n = strlen(tail);
+        return lower.size() >= n && lower.compare(lower.size() - n, n, tail) == 0;
+    };
+
+    // The other executable: the single player menu's "Multiplayer" asks for
+    // codmp_xenonf.xex, and multiplayer's way back asks for default.xex.
+    // Each is a program of its own here, beside this one.
+#ifdef COD3_MP
+    const wchar_t* const sibling = endsWith("default.xex") ? L"CoD3.exe" : nullptr;
+#else
+    const wchar_t* const sibling = endsWith("codmp_xenonf.xex") ? L"CoD3MP.exe" : nullptr;
+#endif
+    if (sibling != nullptr)
+    {
+        if (StartSibling(sibling))
+        {
+            printf("Started %ls; this process ends.\n", sibling);
+            fflush(stdout);
+            Log::Finish();
+            ExitProcess(0);
+        }
+        printf("Could not start %ls beside this program (error %lu).\n", sibling, GetLastError());
+    }
+
+#ifndef COD3_MP
+    // Itself: the next mission. Started again, and this process ends.
+    if (endsWith("default.xex"))
     {
         if (Relaunch())
         {
@@ -903,6 +1135,7 @@ PPC_FUNC(__imp__XamLoaderLaunchTitle)
         }
         printf("The relaunch failed (error %lu).\n", GetLastError());
     }
+#endif
     {
         uint32_t functions[12] = {};
         const int count = Sampler::FunctionsOnStack(functions, 12);
@@ -936,6 +1169,20 @@ PPC_FUNC(__imp__XamLoaderTerminateTitle)
 PPC_FUNC(__imp__XMsgInProcessCall)
 {
     Kernel::CountImport("XMsgInProcessCall");
+    const uint32_t app = ctx.r3.u32, message = ctx.r4.u32, buffer = ctx.r5.u32;
+
+    // The music player (app 0xFA). The multiplayer front end asks for its
+    // status every frame, to know whether the player has music of their own
+    // playing over the game's: XMPGetStatus, { client, DWORD* state }. It is
+    // idle (0): there is no music player here.
+    if (app == 0xFA && message == 0x00070009 && buffer != 0)
+    {
+        const uint32_t state = Guest::Read32(base, buffer + 4);
+        if (state != 0) Guest::Write32(base, state, 0);
+        ctx.r3.u32 = X_ERROR_SUCCESS;
+        return;
+    }
+
     static std::atomic<int> announced{ 0 };
     if (announced.fetch_add(1) < 20)
     {

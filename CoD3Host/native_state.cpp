@@ -120,8 +120,7 @@ namespace
     constexpr uint32_t DeviceWrite = 40, DeviceSegmentEnd = 44;
 
     constexpr uint32_t OpDrawIndx = 0x22, OpDrawIndx2 = 0x36, OpImLoad = 0x27, OpImLoadImmediate = 0x2B;
-    constexpr uint32_t OpSetConstant = 0x2D, OpLoadAluConstant = 0x2F, OpSetBinMaskLow = 0x60, OpSetBinMaskHigh = 0x61;
-    constexpr uint32_t OpInvalidateState = 0x3B, OpNop = 0x10;
+    constexpr uint32_t OpSetConstant = 0x2D, OpLoadAluConstant = 0x2F, OpSetBinMaskLow = 0x60;
 
     // The two passes of a device drawing in bins: the replay selects bins
     // 0 and 31 for the Z pass, bin 1 for the colour pass (Gpu::BinSelect).
@@ -164,6 +163,7 @@ namespace
     // The library's own physical address (the window at 0xE0000000 is 4 KB on).
     uint32_t Physical(uint32_t address)
     {
+        if (Guest::IsExtendedCpu(address) || Guest::IsExtendedGpu(address)) return Guest::GpuOffset(address);
         return ((((address >> 20) & 0xFFF) + 512) & 0x1000) + (address & 0x1FFFFFFF);
     }
 
@@ -184,52 +184,10 @@ namespace
 
     struct Program { uint32_t address = 0, dwords = 0; uint64_t hash = 0; };
 
-    // The program hash (byte by byte, as the program cache and the disk
-    // cache name them) kept by where the microcode is and how long, behind
-    // a sum of its words taken eight bytes at a time: some five hundred
-    // program loads a frame, most of them the same microcode at the same
-    // place, and hashing each byte was a percent of the render job's
-    // thread. Only the scan uses this (under g_modelMutex).
-    uint64_t WordSum(const uint8_t* bytes, uint32_t dwords)
-    {
-        uint64_t sum = 0x9E3779B97F4A7C15ull ^ dwords;
-        uint32_t i = 0;
-        for (; i + 2 <= dwords; i += 2)
-        {
-            uint64_t w;
-            memcpy(&w, bytes + i * 4, 8);
-            sum = (sum ^ w) * 0xFF51AFD7ED558CCDull;
-            sum ^= sum >> 32;
-        }
-        if (i < dwords)
-        {
-            uint32_t w;
-            memcpy(&w, bytes + i * 4, 4);
-            sum = (sum ^ w) * 0xC4CEB9FE1A85EC53ull;
-            sum ^= sum >> 29;
-        }
-        return sum;
-    }
-    struct ProgramMemo { uint32_t physical = 0, dwords = 0; uint64_t sum = 0, hash = 0; };
-    ProgramMemo g_programMemo[4096];
-
     Program LoadedProgram(uint8_t* base, uint32_t physical, uint32_t dwords)
     {
         Program program{ physical, dwords, 0 };
-        if (dwords == 0 || dwords > 0x4000) return program;
-        const uint8_t* bytes = base + Guest::PhysicalAlias(physical);
-        const uint64_t sum = WordSum(bytes, dwords);
-        ProgramMemo& memo = g_programMemo[(physical >> 2) & 4095];
-        if (memo.physical == physical && memo.dwords == dwords && memo.sum == sum)
-        {
-            program.hash = memo.hash;
-            return program;
-        }
-        program.hash = RenderShaders::HashMicrocode(bytes, dwords);
-        memo.physical = physical;
-        memo.dwords = dwords;
-        memo.sum = sum;
-        memo.hash = program.hash;
+        if (dwords != 0 && dwords <= 0x4000) program.hash = RenderShaders::HashMicrocode(base + Guest::PhysicalAlias(physical), dwords);
         return program;
     }
 
@@ -240,7 +198,6 @@ namespace
         uint32_t scanned = 0;                // the last word read
         uint32_t segmentEnd = 0;             // the end of the segment it is in (device+44)
         uint32_t binMask = ~0u;              // SET_BIN_MASK_LO's last
-        uint32_t binMaskHigh = ~0u;          // SET_BIN_MASK_HI's
         uint32_t registers[ShadowWords];
         bool known[ShadowWords] = {};
         uint32_t unknown = ShadowWords;      // how many are not known yet
@@ -375,13 +332,13 @@ namespace
     // as far as its packets follow each other here unchanged. In pages of
     // 64 KB, made as the streams reach them: written by the scan before the
     // kick, read by the command processor after it.
-    enum : uint8_t { NoStart = 0, StateStart = 1, RunStart = 2, RangeStart = 3 };
-    struct StreamPage { uint32_t header[0x4000]; uint8_t start[0x4000]; uint64_t mask[0x4000]; };
-    std::atomic<StreamPage*> g_streamPages[0x20000000 >> 16];
+    enum : uint8_t { NoStart = 0, StateStart = 1, RunStart = 2 };
+    struct StreamPage { uint32_t header[0x4000]; uint8_t start[0x4000]; };
+    std::atomic<StreamPage*> g_streamPages[0x40000000 >> 16];   // with the extended window (kernel.h)
 
     StreamPage* PageOf(uint32_t physical, bool make)
     {
-        std::atomic<StreamPage*>& slot = g_streamPages[(physical & 0x1FFFFFFF) >> 16];
+        std::atomic<StreamPage*>& slot = g_streamPages[Guest::GpuOffset(physical) >> 16];
         StreamPage* page = slot.load(std::memory_order_acquire);
         if (page != nullptr || !make) return page;
         StreamPage* made = new StreamPage{};
@@ -396,34 +353,36 @@ namespace
         return type == 0 || type == 3 ? ((header >> 16) & 0x3FFF) + 2 : type == 1 ? 3 : 1;
     }
 
-    // A packet the command processor runs (its bin mask), or the head of a
-    // stretch it steps over (the mask word: the stretch's hash and length).
-    struct StreamItem { uint32_t physical; uint32_t header; bool run; uint64_t mask; };
+    struct StreamItem { uint32_t physical; uint32_t header; bool run; };
     struct RunTally { uint64_t native = 0, uncovered = 0, unrecorded = 0, items = 0, skipped = 0, tails = 0, drawTails = 0; };
     RunTally g_runs;   // the command processor's
     std::chrono::steady_clock::time_point g_runsReported = std::chrono::steady_clock::now();
 
-    // The packets read, in order, over what they cover. A packet the command
-    // processor runs gets its own note (its header and bin mask); a stretch
-    // of the rest, which it only steps over, one note at the stretch's first
-    // packet: its header, and in the mask word the stretch's length in words
-    // and a hash of its headers, which the command processor checks against
-    // the headers it finds there. A note per packet, and the words inside
-    // each marked as no start, were a good part of what a draw cost the
-    // render job; the command processor never looks inside a packet or a
-    // stretch.
-    inline uint32_t HeaderHash(uint32_t hash, uint32_t header) { return (hash ^ header) * 16777619u; }
-    void Note(uint32_t physical, uint32_t header, uint8_t start, uint64_t mask)
-    {
-        StreamPage* page = PageOf(physical, true);
-        const uint32_t word = (physical & 0xFFFF) >> 2;
-        page->header[word] = header;
-        page->mask[word] = mask;
-        page->start[word] = start;
-    }
+    // The packets read, in order, over what they cover.
     void Spanned(const std::vector<StreamItem>& items)
     {
-        for (const StreamItem& item : items) Note(item.physical, item.header, item.run ? RunStart : RangeStart, item.mask);
+        for (const StreamItem& item : items)
+        {
+            // The packet's first word marked, the rest of it as no start, a
+            // page's part at a time.
+            const uint32_t dwords = PacketDwords(item.header);
+            for (uint32_t i = 0; i < dwords;)
+            {
+                const uint32_t at = item.physical + i * 4;
+                StreamPage* page = PageOf(at, true);
+                const uint32_t word = (at & 0xFFFF) >> 2;
+                const uint32_t here = std::min(dwords - i, 0x4000u - word);
+                if (i == 0)
+                {
+                    page->header[word] = item.header;
+                    page->start[word] = item.run ? RunStart : StateStart;
+                    memset(page->start + word + 1, NoStart, here - 1);
+                }
+                else
+                    memset(page->start + word, NoStart, here);
+                i += here;
+            }
+        }
     }
 
     // Whether a packet still has to be run by the command processor when
@@ -442,8 +401,6 @@ namespace
         {
             const uint32_t first = header & 0x7FFF;
             const bool one = (header & 0x8000) != 0;
-            // The texture fetch cache flush (0x5000 .. 0x5002): the host has none.
-            if (first >= 0x5000 && first + (one ? 1 : count) <= 0x5003) return false;
             if (RunFrom(first) >= (one ? 1 : count)) return false;
             for (uint32_t i = 0; i < (one ? 1 : count); i++)
                 if (CopyIndex(first + i) >= ShadowWords) return true;
@@ -452,10 +409,6 @@ namespace
         if (type != 3) return true;
         const uint32_t opcode = (header >> 8) & 0x7F;
         if (opcode == OpLoadAluConstant || opcode == OpImLoad || opcode == OpImLoadImmediate) return false;
-        // The bin masks go with each packet that is predicated (Item::mask);
-        // a state invalidation and a filler do nothing here.
-        if (opcode == OpInvalidateState || opcode == OpNop) return false;
-        if ((opcode == OpSetBinMaskLow || opcode == OpSetBinMaskHigh) && !Gpu::KeepBinMaskPackets()) return false;
         if (opcode == OpSetConstant)
         {
             uint32_t index;
@@ -466,47 +419,6 @@ namespace
             return false;
         }
         return true;
-    }
-
-    // COD3_NATIVECENSUS=1: what the command processor still runs of a
-    // native list, every five seconds: the type 3 packets by opcode, the
-    // register writes by their first register. What is left here is what a
-    // stream without packets has to do some other way.
-    struct CensusTally { uint64_t opcodes[128] = {}; std::map<uint32_t, uint64_t> registers; uint64_t type1 = 0; };
-    CensusTally g_census;
-    std::chrono::steady_clock::time_point g_censusReported = std::chrono::steady_clock::now();
-    void Census(uint8_t*, uint32_t, uint32_t header)
-    {
-        static const bool on = getenv("COD3_NATIVECENSUS") != nullptr;
-        if (!on) return;
-        const uint32_t type = header >> 30;
-        if (type == 3) g_census.opcodes[(header >> 8) & 0x7F]++;
-        else if (type == 0) g_census.registers[header & 0x7FFF]++;
-        else if (type == 1) g_census.type1++;
-        const auto now = std::chrono::steady_clock::now();
-        if (now - g_censusReported < std::chrono::seconds(5)) return;
-        g_censusReported = now;
-        std::string text = "native census, five seconds:";
-        for (uint32_t op = 0; op < 128; op++)
-            if (g_census.opcodes[op] != 0)
-            {
-                char item[64];
-                snprintf(item, sizeof(item), " %02X x%llu", op, (unsigned long long)g_census.opcodes[op]);
-                text += item;
-            }
-        text += "; registers:";
-        for (const auto& [reg, n] : g_census.registers)
-        {
-            char item[64];
-            snprintf(item, sizeof(item), " %04X x%llu", reg, (unsigned long long)n);
-            text += item;
-        }
-        char tail[64];
-        snprintf(tail, sizeof(tail), "; type 1 x%llu", (unsigned long long)g_census.type1);
-        text += tail;
-        printf("%s\n", text.c_str());
-        fflush(stdout);
-        g_census = CensusTally{};
     }
 
     // What the check found, since the last report.
@@ -826,51 +738,6 @@ namespace
         return true;
     }
 
-    // COD3_SCANCENSUS=1: what the scan reads, every five seconds, by kind
-    // and by who wrote it: the draw call being recorded (its own packets,
-    // after `t_callBefore`) or something between two draws (the title's
-    // blocks, constants, the kick). In packets and words.
-    thread_local uint32_t t_callBefore = 0;
-    struct ScanTally { uint64_t packets[2][8] = {}, words[2][8] = {}; };
-    ScanTally g_scanTally;
-    std::chrono::steady_clock::time_point g_scanReported = std::chrono::steady_clock::now();
-    void ScanCensus(uint32_t at, uint32_t header, uint32_t length)
-    {
-        static const bool on = getenv("COD3_SCANCENSUS") != nullptr;
-        if (!on) return;
-        const uint32_t type = header >> 30, opcode = (header >> 8) & 0x7F;
-        uint32_t kind = 7;
-        if (type == 0)
-        {
-            const uint32_t reg = header & 0x7FFF;
-            kind = reg >= 0x4000 && reg < 0x4900 ? 1 : reg >= 0x4900 && reg < 0x4A00 ? 2 : reg >= 0x2000 && reg < 0x2400 ? 0 : 7;
-        }
-        else if (type == 3)
-            kind = opcode == OpSetConstant ? 3 : opcode == OpLoadAluConstant ? 4 : (opcode == OpImLoad || opcode == OpImLoadImmediate) ? 5
-                 : (opcode == OpDrawIndx || opcode == OpDrawIndx2) ? 6 : 7;
-        const uint32_t who = (t_callBefore != 0 && at > t_callBefore) ? 0 : 1;
-        std::lock_guard<std::mutex> lock(g_mutex);
-        g_scanTally.packets[who][kind]++;
-        g_scanTally.words[who][kind] += length;
-        const auto now = std::chrono::steady_clock::now();
-        if (now - g_scanReported < std::chrono::seconds(5)) return;
-        g_scanReported = now;
-        const char* names[8] = { "registers", "type0 constants", "bool/loop", "SET_CONSTANT", "LOAD_ALU", "program", "draw", "other" };
-        for (uint32_t w = 0; w < 2; w++)
-        {
-            std::string text = w == 0 ? "scan census, the draw calls' own:" : "scan census, between draws:";
-            for (uint32_t k = 0; k < 8; k++)
-            {
-                char item[96];
-                snprintf(item, sizeof(item), " %s %llu (%llu words)", names[k], (unsigned long long)g_scanTally.packets[w][k], (unsigned long long)g_scanTally.words[w][k]);
-                text += item;
-            }
-            printf("%s\n", text.c_str());
-        }
-        fflush(stdout);
-        g_scanTally = ScanTally{};
-    }
-
     // The device's packets after model.scanned up to `last` (the last word
     // to read), into the model; a record at each draw.
     void Scan(uint8_t* base, uint32_t device, DeviceModel& model, uint32_t last)
@@ -879,32 +746,10 @@ namespace
         const uint32_t first = at;
         static std::vector<StreamItem> items;   // under g_modelMutex
         items.clear();
-        StreamItem stretch{ 0, 0, false, 0 };      // the stretch being gathered, physical 0 for none
-        uint32_t stretchHash = 0, stretchDwords = 0;
         while (at <= last)
         {
             const uint32_t header = Guest::Read32(base, at);
-            if (ExecutingNow())
-            {
-                if (StillRun(base, at, header))
-                {
-                    if (stretch.physical != 0) { stretch.mask = (uint64_t(stretchHash) << 32) | stretchDwords; items.push_back(stretch); stretch.physical = 0; }
-                    items.push_back(StreamItem{ Physical(at), header, true, (uint64_t(model.binMaskHigh) << 32) | model.binMask });
-                    Census(base, at, header);
-                }
-                else
-                {
-                    if (stretch.physical == 0 || stretchDwords >= 0x100000)
-                    {
-                        if (stretch.physical != 0) { stretch.mask = (uint64_t(stretchHash) << 32) | stretchDwords; items.push_back(stretch); }
-                        stretch = StreamItem{ Physical(at), header, false, 0 };
-                        stretchHash = 2166136261u;
-                        stretchDwords = 0;
-                    }
-                    stretchHash = HeaderHash(stretchHash, header);
-                    stretchDwords += PacketDwords(header);
-                }
-            }
+            if (ExecutingNow()) items.push_back(StreamItem{ Physical(at), header, StillRun(base, at, header) });
             const uint32_t type = header >> 30;
             const uint32_t count = ((header >> 16) & 0x3FFF) + 1;
             uint32_t length = 1;
@@ -927,7 +772,6 @@ namespace
                 length = 1 + count;
                 auto word = [&](uint32_t i) { return Guest::Read32(base, at + 4 + i * 4); };
                 if (opcode == OpSetBinMaskLow) model.binMask = word(0);
-                else if (opcode == OpSetBinMaskHigh) model.binMaskHigh = word(0);
                 else if (opcode == OpSetConstant)
                 {
                     uint32_t index;
@@ -973,7 +817,6 @@ namespace
                 else if (opcode == OpDrawIndx || opcode == OpDrawIndx2)
                     Keep(base, device, at + count * 4, word(opcode == OpDrawIndx ? 1 : 0), passes, model);
             }
-            ScanCensus(at, header, length);
             at += length * 4;
         }
         if (at != last + 4)
@@ -981,11 +824,7 @@ namespace
             std::lock_guard<std::mutex> lock(g_mutex);
             g_tally.unparsed++;
         }
-        else if (ExecutingNow())
-        {
-            if (stretch.physical != 0) { stretch.mask = (uint64_t(stretchHash) << 32) | stretchDwords; items.push_back(stretch); }
-            Spanned(items);
-        }
+        else if (ExecutingNow()) Spanned(items);
         model.scanned = last;
     }
 
@@ -1016,7 +855,7 @@ bool NativeState::NativeRun(uint32_t physical, uint32_t dwords, std::vector<Item
 {
     if (!ExecutingNow() || dwords == 0) return false;
     items.clear();
-    const uint32_t first = physical & 0x1FFFFFFF;
+    const uint32_t first = Guest::GpuOffset(physical);
     const uint32_t last = first + (dwords - 1) * 4;
     bool done = false;
     [&]() {
@@ -1035,60 +874,15 @@ bool NativeState::NativeRun(uint32_t physical, uint32_t dwords, std::vector<Item
             const uint8_t start = page->start[word];
             const uint32_t header = page->header[word];
             if (start == NoStart || Guest::Read32(Guest::Base, Guest::PhysicalAlias(at)) != header) break;
-            if (start == RangeStart)
-            {
-                // A stretch the list steps over, as it was read: its headers
-                // hashed again from memory.
-                const uint32_t length = uint32_t(page->mask[word]), wanted = uint32_t(page->mask[word] >> 32);
-                const uint32_t end = at + length * 4;
-                if (length == 0 || end > last + 4) break;
-                uint32_t hash = 2166136261u, packets = 0, there = at;
-                while (there < end)
-                {
-                    const uint32_t h = Guest::Read32(Guest::Base, Guest::PhysicalAlias(there));
-                    hash = HeaderHash(hash, h);
-                    there += PacketDwords(h) * 4;
-                    packets++;
-                }
-                if (there != end || hash != wanted) break;
-                skipped += packets;
-                at = end;
-                continue;
-            }
             const uint32_t dwords = PacketDwords(header);
             if (at + dwords * 4 > last + 4) break;
             const uint32_t type = header >> 30, opcode = (header >> 8) & 0x7F;
             if (type == 3 && (opcode == OpDrawIndx || opcode == OpDrawIndx2)) draws.push_back(at + (dwords - 1) * 4);
-            if (start == RunStart) items.push_back(Item{ at, dwords, page->mask[word] });
+            if (start == RunStart) items.push_back(Item{ at, dwords });
             else skipped++;
             at += dwords * 4;
         }
-        if (at == first)
-        {
-            g_runs.uncovered++;
-            // COD3_NATIVEUNREAD=n: the first n buffers no device stream read,
-            // packet by packet, to see what they are.
-            static int shown = []() { const char* t = getenv("COD3_NATIVEUNREAD"); return t ? atoi(t) : 0; }();
-            if (shown > 0)
-            {
-                shown--;
-                std::string text;
-                for (uint32_t i = 0, tail = first; i < 24 && tail <= last; i++)
-                {
-                    const uint32_t header = Guest::Read32(Guest::Base, Guest::PhysicalAlias(tail));
-                    char item[48];
-                    const uint32_t type = header >> 30;
-                    if (type == 3) snprintf(item, sizeof(item), " op%02X/%u", (header >> 8) & 0x7F, ((header >> 16) & 0x3FFF) + 1);
-                    else if (type == 0) snprintf(item, sizeof(item), " r%04X/%u", header & 0x7FFF, ((header >> 16) & 0x3FFF) + 1);
-                    else snprintf(item, sizeof(item), " t%u", type);
-                    text += item;
-                    tail += PacketDwords(header) * 4;
-                }
-                printf("native unread: %08X, %u dwords:%s\n", first, dwords, text.c_str());
-                fflush(stdout);
-            }
-            return;
-        }
+        if (at == first) { g_runs.uncovered++; return; }
         {
             std::lock_guard<std::mutex> lock(g_mutex);
             for (const uint32_t key : draws)
@@ -1158,7 +952,7 @@ namespace
 bool NativeState::Begin(uint32_t lastWordPhysical)
 {
     if (!DrawingNow()) return false;
-    const uint32_t key = lastWordPhysical & 0x1FFFFFFF;
+    const uint32_t key = Guest::GpuOffset(lastWordPhysical);
     // What the image needs from the record, taken under the lock; the
     // chunks are read after it, and still there when the arena says so.
     static uint64_t chunks[Chunks];
@@ -1298,9 +1092,7 @@ void NativeState::Recorded(uint8_t* base, uint32_t device, uint32_t before, uint
         Restart(base, device, model, before);
         if (after < before || after - before > 0x10000) { model.scanned = after; return; }
     }
-    t_callBefore = before;
     Scan(base, device, model, after);
-    t_callBefore = 0;
 }
 
 void NativeState::Kicking(uint8_t* base, uint32_t device)
@@ -1325,7 +1117,7 @@ void NativeState::Check(uint32_t lastWordPhysical, uint32_t initiator, uint32_t 
 {
     (void)indexBase;
     if (!CheckingNow()) return;
-    const uint32_t key = lastWordPhysical & 0x1FFFFFFF;
+    const uint32_t key = Guest::GpuOffset(lastWordPhysical);
     const std::atomic<uint32_t>* file = Gpu::RegisterFile();
     std::lock_guard<std::mutex> lock(g_mutex);
     Tally& t = g_tally;

@@ -134,7 +134,9 @@ def main():
         print(__doc__)
         return 2
     name = sys.argv[1]
-    folder = ROOT / "CoD3RecompLib" / "levels" / name
+    # The multiplayer executable is a module of its own, recompiled into
+    # ppc_mp rather than a level folder (scripts/recompile_mp.py).
+    folder = ROOT / "CoD3RecompLib" / ("ppc_mp" if name == "CoD3MP" else "levels/" + name)
     kept_path = ROOT / "CoD3RecompLib" / "config" / f"{name}_functions.toml"
     functions = read_functions(folder)
     if not functions:

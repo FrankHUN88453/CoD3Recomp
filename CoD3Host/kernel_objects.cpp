@@ -11,6 +11,7 @@
 #include "kernel.h"
 #include "scheduler.h"
 #include "timeline.h"
+#include "debug_probe.h"
 #include <atomic>
 #include "gpu.h"
 
@@ -19,12 +20,14 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <thread>
 #include <string>
 #include <algorithm>
 #include <unordered_map>
 #include <vector>
 
 #include <Windows.h>
+#include <immintrin.h>
 
 namespace
 {
@@ -742,6 +745,19 @@ PPC_FUNC(__imp__NtWaitForSingleObjectEx)
     uint32_t pulsesAtStart = 0;
     if (Object* start = Find(handle)) pulsesAtStart = start->pulses;
 
+    // A wait that would block looks again for a little while first. The
+    // title's job system hands work to four worker threads through a
+    // semaphore and a lock, and its main thread then waits, polling, for
+    // them to finish; a worker that had gone to sleep took the host's wake
+    // (and a hardware thread back) before it started, every job, and the
+    // main thread's frame was spent polling for it. The console wakes one
+    // in a moment. COD3_SPINWAIT=microseconds (0: never), 60 by default.
+    // debug.txt's spin_wait over both, to compare while the game runs.
+    static const long spinDefault = []() { const char* t = getenv("COD3_SPINWAIT"); const long v = t ? strtol(t, nullptr, 10) : 60; return v >= 0 && v <= 5000 ? v : 60L; }();
+    const long spinGiven = DebugProbe::SpinWaitMicros();
+    const long spinMicros = spinGiven >= 0 && spinGiven <= 5000 ? spinGiven : spinDefault;
+    bool spun = spinMicros == 0;
+
     for (;;)
     {
         Object* object = Find(handle);
@@ -784,6 +800,26 @@ PPC_FUNC(__imp__NtWaitForSingleObjectEx)
         }
 
         if (!mayWait) { ctx.r3.u32 = X_STATUS_TIMEOUT; return; }
+
+        if (!spun && (object->type == ObjectType::Mutant || object->type == ObjectType::Semaphore || object->type == ObjectType::Event))
+        {
+            spun = true;
+            const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(spinMicros);
+            for (;;)
+            {
+                lock.unlock();
+                // Anything else on this hardware thread runs meanwhile.
+                Scheduler::Checkpoint();
+                for (int i = 0; i < 48; i++) _mm_pause();
+                lock.lock();
+                Object* again = Find(handle);
+                if (again == nullptr || SignalState(*again) > 0 || again->pulses != pulsesAtStart ||
+                    (again->type == ObjectType::Mutant && again->owner == GetCurrentThreadId())) break;
+                if (!infinite && std::chrono::steady_clock::now() >= deadline) break;
+                if (std::chrono::steady_clock::now() >= until) break;
+            }
+            continue;   // looked at again from the top, under the lock
+        }
 
         // Blocking after all: the hardware thread goes, then the state is
         // looked at again, since it may have changed meanwhile.
@@ -1292,4 +1328,141 @@ void Kernel::AbandonMutants(uint32_t osThreadId)
         std::lock_guard<std::mutex> lock(Kernel::DispatcherLock());
         Kernel::WakeDispatcher();
     }
+}
+
+// --- Timers ------------------------------------------------------------------
+//
+// Only the multiplayer executable makes timers (its network threads pace
+// themselves with them). A timer is an event the runtime signals itself
+// when it falls due: a notification timer (type 0) stays signalled until it
+// is set again, a synchronisation timer (type 1) releases one waiter. A
+// thread of the host's sleeps until the due time; setting or cancelling the
+// timer again makes any earlier one's wake-up a no-op, by its generation.
+
+namespace
+{
+    std::mutex g_timerMutex;
+    std::map<uint32_t, uint64_t> g_timerGeneration;   // handle -> generation
+
+    // The current system time in the console's units: 100 ns since 1601.
+    uint64_t SystemTime100ns()
+    {
+        FILETIME now;
+        GetSystemTimePreciseAsFileTime(&now);
+        return (uint64_t(now.dwHighDateTime) << 32) | uint64_t(now.dwLowDateTime);
+    }
+
+    void FireTimer(uint32_t handle, uint64_t generation, uint64_t firstDelay100ns, uint32_t periodMs)
+    {
+        std::thread([handle, generation, firstDelay100ns, periodMs] {
+            std::this_thread::sleep_for(std::chrono::nanoseconds(firstDelay100ns * 100));
+            for (;;)
+            {
+                {
+                    std::lock_guard<std::mutex> lock(g_timerMutex);
+                    const auto found = g_timerGeneration.find(handle);
+                    if (found == g_timerGeneration.end() || found->second != generation) return;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(Kernel::DispatcherLock());
+                    WakeHandle wake{ handle };
+                    Object* object = Find(handle);
+                    if (object == nullptr) return;
+                    SetSignalState(*object, 1);
+                }
+                if (periodMs == 0) return;
+                std::this_thread::sleep_for(std::chrono::milliseconds(periodMs));
+            }
+        }).detach();
+    }
+}
+
+// NTSTATUS NtCreateTimer(HANDLE* handle, OBJECT_ATTRIBUTES* attributes, TIMER_TYPE type)
+PPC_FUNC(__imp__NtCreateTimer)
+{
+    Kernel::CountImport("NtCreateTimer");
+    std::lock_guard<std::mutex> lock(Kernel::DispatcherLock());
+    struct Wake { ~Wake() { Kernel::WakeDispatcher(); } } wake;
+
+    Object object;
+    object.type = ObjectType::Event;
+    object.manualReset = (ctx.r5.u32 == 0);   // 0 notification, 1 synchronisation
+    object.signalled = 0;
+    GiveBody(object);
+    const uint32_t handle = CreateHandle(std::move(object), uint32_t(ctx.lr));
+    if (ctx.r3.u32 != 0) Guest::Write32(base, ctx.r3.u32, handle);
+    ctx.r3.u32 = X_STATUS_SUCCESS;
+}
+
+// NTSTATUS NtSetTimerEx(HANDLE handle, LARGE_INTEGER* dueTime, PTIMERAPCROUTINE routine,
+//                       KPROCESSOR_MODE mode, void* context, BOOLEAN resume, LONG period, BOOLEAN* previous)
+PPC_FUNC(__imp__NtSetTimerEx)
+{
+    Kernel::CountImport("NtSetTimerEx");
+    const uint32_t handle = ctx.r3.u32;
+    const int64_t due = ctx.r4.u32 != 0 ? int64_t(Guest::Read64(base, ctx.r4.u32)) : 0;
+    const uint32_t period = ctx.r9.u32;
+    if (ctx.r5.u32 != 0)
+    {
+        static std::atomic<int> shown{ 0 };
+        if (shown.fetch_add(1) < 4)
+        {
+            printf("object: timer 0x%08X has a completion routine 0x%08X, which this runtime does not call\n", handle, ctx.r5.u32);
+            fflush(stdout);
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(Kernel::DispatcherLock());
+        WakeHandle wake{ handle };
+        Object* object = Find(handle);
+        if (object == nullptr) { ctx.r3.u32 = X_STATUS_INVALID_HANDLE; return; }
+        if (ctx.r10.u32 != 0) Guest::Write8(base, ctx.r10.u32, uint8_t(SignalState(*object) != 0));
+        SetSignalState(*object, 0);
+    }
+    // Negative: relative, in 100 ns. Positive: an absolute system time.
+    uint64_t delay = 0;
+    if (due < 0) delay = uint64_t(-due);
+    else if (due > 0) { const uint64_t now = SystemTime100ns(); delay = uint64_t(due) > now ? uint64_t(due) - now : 0; }
+    uint64_t generation;
+    {
+        std::lock_guard<std::mutex> lock(g_timerMutex);
+        generation = ++g_timerGeneration[handle];
+    }
+    FireTimer(handle, generation, delay, period);
+    ctx.r3.u32 = X_STATUS_SUCCESS;
+}
+
+// NTSTATUS NtCancelTimer(HANDLE handle, BOOLEAN* currentState)
+PPC_FUNC(__imp__NtCancelTimer)
+{
+    Kernel::CountImport("NtCancelTimer");
+    {
+        std::lock_guard<std::mutex> lock(g_timerMutex);
+        ++g_timerGeneration[ctx.r3.u32];
+    }
+    std::lock_guard<std::mutex> lock(Kernel::DispatcherLock());
+    Object* object = Find(ctx.r3.u32);
+    if (object == nullptr) { ctx.r3.u32 = X_STATUS_INVALID_HANDLE; return; }
+    if (ctx.r4.u32 != 0) Guest::Write8(base, ctx.r4.u32, uint8_t(SignalState(*object) != 0));
+    ctx.r3.u32 = X_STATUS_SUCCESS;
+}
+
+// NTSTATUS NtDuplicateObject(HANDLE source, HANDLE* target, DWORD options)
+//
+// A second handle to the same object. The copy shares the object's body in
+// guest memory, which is where the signal state is read from, so a signal
+// through either is seen through both. A handle this table does not hold (a
+// file's, a thread's) is handed back as it is.
+PPC_FUNC(__imp__NtDuplicateObject)
+{
+    Kernel::CountImport("NtDuplicateObject");
+    std::lock_guard<std::mutex> lock(Kernel::DispatcherLock());
+    uint32_t duplicate = ctx.r3.u32;
+    if (Object* object = Find(ctx.r3.u32))
+    {
+        Object copy = *object;
+        duplicate = CreateHandle(std::move(copy), uint32_t(ctx.lr));
+    }
+    if (ctx.r4.u32 != 0) Guest::Write32(base, ctx.r4.u32, duplicate);
+    ctx.r3.u32 = X_STATUS_SUCCESS;
 }

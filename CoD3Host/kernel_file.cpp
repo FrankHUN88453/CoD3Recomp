@@ -20,6 +20,7 @@
 
 namespace { constexpr uint32_t X_STATUS_PENDING = 0x00000103; }
 #include <mutex>
+#include <set>
 #include <string>
 
 #include <Windows.h>
@@ -192,6 +193,54 @@ namespace
                 while (!rest.empty() && rest.front() == '/') rest.erase(0, 1);
                 if (rest.find("..") != std::string::npos) return {};
                 return rest.empty() ? mount.second : mount.second / fs::path(rest);
+            }
+        }
+
+        // A map pack's own drive, "dlc1:" and on: the title opens a pack's
+        // maps there (its number from dlmaps.txt), having read the list from
+        // the package it mounted under another name. Each is a package of
+        // downloaded content (type 2) in the saves' content folder: the
+        // number-th by name, or the first while there is only one.
+        if (lowered.compare(0, 3, "dlc") == 0 && lowered.size() > 4 && isdigit((unsigned char)lowered[3]))
+        {
+            size_t at = 3;
+            int number = 0;
+            while (at < lowered.size() && isdigit((unsigned char)lowered[at])) number = number * 10 + (lowered[at++] - '0');
+            if (at < lowered.size() && lowered[at] == ':')
+            {
+                std::vector<fs::path> packs;
+                std::error_code ec;
+                for (const auto& entry : fs::directory_iterator(g_savesRoot / "content" / "00000002", ec))
+                    if (entry.is_directory()) packs.push_back(entry.path());
+                std::sort(packs.begin(), packs.end());
+                // The pack whose dlmaps.txt names this number (its first
+                // column), else the number-th, else the first.
+                auto packNumber = [](const fs::path& pack) {
+                    FILE* list = _wfopen((pack / L"mp" / L"dlmaps.txt").c_str(), L"rb");
+                    if (!list) return -1;
+                    char line[512];
+                    int found = -1;
+                    while (found < 0 && fgets(line, sizeof(line), list))
+                    {
+                        const char* at = line;
+                        while (*at == ' ' || *at == '\t') at++;
+                        if (isdigit((unsigned char)*at)) found = atoi(at);
+                    }
+                    fclose(list);
+                    return found;
+                };
+                if (!packs.empty())
+                {
+                    const fs::path* chosen = nullptr;
+                    for (const fs::path& candidate : packs)
+                        if (packNumber(candidate) == number) { chosen = &candidate; break; }
+                    if (!chosen) chosen = (number >= 1 && size_t(number) <= packs.size()) ? &packs[number - 1] : &packs.front();
+                    const fs::path& pack = *chosen;
+                    std::string rest = guestPath.substr(at + 1);
+                    while (!rest.empty() && rest.front() == '/') rest.erase(0, 1);
+                    if (rest.find("..") != std::string::npos) return {};
+                    return rest.empty() ? pack : pack / fs::path(rest);
+                }
             }
         }
 
@@ -432,6 +481,44 @@ PPC_FUNC(__imp__NtCreateFile)
 
     LogOpen(guestPath, "opened");
     Kernel::Stats().filesOpened.fetch_add(1, std::memory_order_relaxed);
+
+    // A multiplayer map's own archive (D:\mp\<map>\<map>.cod): the map
+    // being loaded, for what is kept off some maps (mp_fixes.cpp).
+    {
+        std::string lower = guestPath;
+        for (char& c : lower) c = char(tolower(static_cast<unsigned char>(c)));
+        const size_t at = lower.find("\\mp\\");
+        if (at != std::string::npos)
+        {
+            const size_t start = at + 4, slash = lower.find('\\', start);
+            if (slash != std::string::npos && lower.compare(slash + 1, std::string::npos, lower.substr(start, slash - start) + ".cod") == 0)
+                Kernel::CurrentMap() = lower.substr(start, slash - start);
+        }
+    }
+
+    // Who opens an archive: the guest's call chain, once for each .cod (for
+    // finding how the title mounts its banks, to mount one of its own).
+    {
+        static std::set<std::string> traced;
+        std::string lower = guestPath;
+        for (char& c : lower) c = char(tolower(static_cast<unsigned char>(c)));
+        if (lower.size() > 4 && (lower.compare(lower.size() - 4, 4, ".cod") == 0 || lower.compare(lower.size() - 4, 4, ".wbk") == 0) && traced.insert(lower).second && traced.size() < 64)
+        {
+            printf("file: %s opened from %08X", guestPath.c_str(), uint32_t(ctx.lr));
+            uint32_t frame = ctx.r1.u32;
+            for (int depth = 0; depth < 16; depth++)
+            {
+                const uint32_t caller = Guest::Read32(base, frame);
+                if (caller <= frame || caller - frame > 0x100000 || (caller & 7) != 0 || caller >= 0xC0000000u) break;
+                const uint32_t address = Guest::Read32(base, caller - 8);
+                if (address < 0x82000000u || address >= 0x8A000000u) break;
+                printf(" %08X", address);
+                frame = caller;
+            }
+            printf("  (r3-r6 %08X %08X %08X %08X)\n", ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32);
+            fflush(stdout);
+        }
+    }
 
     if (handleOut != 0)
         Guest::Write32(base, handleOut, handle);

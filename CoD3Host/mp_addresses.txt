@@ -1,0 +1,81 @@
+# Single player address -> multiplayer address, for the host code built into
+# CoD3MP.exe (scripts/make_mp_host.py). The multiplayer executable,
+# codmp_xenonf.xex, is the same engine linked at other addresses: every
+# function and variable the host hooks or reads has a twin there.
+#
+# How these were found (tools/mpmap/): functions by their instructions with
+# the addresses masked out, a whole function matched once, or a window of it
+# between two functions that match whole; variables by reading what the
+# multiplayer twin of each function that names one names at the same
+# instruction (the votes are how many such places agreed).
+#
+# A line is "SP MP  # how". MP 00000000 means there is no such thing in
+# multiplayer: a comparison against it never holds.
+
+# --- image layout
+82C30000 82E20000  # the end of the image (0x82000000 + 0xC30000 / 0xE20000)
+82578000 825A1444  # the first import thunk: below it is the title's code
+
+# --- not in multiplayer
+823F0880 00000000  # the level teardown loop's call of the destructor: multiplayer has no such loop (title_fixes.cpp)
+82130098 00000000  # graphics interrupt callbacks the single player title arms, for a log line only
+821300C8 00000000
+
+# --- functions and variables
+822F30F0 822C1E10  # code: anchor
+822F2678 822C1398  # code: anchor
+822F3A28 822C2748  # code: anchor
+822F3620 822C2340  # code: anchor
+822F3EA0 822C2BC0  # code: anchor
+822F4338 822C3058  # code: anchor
+822F6858 822C5448  # code: anchor
+822EFFF0 822BED10  # code: anchor
+822FB4B0 822CA0A0  # code: anchor
+822F4A10 822C3730  # code: whole function
+822F1E68 822C0B88  # code: anchor
+822F8590 822C7180  # code: anchor
+82154930 8216C828  # code: whole function
+822F6DF8 822C59E8  # code: anchor
+82301888 822D0478  # code: anchor
+824A3040 824C0DC8  # code: anchor
+822F16A0 822C03C0  # code: anchor
+824534B0 82483898  # code: whole function
+824644D0 8247FA38  # code: anchor
+82302C80 822D1870  # code: anchor
+823F04B0 8240A0C0  # code: anchor
+820C84A4 820D8574  # code: whole function
+8234EBA0 8231E0E0  # code: whole function
+820C8478 820D8548  # code: anchor
+820CCF00 820DF428  # code: anchor
+822F2818 822C1538  # code: anchor
+821563A8 8216E2A0  # code: anchor
+82156B38 8216EA30  # code: anchor
+822F8D38 822C7928  # code: anchor
+82129778 82141538  # code: anchor
+829F1BB8 82B93444  # data: 4/4 votes via 829F1BB8+0
+829F1BBC 82B93448  # data: 4/4 votes via 829F1BB8+4
+829F1BC0 82B9344C  # data: 4/4 votes via 829F1BB8+8
+829BAB18 82B36B88  # data: 7/7 votes via 829BAB18+0
+82A2A24C 82BCBF28  # data: 1/1 votes via 82A2A24C+0
+82A2A254 82BCBF30  # data: 1/1 votes via 82A2A24C+8
+82A2A258 82BCBF34  # data: 1/1 votes via 82A2A24C+C
+82A4E790 82C281D0  # data: 6/7 votes via 82A4E790+0
+82A8DE00 82C6B0D8  # data: 15/15 votes via 82A8DDD8+28
+82A8E100 82C6B3D0  # data: 1/1 votes via 82A8DF14+1EC
+8291EB6C 82A9AC98  # data: 3/3 votes via 8291EB6C+0
+8291EB7C 82A9ACA8  # data: 4/4 votes via 8291EB7C+0
+8290E920 82A8B830  # data: 8/8 votes via 8290E920+0
+8290E928 82A8B838  # data: 6/6 votes via 8290E928+0
+8290E930 82A8B840  # data: 11/11 votes via 8290E930+0
+8290E934 82A8B844  # data: 11/11 votes via 8290E930+4
+8290E938 82A8B848  # data: 11/11 votes via 8290E930+8
+8290E98C 82A8B89C  # data: 5/5 votes via 8290E98C+0
+8290F900 82A8CC44  # data: 5/5 votes via 8290F900+0
+8290F934 82A8CC78  # data: 12/12 votes via 8290F934+0
+825C6F68 825CC478  # data: 6/6 votes via 825C6F68+0
+8246B138 824879F8  # code: PM_ClipVelocity, by its instructions
+8248FB70 824A8C14  # code: the return address of PM_StepSlideMove's step down clip, by the code around it
+8250FF48 8252B578  # code: CL_GamepadMove, the pad look, by its caller CL_CreateCmd (82510748 / 8252C7A8)
+82A57900 82C2ECF0  # data: the local clients' state, by the pad look's code
+82A2A1C8 82BCBE9C  # data: the local client playing, by the pad look's code
+82A90A6A 82C73024  # data: a byte per local client that stops the turn, by the pad look's code

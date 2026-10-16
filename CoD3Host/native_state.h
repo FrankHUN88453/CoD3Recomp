@@ -49,10 +49,7 @@ namespace NativeState
     // record. coveredDwords: how far that was; the rest (the end record the
     // kick writes after what was read) is run as it is, unless it draws.
     // False: the buffer is run whole.
-    // A packet the command processor still runs, and the bin mask the
-    // stream had set when it reached it (for a predicated one: the mask
-    // packets themselves are left out of the lists).
-    struct Item { uint32_t physical; uint32_t dwords; uint64_t mask; };
+    struct Item { uint32_t physical; uint32_t dwords; };
     bool NativeRun(uint32_t physical, uint32_t dwords, std::vector<Item>& items, uint32_t& coveredDwords);
 
     // A draw call on `device` has written its packets after `before` (the

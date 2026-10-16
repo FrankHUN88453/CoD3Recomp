@@ -9,6 +9,9 @@
 #include <deque>
 #include <filesystem>
 #include <mutex>
+#include <map>
+#include <algorithm>
+#include <vector>
 #include <string>
 #include <thread>
 
@@ -40,6 +43,8 @@ namespace
     Handle g_current[2] = { 0, 0 };
     uint64_t g_currentHash[2] = { 0, 0 };
 
+    std::mutex g_problemsMutex;
+    std::map<std::string, int> g_problems;
     std::atomic<uint64_t> g_loads{ 0 }, g_fromDisk{ 0 }, g_compiled{ 0 }, g_failed{ 0 }, g_capturedFailed{ 0 }, g_compileMilliseconds{ 0 };
     std::atomic<uint32_t> g_pending{ 0 };
 
@@ -250,7 +255,13 @@ namespace
             // (the title loads programs it does not draw with), and counted
             // for the report.
             program.problem = translation.problem;
-            if (program.captured) g_capturedFailed.fetch_add(1, std::memory_order_relaxed);
+            if (program.captured)
+            {
+                g_capturedFailed.fetch_add(1, std::memory_order_relaxed);
+                // Why, tallied: the report says the commonest once.
+                std::lock_guard<std::mutex> lock(g_problemsMutex);
+                g_problems[translation.problem]++;
+            }
             else printf("render: %s %016llx (%zu dwords) could not be translated: %s\n", what, (unsigned long long)program.hash, job.words->size(), translation.problem.c_str());
             g_failed.fetch_add(1, std::memory_order_relaxed);
             program.state.store(State::Failed, std::memory_order_release);
@@ -510,5 +521,11 @@ void RenderShaders::Report()
     static uint64_t said = 0;
     const uint64_t captured = g_capturedFailed.load(std::memory_order_relaxed);
     if (captured != said && g_pending.load(std::memory_order_relaxed) == 0 && (said = captured) != 0)
+    {
         printf("render: %llu of the captured programs could not be translated; a draw that wants one says so\n", (unsigned long long)captured);
+        std::lock_guard<std::mutex> lock(g_problemsMutex);
+        std::vector<std::pair<std::string, int>> kinds(g_problems.begin(), g_problems.end());
+        std::sort(kinds.begin(), kinds.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+        for (size_t i = 0; i < kinds.size() && i < 12; i++) printf("render:   %d: %s\n", kinds[i].second, kinds[i].first.c_str());
+    }
 }

@@ -221,7 +221,7 @@ PPC_FUNC(sub_822F3A28)
     if (!ObservingNow() && StreamPixelPrograms()) return;
     // The device's write pointer stands on the last word written: the
     // draw packet's last.
-    const uint32_t last = Guest::Read32(base, device + 40) & 0x1FFFFFFFu;
+    const uint32_t last = Guest::GpuOffset(Guest::Read32(base, device + 40));
     const uint32_t pixelObject = Guest::Read32(base, device + 12416);
     // The packet's last word as written, so a record left from an earlier
     // frame at the same address, for another draw, is not taken for this one.
@@ -239,7 +239,7 @@ bool D3dHooks::PixelProgram(uint32_t lastWordPhysical, uint32_t& physical, uint3
 {
     if (StreamPixelPrograms()) return false;
     std::lock_guard<std::mutex> lock(g_recordMutex);
-    auto it = g_records.find(lastWordPhysical & 0x1FFFFFFFu);
+    auto it = g_records.find(Guest::GpuOffset(lastWordPhysical));
     if (it == g_records.end() || it->second.pixelObject == 0 || it->second.pixelDwords == 0) return false;
     if (Guest::Read32(Guest::Base, Guest::PhysicalAlias(lastWordPhysical)) != it->second.lastWordValue) return false;
     physical = it->second.pixelPhysical;
@@ -253,7 +253,7 @@ void D3dHooks::CheckDraw(uint32_t lastWordPhysical, uint64_t vertexHash, uint64_
     bool found = false;
     {
         std::lock_guard<std::mutex> lock(g_recordMutex);
-        auto it = g_records.find(lastWordPhysical & 0x1FFFFFFFu);
+        auto it = g_records.find(Guest::GpuOffset(lastWordPhysical));
         if (it != g_records.end()) { record = it->second; found = true; }
     }
     std::lock_guard<std::mutex> lock(g_parityMutex);
