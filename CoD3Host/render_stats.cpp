@@ -29,6 +29,9 @@ namespace
     std::chrono::steady_clock::time_point g_secondStarted = std::chrono::steady_clock::now();
     std::chrono::steady_clock::time_point g_frameStarted = std::chrono::steady_clock::now();
     double g_secondFrameMilliseconds = 0;
+    // The longest swap to swap gap of the second: the hitches an average hides.
+    std::chrono::steady_clock::time_point g_lastFrameEnded{};
+    double g_secondWorstMilliseconds = 0;
     uint64_t g_frames = 0;
 
     std::mutex g_snapshotMutex;
@@ -111,13 +114,18 @@ namespace
         int shown = 0;
         for (const auto& [key, cost] : list)
         {
-            if (shown++ >= 30) break;
-            char name[32];
-            if (key == 1) snprintf(name, sizeof(name), "resolves");
+            if (shown++ >= 40) break;
+            char name[48];
+            const uint32_t tag = uint32_t(key >> 60);
+            const unsigned shapeW = unsigned((key >> 16) & 0xFFFF), shapeH = unsigned(key & 0xFFFF);
+            if (tag == 0xD) snprintf(name, sizeof(name), "idle before resolves");
+            else if (tag == 0xE) snprintf(name, sizeof(name), "resolve %s copy %ux%u", (key >> 32) & 1 ? "depth" : "colour", shapeW, shapeH);
+            else if (tag == 0xF) snprintf(name, sizeof(name), "resolve clear %s%s %ux%u", (key >> 33) & 1 ? "colour" : "", (key >> 34) & 1 ? "+depth" : "", shapeW, shapeH);
+            else if (key == 1) snprintf(name, sizeof(name), "resolves");
             else if (key == 2) snprintf(name, sizeof(name), "present and after");
             else if ((key & 0x0000FFFFFFFFFFFFull) == 3) snprintf(name, sizeof(name), "no ps, %u wide", unsigned(key >> 48));
             else snprintf(name, sizeof(name), "ps %012llx, %u wide", (unsigned long long)(key & 0x0000FFFFFFFFFFFFull), unsigned(key >> 48));
-            printf("  %-30s %6.3f ms (%4.1f%%), %6.1f draws a frame\n", name, cost.milliseconds / frames,
+            printf("  %-38s %6.3f ms (%4.1f%%), %6.1f draws a frame\n", name, cost.milliseconds / frames,
                 total > 0 ? 100.0 * cost.milliseconds / total : 0.0, double(cost.draws) / frames);
         }
         fflush(stdout);
@@ -259,6 +267,9 @@ void RenderStats::EndFrame()
     g_frames++;
     g_secondFrames++;
     g_secondFrameMilliseconds += std::chrono::duration<double, std::milli>(now - g_frameStarted).count();
+    if (g_lastFrameEnded.time_since_epoch().count() != 0)
+        g_secondWorstMilliseconds = std::max(g_secondWorstMilliseconds, std::chrono::duration<double, std::milli>(now - g_lastFrameEnded).count());
+    g_lastFrameEnded = now;
     g_second.draws += g_frame.draws; g_second.skipped += g_frame.skipped; g_second.triangles += g_frame.triangles; g_second.resolves += g_frame.resolves;
     g_second.shaderSwitches += g_frame.shaderSwitches; g_second.textureSwitches += g_frame.textureSwitches;
     g_second.pipelineSwitches += g_frame.pipelineSwitches; g_second.targetSwitches += g_frame.targetSwitches;
@@ -277,6 +288,7 @@ void RenderStats::EndFrame()
     const float frames = float(g_secondFrames);
     s.fps = float(g_secondFrames / elapsed);
     s.frameMilliseconds = float(g_secondFrameMilliseconds / frames);
+    s.worstMilliseconds = float(g_secondWorstMilliseconds);
     s.cpuMilliseconds = float((g_second.drawNanoseconds + g_second.resolveNanoseconds + g_second.presentNanoseconds) / 1e6 / frames);
     s.gpuMilliseconds = g_secondGpuFrames != 0 ? float(g_secondGpuMilliseconds / g_secondGpuFrames) : 0.0f;
     s.gpuProfiled = g_gpuProfile;
@@ -306,6 +318,7 @@ void RenderStats::EndFrame()
     g_second = Counters();
     g_secondFrames = 0;
     g_secondFrameMilliseconds = 0;
+    g_secondWorstMilliseconds = 0;
     g_secondGpuMilliseconds = 0;
     g_secondGpuFrames = 0;
     g_secondStarted = now;
@@ -340,9 +353,9 @@ void RenderStats::Tick()
 {
     if (!Wanted()) return;
     const Snapshot s = Current();
-    printf("stats: %.1f fps, frame %.2f ms, cpu %.2f ms%s%.2f ms, %.0f draws (%.0f skipped), %.0f k triangles, %.0f resolves, "
+    printf("stats: %.1f fps, frame %.2f ms (worst %.2f), cpu %.2f ms%s%.2f ms, %.0f draws (%.0f skipped), %.0f k triangles, %.0f resolves, "
            "switches: %.0f shader %.0f texture %.0f pipeline %.0f target; uploads %.0f tex %.0f buf (%.0f KB), streamed %.0f KB; programs %u compiled %u from disk\n",
-        s.fps, s.frameMilliseconds, s.cpuMilliseconds, s.gpuProfiled ? ", gpu " : ", gpu n/a ", s.gpuMilliseconds,
+        s.fps, s.frameMilliseconds, s.worstMilliseconds, s.cpuMilliseconds, s.gpuProfiled ? ", gpu " : ", gpu n/a ", s.gpuMilliseconds,
         s.draws, s.skipped, s.triangles / 1000.0f, s.resolves,
         s.shaderSwitches, s.textureSwitches, s.pipelineSwitches, s.targetSwitches,
         s.textureUploads, s.bufferUploads, s.uploadKilobytes, s.streamKilobytes,

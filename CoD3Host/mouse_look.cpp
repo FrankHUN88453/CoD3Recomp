@@ -22,6 +22,7 @@
 #include "kernel.h"
 #include "settings.h"
 
+#include <cmath>
 #include <cstring>
 
 namespace
@@ -75,7 +76,32 @@ PPC_FUNC(sub_8250FF48)
 #ifdef COD3_MP
     NativeOptionsTracePad(ctx,base);
 #endif
+    // The pad's up and down look. The title halves the stick's vertical
+    // deflection before anything else (CL_GamepadMove multiplies it by 0.5
+    // where the turn's is not), then treats both axes alike: the same
+    // speeds (m_pitch and m_yaw, equal), the same sensitivity. So up and
+    // down went at half the turn's speed. The angle the title added this
+    // frame is scaled by F11's "Vertical look speed" (200%: the turn's
+    // speed). Not where a limit on the turn applies (a mounted gun), which
+    // the title has already held the change to.
+    const uint32_t padIndex = Guest::Read32(base, LocalClientIndex);
+    const uint32_t padClient = ClientBase + (padIndex <= 3 ? padIndex : 0) * ClientSize;
+    const float pitchBefore = padIndex <= 3 ? ReadFloat(base, padClient + PitchOffset) : 0.0f;
+
     __imp__sub_8250FF48(ctx, base);
+
+    // The campaign's executable, where the halving was read; multiplayer's
+    // pad look is its own build and is left as it is.
+#ifndef COD3_MP
+    if (padIndex <= 3 && ReadFloat(base, padClient + PitchCapOffset) == 0.0f)
+    {
+        const float scale = float(Settings::Get().stickVerticalScale) / 100.0f;
+        const float after = ReadFloat(base, padClient + PitchOffset);
+        const float added = after - pitchBefore;
+        if (added != 0.0f && scale != 1.0f && std::fabs(added) < 90.0f)
+            WriteFloat(base, padClient + PitchOffset, pitchBefore + added * scale);
+    }
+#endif
 
     long dx = 0, dy = 0;
     const uint32_t index = Guest::Read32(base, LocalClientIndex);

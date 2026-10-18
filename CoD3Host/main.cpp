@@ -167,6 +167,20 @@ namespace
 
 int main(int argc, char** argv)
 {
+    // Per-monitor DPI aware, before any window or screen size is asked for.
+    // Without it, Windows display scaling above 100% hands this program a
+    // smaller, virtual desktop (2560x1440 for a 4K screen at 150%): the swap
+    // chain is made that size and Windows stretches it up afterwards, so the
+    // picture looks blurry and low resolution whatever resolution is chosen.
+    // Looked up at run time so an older Windows still starts.
+    if (HMODULE user32 = GetModuleHandleW(L"user32.dll"))
+    {
+        using SetContext = BOOL(WINAPI*)(HANDLE);
+        if (auto set = reinterpret_cast<SetContext>(GetProcAddress(user32, "SetProcessDpiAwarenessContext")))
+            set(reinterpret_cast<HANDLE>(-4));   // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+        else
+            SetProcessDPIAware();
+    }
     Log::Start();
     // Every exit goes through Kernel::Exit, which waits for a key when this
     // program owns the console. Started from Explorer that is the difference

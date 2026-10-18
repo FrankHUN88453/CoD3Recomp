@@ -45,6 +45,7 @@ namespace
 
     float g_scale = 1.0f;
     float g_requestedScale = 1.0f;
+    double g_effectsScale = 1.0, g_requestedEffectsScale = 1.0;   // the 560 pitch surfaces' scale over the frame's (PitchScale)
     uint32_t g_samples = 1;
     uint32_t g_requestedSamples = 1;
     uint32_t g_mipSkip = 0, g_requestedMipSkip = 0;   // the texture quality: top levels left out
@@ -226,15 +227,51 @@ namespace
         return all || pitch >= 640 ? g_samples : 1;
     }
 
+    // The surfaces of a 560 pitch are the title's half size ones: the
+    // smoke and the soft particles (520 by 312) with the half size depth
+    // they test against, and the shadow cascades (512 by 512). Drawn at
+    // half the frame's size, the smoke was put back over the frame from a
+    // picture of half its pixels, and whatever stood in front of it had a
+    // stepped rim of the smoke's coarser pixels. Here they are drawn twice
+    // as large again: the smoke at the frame's own resolution, the shadow
+    // cascades twice as sharp. COD3_HALFSIZE=1 keeps them at half size.
+    // F11's "Full resolution smoke and shadows"; COD3_HALFSIZE=1 forces half.
+    double PitchScale(uint32_t pitch)
+    {
+        static const bool halfSize = getenv("COD3_HALFSIZE") != nullptr;
+        return (!halfSize && pitch == 560) ? g_effectsScale : 1.0;
+    }
+
     void HostSize(uint32_t pitch, uint32_t rows, uint32_t& width, uint32_t& height)
     {
-        width = std::max(1u, uint32_t(std::lround(double(pitch) * g_scale)));
-        height = std::max(1u, uint32_t(std::lround(double(rows) * g_scale)));
+        const double scale = double(g_scale) * PitchScale(pitch);
+        width = std::max(1u, uint32_t(std::lround(double(pitch) * scale)));
+        height = std::max(1u, uint32_t(std::lround(double(rows) * scale)));
     }
 
     // --- resolved surfaces -----------------------------------------------------------------------
 
-    struct ResolvedEntry { Resolved surface; ComPtr<ID3D11Texture2D> texture; ComPtr<ID3D11ShaderResourceView> resource; ComPtr<ID3D11RenderTargetView> view; uint32_t physical = 0; };
+    // `crop`: the top left corner of the surface, for a fetch that samples
+    // less than the resolve wrote. The resolve rounds its rectangle up (the
+    // aim blur's quarter frame is resolved 264x160 and sampled 260x156), and
+    // the console's fetch reads its own width and height from the corner;
+    // the whole surface here would put the fetch's 0..1 across the padding
+    // as well, the blurred picture stretched off the sharp one and the
+    // padding's black along the edges. Copied again after each resolve.
+    struct ResolvedEntry
+    {
+        Resolved surface; ComPtr<ID3D11Texture2D> texture; ComPtr<ID3D11ShaderResourceView> resource; ComPtr<ID3D11RenderTargetView> view; uint32_t physical = 0;
+        ComPtr<ID3D11Texture2D> crop; ComPtr<ID3D11ShaderResourceView> cropView;
+        uint32_t cropGuestWidth = 0, cropGuestHeight = 0, cropWidth = 0, cropHeight = 0;
+        uint64_t cropSerial = 0;
+        void DropCrop()
+        {
+            if (crop) g_resourceBytes -= uint64_t(cropWidth) * cropHeight * 4;
+            crop.Reset(); cropView.Reset();
+            cropGuestWidth = cropGuestHeight = cropWidth = cropHeight = 0;
+            cropSerial = 0;
+        }
+    };
     std::deque<ResolvedEntry> g_resolved;
     RenderTable::KeyTable<1> g_resolvedKeys;
     uint64_t g_resolveSerial = 0;
@@ -850,6 +887,16 @@ bool RenderResources::BeginFrame(uint64_t frame)
         g_depthKeys.Clear();
         printf("render: the frame is drawn with %u sample%s a pixel\n", g_samples, g_samples == 1 ? "" : "s");
     }
+    if (g_requestedEffectsScale != g_effectsScale)
+    {
+        remade = true;
+        g_effectsScale = g_requestedEffectsScale;
+        g_colorTargets.clear();
+        g_depthTargets.clear();
+        g_colorKeys.Clear();
+        g_depthKeys.Clear();
+        printf("render: the half size surfaces are drawn at %.2f times their size\n", g_effectsScale);
+    }
     if (g_requestedScale != g_scale)
     {
         remade = true;
@@ -939,6 +986,7 @@ bool RenderResources::Forget(uint32_t address, uint32_t size)
         if (!entry.texture || !inside(entry.physical)) continue;
         if (entry.texture) g_resourceBytes -= uint64_t(entry.surface.width) * entry.surface.height * 4;
         entry.texture.Reset(); entry.resource.Reset(); entry.view.Reset();
+        entry.DropCrop();
         entry.surface.texture = nullptr; entry.surface.resource = nullptr; entry.surface.view = nullptr;
         entry.surface.width = entry.surface.height = 0;
         dropped = true;
@@ -946,12 +994,16 @@ bool RenderResources::Forget(uint32_t address, uint32_t size)
     return dropped;
 }
 
+void RenderResources::RequestEffectsScale(double scale) { g_requestedEffectsScale = scale < 1.0 ? 1.0 : scale > 2.0 ? 2.0 : scale; }
+
 void RenderResources::RequestScale(float scale)
 {
     g_requestedScale = scale < 0.25f ? 0.25f : scale > 8.0f ? 8.0f : scale;
 }
 
 float RenderResources::Scale() { return g_scale; }
+
+uint32_t RenderResources::TargetSamples(uint32_t pitch) { return SamplesFor(pitch); }
 
 void RenderResources::RequestMipSkip(uint32_t levels) { g_requestedMipSkip = levels > 4 ? 4 : levels; }
 
@@ -1126,6 +1178,7 @@ RenderResources::Resolved* RenderResources::ResolvedFor(uint32_t physical, uint3
     {
         if (entry.texture) g_resourceBytes -= uint64_t(out.width) * out.height * 4;
         entry.texture.Reset(); entry.resource.Reset(); entry.view.Reset();
+        entry.DropCrop();
         out.texture = nullptr; out.resource = nullptr; out.view = nullptr;
         D3D11_TEXTURE2D_DESC desc{};
         desc.Width = width;
@@ -1159,6 +1212,52 @@ const RenderResources::Resolved* RenderResources::ResolvedAt(uint32_t physical)
     if (handle == 0) return nullptr;
     const Resolved& out = g_resolved[handle - 1].surface;
     return out.resource != nullptr ? &out : nullptr;
+}
+
+ID3D11ShaderResourceView* RenderResources::ResolvedView(uint32_t physical, uint32_t guestWidth, uint32_t guestHeight)
+{
+    const uint32_t key[1] = { Guest::GpuOffset(physical) };
+    const Handle handle = g_resolvedKeys.Find(key);
+    if (handle == 0) return nullptr;
+    ResolvedEntry& entry = g_resolved[handle - 1];
+    const Resolved& surface = entry.surface;
+    if (surface.resource == nullptr) return nullptr;
+    // The whole surface, unless the fetch reads a smaller corner of it.
+    const bool corner = guestWidth <= surface.guestWidth && guestHeight <= surface.guestHeight &&
+                        (guestWidth != surface.guestWidth || guestHeight != surface.guestHeight) &&
+                        surface.guestWidth != 0 && surface.guestHeight != 0;
+    if (!corner) return surface.resource;
+
+    const uint32_t width = std::min(surface.width, std::max(1u, uint32_t(std::lround(double(guestWidth) * surface.width / surface.guestWidth))));
+    const uint32_t height = std::min(surface.height, std::max(1u, uint32_t(std::lround(double(guestHeight) * surface.height / surface.guestHeight))));
+    if (!entry.crop || entry.cropGuestWidth != guestWidth || entry.cropGuestHeight != guestHeight || entry.cropWidth != width || entry.cropHeight != height)
+    {
+        entry.DropCrop();
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width = width;
+        desc.Height = height;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = surface.format;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(g_device->CreateTexture2D(&desc, nullptr, &entry.crop))) { entry.crop.Reset(); return surface.resource; }
+        if (FAILED(g_device->CreateShaderResourceView(entry.crop.Get(), nullptr, &entry.cropView))) { entry.crop.Reset(); return surface.resource; }
+        entry.cropGuestWidth = guestWidth;
+        entry.cropGuestHeight = guestHeight;
+        entry.cropWidth = width;
+        entry.cropHeight = height;
+        g_resourceBytes += uint64_t(width) * height * 4;
+    }
+    // Once per resolve: the draws after it that sample the corner share it.
+    if (entry.cropSerial != surface.serial)
+    {
+        const D3D11_BOX box{ 0, 0, 0, width, height, 1 };
+        g_context->CopySubresourceRegion(entry.crop.Get(), 0, 0, 0, 0, surface.texture, 0, &box);
+        entry.cropSerial = surface.serial;
+    }
+    return entry.cropView.Get();
 }
 
 RenderState::Handle RenderResources::WhiteTexture() { return 1; }
@@ -1196,8 +1295,14 @@ RenderState::Handle RenderResources::TextureFor(const uint32_t fetch[6], uint32_
                 fflush(stdout);
             }
         }
-        width = surface->guestWidth;
-        height = surface->guestHeight;
+        // A fetch inside the resolve keeps its own size: ResolvedView gives
+        // it that corner, and its texel offsets and unnormalised
+        // coordinates go by its own width and height, as on the console.
+        if (width > surface->guestWidth || height > surface->guestHeight)
+        {
+            width = surface->guestWidth;
+            height = surface->guestHeight;
+        }
         resolved = true;
         // Handle 0 with `resolved` set: the caller binds the surface itself.
         return 0;

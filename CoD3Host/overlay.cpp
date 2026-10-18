@@ -320,6 +320,19 @@ namespace
                     ImGui::Checkbox("Console depth precision", &g_edit.consoleDepth);
                     ImGui::SameLine();
                     ImGui::TextDisabled("(no flickering surfaces; costs frame rate with MSAA; after a restart)");
+                    ImGui::Checkbox("Sharp shadows", &g_edit.sharpShadows);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(shadow edges filtered at the shadow map's real resolution; off: the console's blocky ones)");
+                    const char* effectSizes[] = { "Console (half)", "High (3/4)", "Full" };
+                    ImGui::Combo("Smoke and shadow resolution", &g_edit.effectsResolution, effectSizes, 3);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(higher: smoother edges in front of smoke, sharper shadow cascades; Full cost a third of the frame rate at 4K)");
+                    ImGui::Checkbox("Smooth foliage edges", &g_edit.foliageCoverage);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(grass, leaves and fences antialiased; needs an MSAA anti-aliasing mode)");
+                    ImGui::Checkbox("Fast shadow maps", &g_edit.fastShadowMaps);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(shadow maps drawn on the GPU's fast depth only path; turn off if shadows flicker)");
                     ImGui::Checkbox("Native command lists (experimental)", &g_edit.nativeCommands);
                     ImGui::SameLine();
                     ImGui::TextDisabled("(the draws' state straight from the game's own calls: faster; after a restart)");
@@ -370,6 +383,8 @@ namespace
                     ImGui::TextDisabled("(%s)", Input::ControllerStatus().c_str());
                     ImGui::Checkbox("Controller vibration", &g_edit.rumble);
                     ImGui::SliderInt("Stick deadzone", &g_edit.stickDeadzone, 0, 50, "%d%%");
+                    ImGui::SliderInt("Vertical look speed", &g_edit.stickVerticalScale, 50, 300, g_edit.stickVerticalScale == 200 ? "200%% (matches turning)" : g_edit.stickVerticalScale == 100 ? "100%% (the game's own)" : "%d%%");
+                    ImGui::TextDisabled("The game looks up and down at half the speed it turns; 200%% makes them match.");
                     ImGui::TextDisabled("Raise it if the view or the soldier drifts with the sticks untouched.");
                     ImGui::Separator();
                     ImGui::TextUnformatted("Keys");
@@ -850,7 +865,7 @@ void Overlay::Render(ID3D11RenderTargetView* back, ID3D11Texture2D* backTexture,
             {
                 // The renderer's own counters, averaged over the last second.
                 const RenderStats::Snapshot s = RenderStats::Current();
-                ImGui::Text("frame %.2f ms  cpu %.2f ms  gpu %s", s.frameMilliseconds, s.cpuMilliseconds,
+                ImGui::Text("frame %.2f ms (worst %.1f)  cpu %.2f ms  gpu %s", s.frameMilliseconds, s.worstMilliseconds, s.cpuMilliseconds,
                     s.gpuProfiled ? "" : "(COD3_GPU_PROFILE=1)");
                 if (s.gpuProfiled) { ImGui::SameLine(); ImGui::Text("%.2f ms", s.gpuMilliseconds); }
                 ImGui::Text("%.0f draws  %.0f k triangles  %.0f resolves  %.0f skipped", s.draws, s.triangles / 1000.0f, s.resolves, s.skipped);

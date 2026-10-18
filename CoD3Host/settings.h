@@ -48,6 +48,10 @@ namespace Settings
         bool dynamicLights = true;    // lights from muzzle flashes and explosions (r_dynamiclight)
         bool aimBlur = false;         // the title's depth of field while aiming down the sights: off, since at a PC's resolution its quarter size blur leaves a ghost outline round the weapon
         bool consoleDepth = true;     // depth cut to the console's 24 bit float precision (no flickering surfaces; costs with MSAA)
+        bool sharpShadows = true;     // the shadows' four tap filtering on the shadow map's own texels, point sampled (render_commands.cpp)
+        int effectsResolution = 0;    // the half size surfaces (smoke, soft particles, shadow cascades): 0 the console's half size, 1 three quarters (1.5x), 2 full size (2x) (render_resources.cpp)
+        bool foliageCoverage = true;  // with MSAA, alpha tested edges (foliage, fences) spread over the samples (xenos_hlsl.cpp)
+        bool fastShadowMaps = true;   // the shadow maps' casters drawn with no pixel program, the GPU's depth only path (render_commands.cpp)
         bool nativeCommands = false;  // the draws' state taken from the game's own D3D calls, the command stream run only for what the GPU still does (docs/native-d3d11-plan.md, N3; experimental, after a restart)
         bool watchWrites = false;     // still textures and vertex buffers known unchanged by their pages, not hashed every frame (write_watch.h; experimental, after a restart)
         int windowMode = 0;           // 0 windowed, 1 borderless full screen
@@ -105,6 +109,7 @@ namespace Settings
         int controllerVertical = 100;
         bool rumble = true;           // the title's vibration sent to the pad
         int stickDeadzone = 15;       // per cent of a stick's travel ignored around its centre, 0 .. 50
+        int stickVerticalScale = 200; // the pad's up and down look, per cent of the title's own (which halves it): 200 matches the turn, 50 .. 300 (mouse_look.cpp)
         float mouseSensitivity = 1.0f;   // both axes, 0.1 .. 3
         bool rawMouse = true;            // the mouse's own counts, not the pointer's travel
         bool directMouse = true;         // the mouse turns the view itself, not through the right stick (mouse_look.cpp)

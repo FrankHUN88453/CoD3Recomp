@@ -28,6 +28,8 @@ namespace XenosHlsl
         uint32_t slot = 0;        // the fetch constant, 0 to 31; the texture register too
         uint32_t sampler = 0;     // the sampler register, one per texture the program uses
         uint32_t dimension = 1;   // 0 one dimensional, 1 two, 2 three, 3 cube
+        uint32_t weights = 0;     // 1: the program takes bilinear weights of this slot (getWeights),
+                                  // the four tap filtering the title's shadows are made with
     };
 
     struct Translation

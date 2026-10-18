@@ -83,6 +83,7 @@ namespace RenderStats
     {
         float fps = 0;
         float frameMilliseconds = 0;       // between swaps
+        float worstMilliseconds = 0;       // the longest gap between swaps in the second
         float cpuMilliseconds = 0;         // on the command thread, drawing
         float gpuMilliseconds = 0;         // between the frame's timestamps, when profiled
         float draws = 0, triangles = 0, skipped = 0, resolves = 0;

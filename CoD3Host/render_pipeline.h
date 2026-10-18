@@ -48,6 +48,9 @@ namespace RenderPipeline
     Handle Rasterizer(uint32_t suScModeControl, bool scissor, bool cullNone, const float polyOffset[4], bool behind = false);
     // Sampler from the fetch constant's clamp, filter and anisotropy fields.
     Handle Sampler(const uint32_t fetch[6]);
+    // The same, but point sampled whatever the filtering setting says: for
+    // the shadow maps, whose four taps the title filters itself.
+    Handle SamplerPoint(const uint32_t fetch[6]);
 
     ID3D11BlendState* BlendObject(Handle handle);
 

@@ -168,6 +168,7 @@ namespace RenderState
         float textureSize[32][4];
         uint32_t textureAdjustment[32][4];
         float pixelGen[4];             // guest pixels per host pixel x and y, the register, on or off
+        uint32_t coverage[4];          // x: the target's samples when an alpha tested edge goes to coverage, else 0
     };
 
     // One draw, ready to run. Handles are indices into the caches; the

@@ -52,7 +52,12 @@ namespace RenderResources
     // A change takes effect at the next frame, when the targets are made
     // again at the new size: no frame is drawn half at each.
     void RequestScale(float scale);
+    // The 560 pitch surfaces (smoke, soft particles, shadow cascades) at half
+    // size, as the title has them, or at full size. Applied at the frame's edge.
+    void RequestEffectsScale(double scale);   // 1 the title's half size, 1.5, 2 the frame's size
     float Scale();
+    // The MSAA samples the targets of a pitch are made with.
+    uint32_t TargetSamples(uint32_t pitch);
 
     // Samples a pixel of the render targets: 1, 2, 4 or 8. A change takes
     // effect at the next frame like the scale; the count the device does
@@ -121,6 +126,9 @@ namespace RenderResources
     Resolved* ResolvedFor(uint32_t physical, uint32_t width, uint32_t height, DXGI_FORMAT format, bool depth);
     // The surface at the address, if a resolve made one.
     const Resolved* ResolvedAt(uint32_t physical);
+    // The view a fetch of that size binds: the whole surface, or a copy of
+    // its top left corner when the fetch reads less than the resolve wrote.
+    ID3D11ShaderResourceView* ResolvedView(uint32_t physical, uint32_t guestWidth, uint32_t guestHeight);
 
     // --- textures -----------------------------------------------------------------------------
 

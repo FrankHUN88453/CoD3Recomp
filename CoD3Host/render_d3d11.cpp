@@ -815,7 +815,9 @@ namespace
             if (g_bound.pixelShader != command.pixelShader || g_bound.flat != flat)
             {
                 ID3D11PixelShader* program = flat ? g_flatPixelShader.Get() : command.ps;
-                if (program == nullptr) program = g_depthOnlyPixelShader.Get();
+                // No pixel program: the depth cutting one, except for a shadow
+                // map's casters (render_commands.cpp's NoPixelProgramFast).
+                if (program == nullptr && command.pixelShader != 0xFFFFFFFEu) program = g_depthOnlyPixelShader.Get();
                 g_context->PSSetShader(program, nullptr, 0);
                 g_bound.pixelShader = command.pixelShader;
                 g_bound.flat = flat;
@@ -1049,9 +1051,21 @@ namespace
     // not wait; the title sees the depth that late, as glows fading in and
     // out a frame behind, which is not to be seen.
     // debug.txt depth_writeback 0 leaves it out, to compare.
+    //
+    // The title reads it at its own size (1040 by 624 for the frame, 512 by
+    // 512 for a shadow cascade), but the copy read back was the host's: at
+    // 4K the frame's depth alone is 31 MB across the bus to the CPU, and
+    // with the shadow maps over a hundred a frame, which measured 5 to 6 ms
+    // of the GPU's frame (the "resolve depth copy" lines of COD3_GPU_DRAWS,
+    // each the size of its copy over the bus's speed). So the copy is first
+    // brought down to the title's size on the GPU, a point sampled pass into
+    // a small target, and only that is read back: 2.6 MB for the frame.
+    // COD3_FULLDEPTHREADBACK=1 reads the host's whole copy as before.
     struct DepthWriteback
     {
         ComPtr<ID3D11Texture2D> staging;
+        ComPtr<ID3D11Texture2D> shrunk;             // the copy at the title's size (not "small": a Windows macro)
+        ComPtr<ID3D11RenderTargetView> shrunkView;
         D3D11_TEXTURE2D_DESC desc{};
         bool pending = false;
         uint64_t order = 0;
@@ -1137,6 +1151,10 @@ namespace
             if (!said) { said = true; printf("render: a depth copy of format %u is not written back to the title's memory\n", unsigned(desc.Format)); }
             return;
         }
+        static const bool fullReadback = getenv("COD3_FULLDEPTHREADBACK") != nullptr;
+        const uint32_t copiedWidth = std::max(1u, std::min<uint32_t>(command.width ? command.width : desc.Width, desc.Width));
+        const uint32_t copiedHeight = std::max(1u, std::min<uint32_t>(command.height ? command.height : desc.Height, desc.Height));
+        const bool shrink = !fullReadback && (command.guestWidth < copiedWidth || command.guestHeight < copiedHeight);
         PollDepthWritebacks();
         // The slot used longest ago; if the GPU still has it, this waits.
         DepthWriteback* slot = &g_depthWritebacks[0];
@@ -1146,20 +1164,44 @@ namespace
             else if (slot->pending && candidate.order < slot->order) slot = &candidate;
         }
         if (slot->pending) FinishDepthWriteback(*slot, true);
-        if (!slot->staging || slot->desc.Width != desc.Width || slot->desc.Height != desc.Height || slot->desc.Format != desc.Format)
+        // What is read back: the host's copy, or the title's size of it.
+        const uint32_t readWidth = shrink ? command.guestWidth : desc.Width;
+        const uint32_t readHeight = shrink ? command.guestHeight : desc.Height;
+        if (!slot->staging || slot->desc.Width != readWidth || slot->desc.Height != readHeight || slot->desc.Format != desc.Format)
         {
             slot->staging.Reset();
+            slot->shrunk.Reset();
+            slot->shrunkView.Reset();
             D3D11_TEXTURE2D_DESC s = desc;
+            s.Width = readWidth; s.Height = readHeight;
             s.MipLevels = 1; s.ArraySize = 1; s.SampleDesc.Count = 1; s.SampleDesc.Quality = 0;
             s.Usage = D3D11_USAGE_STAGING; s.BindFlags = 0; s.CPUAccessFlags = D3D11_CPU_ACCESS_READ; s.MiscFlags = 0;
             if (FAILED(g_device->CreateTexture2D(&s, nullptr, &slot->staging))) return;
             slot->desc = s;
         }
-        g_context->CopySubresourceRegion(slot->staging.Get(), 0, 0, 0, 0, texture.Get(), 0, nullptr);
+        if (shrink)
+        {
+            if (!slot->shrunk)
+            {
+                D3D11_TEXTURE2D_DESC t{};
+                t.Width = readWidth; t.Height = readHeight; t.MipLevels = 1; t.ArraySize = 1;
+                t.Format = DXGI_FORMAT_R32_FLOAT; t.SampleDesc.Count = 1;
+                t.Usage = D3D11_USAGE_DEFAULT; t.BindFlags = D3D11_BIND_RENDER_TARGET;
+                if (FAILED(g_device->CreateTexture2D(&t, nullptr, &slot->shrunk))) return;
+                if (FAILED(g_device->CreateRenderTargetView(slot->shrunk.Get(), nullptr, &slot->shrunkView))) { slot->shrunk.Reset(); return; }
+            }
+            // Each of the title's pixels from the host pixel at its centre,
+            // as the CPU's conversion took one host pixel for each before.
+            const D3D11_VIEWPORT viewport{ 0.0f, 0.0f, float(readWidth), float(readHeight), 0.0f, 1.0f };
+            DrawQuad(command.destinationResource, desc.Width, desc.Height, 0.0f, 0.0f, float(copiedWidth), float(copiedHeight),
+                     slot->shrunkView.Get(), viewport, g_copyPixelShader.Get(), g_pointSampler.Get());
+            g_context->CopySubresourceRegion(slot->staging.Get(), 0, 0, 0, 0, slot->shrunk.Get(), 0, nullptr);
+        }
+        else g_context->CopySubresourceRegion(slot->staging.Get(), 0, 0, 0, 0, texture.Get(), 0, nullptr);
         slot->pending = true;
         slot->order = ++g_depthWritebackOrder;
-        slot->hostWidth = std::max(1u, std::min<uint32_t>(command.width ? command.width : desc.Width, desc.Width));
-        slot->hostHeight = std::max(1u, std::min<uint32_t>(command.height ? command.height : desc.Height, desc.Height));
+        slot->hostWidth = shrink ? readWidth : copiedWidth;
+        slot->hostHeight = shrink ? readHeight : copiedHeight;
         slot->guestBase = command.guestBase;
         slot->guestPitch = command.guestPitch;
         slot->guestWidth = command.guestWidth;
@@ -1170,7 +1212,13 @@ namespace
 
     void ExecuteResolve(const RenderState::ResolveCommand& command)
     {
-        struct ResolveStamp { ~ResolveStamp() { RenderStats::DrawTimed(1); } } resolveStamp;
+        // COD3_GPU_DRAWS: a resolve timed in parts, so the report says which
+        // resolves the time goes to. A stamp first, with nothing issued since
+        // the last one: what it measures is the GPU idle before the resolve,
+        // not the resolve. Then the copy, by kind and host size, and then
+        // the clears. (Keys: the top four bits D, E and F, never a draw's.)
+        const bool timed = RenderStats::DrawsTimed();
+        if (timed) RenderStats::DrawTimed(0xDull << 60);
         if (command.bindingsLost) ForgetBindings();
         if (command.copy)
         {
@@ -1188,6 +1236,9 @@ namespace
                 DrawQuad(command.source, command.sourceWidth, command.sourceHeight, command.x0, command.y0, float(command.width), float(command.height),
                          command.destination, viewport, copy, g_pointSampler.Get());
             if (command.writeBack) WriteDepthBack(command);
+            if (timed)
+                RenderStats::DrawTimed((0xEull << 60) | (command.fromDepth ? (1ull << 32) : 0ull) |
+                                       (uint64_t(command.width & 0xFFFF) << 16) | uint64_t(command.height & 0xFFFF));
         }
         if (command.colorClear)
         {
@@ -1200,6 +1251,13 @@ namespace
         }
         if (command.depthClear)
             g_context->ClearDepthStencilView(command.clearDepth, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, command.clearDepthValue, command.clearStencilValue);
+        if (timed && (command.colorClear || command.depthClear))
+        {
+            const uint32_t width = command.colorClear ? uint32_t(command.clearRect[2] - command.clearRect[0]) : 0u;
+            const uint32_t height = command.colorClear ? uint32_t(command.clearRect[3] - command.clearRect[1]) : 0u;
+            RenderStats::DrawTimed((0xFull << 60) | (command.colorClear ? (1ull << 33) : 0ull) | (command.depthClear ? (1ull << 34) : 0ull) |
+                                   (uint64_t(width & 0xFFFF) << 16) | uint64_t(height & 0xFFFF));
+        }
     }
 
     // --- the present ------------------------------------------------------------------------------------
@@ -1344,6 +1402,7 @@ namespace
             static clock::time_point due = clock::now();
             const auto period = std::chrono::nanoseconds(1000000000ll / settings.frameCap);
             auto now = clock::now();
+            const auto waitStarted = now;
             if (now - due > period * 2) due = now;   // behind by more than a frame: start the clock again
             while (now < due)
             {
@@ -1352,6 +1411,10 @@ namespace
                 now = clock::now();
             }
             due += period;
+            // The wait is idle time, not work: left out of the "cpu" the
+            // stats report, which otherwise read 14 ms at a 60 cap however
+            // little the frame cost. (Timed adds the whole present after.)
+            RenderStats::Frame().presentNanoseconds -= uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(now - waitStarted).count());
         }
         const HRESULT hr = g_swapChain->Present(vsync ? 1 : 0, (!vsync && g_tearing) ? DXGI_PRESENT_ALLOW_TEARING : 0);
         if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET)
@@ -1408,6 +1471,9 @@ namespace
         // The blur while aiming: COD3_AIMBLUR=0|1 over the settings.
         static const int aimBlurOverride = []() { const char* t = getenv("COD3_AIMBLUR"); return t ? (t[0] == '0' ? 0 : 1) : -1; }();
         RenderCommands::SetAimBlur(aimBlurOverride >= 0 ? aimBlurOverride != 0 : settings.aimBlur);
+        RenderCommands::SetShellShockBlur(settings.shellShockBlur);
+        RenderCommands::SetRendering(settings.sharpShadows, settings.fastShadowMaps, settings.foliageCoverage);
+        RenderResources::RequestEffectsScale(settings.effectsResolution >= 2 ? 2.0 : settings.effectsResolution == 1 ? 1.5 : 1.0);
         // The texture quality: COD3_TEXQUALITY=0|1|2 over the settings.
         static const int qualityOverride = []() { const char* t = getenv("COD3_TEXQUALITY"); return t ? int(strtol(t, nullptr, 10)) : -1; }();
         const int quality = qualityOverride >= 0 ? qualityOverride : settings.textureQuality;

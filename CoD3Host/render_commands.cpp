@@ -51,6 +51,12 @@ namespace
     // sharp. The two before it still run, so the surface they make is
     // there for anything else that reads it.
     bool g_aimBlur = true;
+    // The shell shock pass (below): taken from the settings once a frame.
+    // It was a Settings::Get() on every draw, a lock and a copy of the
+    // whole settings block a thousand times a frame.
+    bool g_shellShockBlur = false;
+    // F11's shadow and foliage options, taken once a frame (SetRendering).
+    bool g_sharpShadows = true, g_fastShadowMaps = true, g_foliageCoverage = true;
     bool IsAimBlurProgram(uint64_t hash)
     {
         return hash == 0x56ccd878c09e55bbull;
@@ -224,6 +230,15 @@ namespace
         return state.modeControl == 5 && !runProgram;
     }
     constexpr RenderState::Handle NoPixelProgram = 0xFFFFFFFFu;
+    // A depth only draw with its colour mask closed: a shadow map's caster.
+    // It gets no pixel program at all, not even the one that cuts depth to
+    // the console's precision (which the shadow maps do not need: the cut
+    // keeps the frame's own passes agreeing with each other), so the GPU's
+    // depth only path draws it: a pixel program that writes depth turns
+    // off the fast depth only rate and part of the early depth test, and
+    // the shadow passes were most of the frame's GPU time in a battle.
+    // COD3_SHADOWDEPTHCUT=1 gives them the cutting program again.
+    constexpr RenderState::Handle NoPixelProgramFast = 0xFFFFFFFEu;
 
     bool Targets(const RenderState::Snapshot& state, const RenderShaders::Program* vs, const RenderShaders::Program* ps, DrawCommand& out, float& scaleY)
     {
@@ -347,10 +362,27 @@ namespace
                 binding.stage = uint8_t(stage);
                 binding.slot = uint8_t(fetch.slot);
                 binding.samplerSlot = uint8_t(fetch.sampler);
-                if (resolved) binding.view = RenderResources::ResolvedAt(words[1] & 0xFFFFF000u)->resource;
+                if (resolved) binding.view = RenderResources::ResolvedView(words[1] & 0xFFFFF000u, width, height);
                 else binding.view = RenderResources::TextureView(texture, fetch.dimension);
                 CheckView(binding.view, words, resolved, texture, fetch.slot, stage);
-                binding.sampler = RenderPipeline::SamplerObject(RenderPipeline::Sampler(words));
+                // A shadow map: a depth surface the program filters itself,
+                // four taps at a texel's corners blended by getWeights. Those
+                // go by the size given here, and with the title's size they
+                // filtered on the console's 512 texel grid however finely the
+                // map was drawn: shadows in blocks of the console's texels,
+                // and the texture filter setting blurring the depths besides.
+                // So the map's own size, and point sampling: four exact texels
+                // of the map as drawn. COD3_OLDSHADOWS=1 for the old way.
+                static const bool oldShadowsForced = getenv("COD3_OLDSHADOWS") != nullptr;
+                const bool oldShadows = oldShadowsForced || !g_sharpShadows;
+                const RenderResources::Resolved* shadow = (resolved && fetch.weights != 0 && !oldShadows) ? RenderResources::ResolvedAt(words[1] & 0xFFFFF000u) : nullptr;
+                if (shadow != nullptr && shadow->depth && shadow->guestWidth != 0 && shadow->guestHeight != 0)
+                {
+                    width = std::max(1u, uint32_t(std::lround(double(width) * shadow->width / shadow->guestWidth)));
+                    height = std::max(1u, uint32_t(std::lround(double(height) * shadow->height / shadow->guestHeight)));
+                    binding.sampler = RenderPipeline::SamplerObject(RenderPipeline::SamplerPoint(words));
+                }
+                else binding.sampler = RenderPipeline::SamplerObject(RenderPipeline::Sampler(words));
                 constants.textureSize[fetch.slot][0] = float(width);
                 constants.textureSize[fetch.slot][1] = float(height);
                 constants.textureSize[fetch.slot][2] = 1.0f / float(width);
@@ -971,7 +1003,13 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
     const RenderShaders::Program* vs;
     const RenderShaders::Program* ps;
     if (!Programs(out, vs, ps)) return false;
-    if (DepthOnlyMode(state)) { out.ps = nullptr; out.pixelShader = NoPixelProgram; }
+    if (DepthOnlyMode(state))
+    {
+        static const bool shadowCutForced = getenv("COD3_SHADOWDEPTHCUT") != nullptr;
+        const bool shadowCut = shadowCutForced || !g_fastShadowMaps;
+        out.ps = nullptr;
+        out.pixelShader = (!shadowCut && state.colorMask == 0) ? NoPixelProgramFast : NoPixelProgram;
+    }
     if (state.pitch == 0) { Skip(SkipPitch); return false; }
 
     RenderStats::Enter(RenderStats::SectionTargets);
@@ -1053,6 +1091,15 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
     constants.flags[1] = ((state.colorControl >> 3) & 1) ? (state.colorControl & 7) : 7;   // the alpha test, or always
     constants.flags[2] = state.alphaReference;
     constants.flags[3] = uint32_t(ps->hash);
+    // Alpha to coverage for an alpha tested draw into a multisampled target
+    // (xenos_hlsl.cpp's alpha test). COD3_NOCOVERAGE=1 leaves it out.
+    {
+        static const bool noCoverageForced = getenv("COD3_NOCOVERAGE") != nullptr;
+        const bool noCoverage = noCoverageForced || !g_foliageCoverage;
+        const uint32_t samples = RenderResources::TargetSamples(state.pitch);
+        constants.coverage[0] = (!noCoverage && samples > 1 && out.targetCount > 0 && constants.flags[1] != 7) ? samples : 0u;
+        constants.coverage[1] = constants.coverage[2] = constants.coverage[3] = 0;
+    }
     // The pixel's own position, which the console writes into a register
     // of the pixel program when the program control asks (bit 18), the
     // register named by the context's bits 8 to 15. The soft particles
@@ -1080,7 +1127,7 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
     // unless "Shell shock screen blur" is ticked in F11 (found from F12
     // captures of the shock: present at its first and eighth frame, gone by
     // its twentieth, and the frame black from that draw on).
-    if (!Settings::Get().shellShockBlur && ps != nullptr && ps->hash == 0x5fb07e1b8502496aull) return false;
+    if (!g_shellShockBlur && ps != nullptr && ps->hash == 0x5fb07e1b8502496aull) return false;
     // debug.txt's skip_vs and skip_ps, and dump_vs: what a vertex program's
     // draws are given, the vertices as the title wrote them.
     {
@@ -1254,6 +1301,13 @@ bool RenderCommands::PrepareResolve(ResolveCommand& out)
 }
 
 void RenderCommands::SetAimBlur(bool drawn) { g_aimBlur = drawn; }
+void RenderCommands::SetShellShockBlur(bool drawn) { g_shellShockBlur = drawn; }
+void RenderCommands::SetRendering(bool sharpShadows, bool fastShadowMaps, bool foliageCoverage)
+{
+    g_sharpShadows = sharpShadows;
+    g_fastShadowMaps = fastShadowMaps;
+    g_foliageCoverage = foliageCoverage;
+}
 
 void RenderCommands::ReportSkips()
 {

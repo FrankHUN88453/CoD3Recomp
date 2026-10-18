@@ -163,6 +163,11 @@ void Settings::Load(const std::filesystem::path& exeDirectory)
             // default, and a file saved then would keep the ghost outline.
             else if (key == "aim_depth_of_field") v.aimBlur = atoi(value.c_str()) != 0;
             else if (key == "console_depth") v.consoleDepth = atoi(value.c_str()) != 0;
+            else if (key == "sharp_shadows") v.sharpShadows = atoi(value.c_str()) != 0;
+            else if (key == "full_res_effects") v.effectsResolution = atoi(value.c_str()) != 0 ? 2 : 0;   // the older on/off key
+            else if (key == "effects_resolution") v.effectsResolution = atoi(value.c_str());
+            else if (key == "foliage_coverage") v.foliageCoverage = atoi(value.c_str()) != 0;
+            else if (key == "fast_shadow_maps") v.fastShadowMaps = atoi(value.c_str()) != 0;
             else if (key == "native_commands") v.nativeCommands = atoi(value.c_str()) != 0;
             else if (key == "watch_writes") v.watchWrites = atoi(value.c_str()) != 0;
             else if (key == "window_mode") v.windowMode = atoi(value.c_str());
@@ -234,6 +239,7 @@ void Settings::Load(const std::filesystem::path& exeDirectory)
             else if (key == "controller_vertical") v.controllerVertical = atoi(value.c_str());
             else if (key == "rumble") v.rumble = atoi(value.c_str()) != 0;
             else if (key == "stick_deadzone") v.stickDeadzone = atoi(value.c_str());
+            else if (key == "stick_vertical_scale") v.stickVerticalScale = atoi(value.c_str());
             else if (key == "mouse_sensitivity") v.mouseSensitivity = float(atof(value.c_str()));
             else if (key == "raw_mouse") v.rawMouse = atoi(value.c_str()) != 0;
             else if (key.compare(0, 4, "key_") == 0)
@@ -274,6 +280,8 @@ void Settings::Load(const std::filesystem::path& exeDirectory)
     if (v.controllerHorizontal < 10 || v.controllerHorizontal > 200) v.controllerHorizontal = 100;
     if (v.controllerVertical < 10 || v.controllerVertical > 200) v.controllerVertical = 100;
     if (v.stickDeadzone < 0 || v.stickDeadzone > 50) v.stickDeadzone = 15;
+    if (v.stickVerticalScale < 50 || v.stickVerticalScale > 300) v.stickVerticalScale = 200;
+    if (v.effectsResolution < 0 || v.effectsResolution > 2) v.effectsResolution = 0;
     if (!(v.mouseSensitivity >= 0.1f && v.mouseSensitivity <= 3.0f)) v.mouseSensitivity = 1.0f;
     std::lock_guard<std::mutex> lock(g_mutex);
     g_values = v;
@@ -293,7 +301,9 @@ void Settings::Save()
             v.renderer, resolution, v.resolutionScale, v.textureFilter, v.anisotropy, v.vsync ? 1 : 0, v.unlockFrameRate ? 1 : 0, v.frameCap, v.antialiasing, v.textureQuality, v.fov, v.modelDetail, v.aimBlur ? 1 : 0, v.consoleDepth ? 1 : 0, v.nativeCommands ? 1 : 0, v.watchWrites ? 1 : 0, v.windowMode, v.fpsOverlay ? 1 : 0, v.statsOverlay ? 1 : 0);
         fprintf(file, "fog = %d\ndraw_distance = %d\neffects = %d\ndynamic_lights = %d\n", v.fog ? 1 : 0, v.drawDistance, v.effects,
                 v.dynamicLights ? 1 : 0);
-        fprintf(file, "[game]\nplayer_name = %s\nlan_address = %s\nsystem_link_peers = %s\nmaster_volume = %d\naim_assist = %d\nbounces = %d\ncontroller = %d\nrumble = %d\nstick_deadzone = %d\nmouse_sensitivity = %.2f\nraw_mouse = %d\ndirect_mouse = %d\ntoggle_sprint = %d\nshell_shock_blur = %d\nmelee_lunge = %d\n", v.playerName, v.lanAddress, v.systemLinkPeers, v.masterVolume, v.aimAssist ? 1 : 0, v.bounces ? 1 : 0, v.controller ? 1 : 0, v.rumble ? 1 : 0, v.stickDeadzone, v.mouseSensitivity, v.rawMouse ? 1 : 0, v.directMouse ? 1 : 0, v.toggleSprint ? 1 : 0, v.shellShockBlur ? 1 : 0, v.meleeLunge ? 1 : 0);
+        fprintf(file, "sharp_shadows = %d\neffects_resolution = %d\nfoliage_coverage = %d\nfast_shadow_maps = %d\n", v.sharpShadows ? 1 : 0,
+                v.effectsResolution, v.foliageCoverage ? 1 : 0, v.fastShadowMaps ? 1 : 0);
+        fprintf(file, "[game]\nplayer_name = %s\nlan_address = %s\nsystem_link_peers = %s\nmaster_volume = %d\naim_assist = %d\nbounces = %d\ncontroller = %d\nrumble = %d\nstick_deadzone = %d\nmouse_sensitivity = %.2f\nstick_vertical_scale = %d\nraw_mouse = %d\ndirect_mouse = %d\ntoggle_sprint = %d\nshell_shock_blur = %d\nmelee_lunge = %d\n", v.playerName, v.lanAddress, v.systemLinkPeers, v.masterVolume, v.aimAssist ? 1 : 0, v.bounces ? 1 : 0, v.controller ? 1 : 0, v.rumble ? 1 : 0, v.stickDeadzone, v.mouseSensitivity, v.stickVerticalScale, v.rawMouse ? 1 : 0, v.directMouse ? 1 : 0, v.toggleSprint ? 1 : 0, v.shellShockBlur ? 1 : 0, v.meleeLunge ? 1 : 0);
         fprintf(file, "quick_landing = %d\nquick_sprint = %d\ncustom_primary = %d\n", v.quickLanding ? 1 : 0, v.quickSprint ? 1 : 0,
                 v.customPrimary);
         fprintf(file, "active_class = %d\ntwo_grenades = %d\nfaster_ads = %d\nfour_secondary = %d\n", v.activeClass, v.twoGrenades ? 1 : 0,
