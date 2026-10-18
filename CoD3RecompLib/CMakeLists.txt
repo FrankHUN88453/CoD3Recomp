@@ -8,7 +8,7 @@ project("CoD3RecompLib" CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-if (NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+if (NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     message(FATAL_ERROR
         "The recompiled code requires Clang. It relies on Clang-specific "
         "intrinsics, the alias attribute for function hooking, and Clang's "
@@ -19,8 +19,9 @@ endif()
 file(GLOB PPC_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/ppc/*.cpp")
 list(LENGTH PPC_SOURCES PPC_SOURCE_COUNT)
 if (PPC_SOURCE_COUNT EQUAL 0)
-    message(FATAL_ERROR
-        "No recompiled sources in ppc/. Run scripts/recompile.ps1 first.")
+    message(STATUS
+        "CoD3RecompLib: no recompiled sources in ppc/ yet (run scripts/recompile.sh to generate); skipping library target.")
+    return()
 endif()
 message(STATUS "CoD3RecompLib: ${PPC_SOURCE_COUNT} recompiled translation units")
 
@@ -44,14 +45,23 @@ target_compile_options(CoD3RecompLib PRIVATE
 # macros with ones that route the register aperture to the GPU instead. It has
 # to be a forced include because the macros are consumed by generated code that
 # must not be edited.
-target_compile_options(CoD3RecompLib PRIVATE -FIcod3_mmio.h)
+if (MSVC)
+    target_compile_options(CoD3RecompLib PRIVATE -FIcod3_mmio.h)
+else()
+    target_compile_options(CoD3RecompLib PRIVATE -include "${CMAKE_CURRENT_SOURCE_DIR}/include/cod3_mmio.h")
+endif()
 
 # The translated vector code leans on SSE4.1 (simde_mm_round_ps,
 # packus_epi32, min_epu16, blendv_ps, insert_ps). Without a baseline that
 # includes it, simde emulates each one in scalar C, which is both slow and
 # drags in libm symbols the MSVC runtime does not have, such as roundevenf.
 # x86-64-v2 is SSE4.2 and POPCNT: Intel since 2008, AMD since 2011.
-target_compile_options(CoD3RecompLib PUBLIC -march=x86-64-v2)
+# On Apple Silicon (arm64), SIMDe lowers directly to ARM64 NEON.
+if (CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64|ARM64")
+    target_compile_options(CoD3RecompLib PUBLIC -mcpu=apple-m1)
+else()
+    target_compile_options(CoD3RecompLib PUBLIC -march=x86-64-v2)
+endif()
 
 # Every guest instruction the recompiler could not translate becomes a
 # PPC_UNIMPLEMENTED_INSN. The default in ppc_context.h traps. A runtime can

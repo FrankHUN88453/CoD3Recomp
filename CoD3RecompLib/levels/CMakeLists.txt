@@ -29,12 +29,17 @@ function(cod3_level name)
     target_compile_options(CoD3Level_${name} PRIVATE
         -fno-strict-aliasing
         -Wno-unused-variable
-        -Wno-unused-but-set-variable
-        -FIcod3_mmio.h)
-    target_compile_options(CoD3Level_${name} PUBLIC -march=x86-64-v2)
-    # Line information, so a fault inside a level's code names the guest
-    # instruction: the level libraries are small enough for it to be cheap.
-    target_compile_options(CoD3Level_${name} PRIVATE -g -gcodeview)
+        -Wno-unused-but-set-variable)
+    if (MSVC)
+        target_compile_options(CoD3Level_${name} PRIVATE -FIcod3_mmio.h -g -gcodeview)
+    else()
+        target_compile_options(CoD3Level_${name} PRIVATE -include "${CMAKE_CURRENT_SOURCE_DIR}/../include/cod3_mmio.h" -g)
+    endif()
+    if (CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64|ARM64")
+        target_compile_options(CoD3Level_${name} PUBLIC -mcpu=apple-m1)
+    else()
+        target_compile_options(CoD3Level_${name} PUBLIC -march=x86-64-v2)
+    endif()
     set(COD3_LEVEL_LIBRARIES ${COD3_LEVEL_LIBRARIES} CoD3Level_${name} PARENT_SCOPE)
 endfunction()
 

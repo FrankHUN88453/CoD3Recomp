@@ -45,7 +45,7 @@ def patch_main() -> int:
         if at < 0:
             print("main: the stack switch in sub_824A6150 was not found", file=sys.stderr)
             return 1
-        key = TAB + "const uint32_t coroutineKey = PPC_LOAD_U32(ctx.r1.u32 + 436);\n"
+        key = TAB + "coroutineKey = PPC_LOAD_U32(ctx.r1.u32 + 436);\n"
         body = body[:at] + key + body[at:]
 
         # The engine's own registers, kept across the thread's run: a thread
@@ -53,8 +53,8 @@ def patch_main() -> int:
         # call that began it, into the code after that call with the
         # engine's registers as they were. Here that is a jump to the same
         # place with the same registers.
-        body = body[:at] + TAB + "const PPCContext engineRegisters = ctx;\n" + body[at:]
-        at += len(TAB + "const PPCContext engineRegisters = ctx;\n")
+        body = body[:at] + TAB + "engineRegisters = ctx;\n" + body[at:]
+        at += len(TAB + "engineRegisters = ctx;\n")
 
         # The first return after the switch is the branch into the thread.
         ret = body.find(TAB + "return;\n", at + len(key) + len(switch))
@@ -84,7 +84,10 @@ def patch_main() -> int:
         if at < 0:
             print("main: the prologue of sub_824A6150 was not found", file=sys.stderr)
             return 1
-        body = body[:at + len(prologue)] + TAB + "const uint32_t engineFrame = ctx.r1.u32;\n" + body[at + len(prologue):]
+        decls = (TAB + "const uint32_t engineFrame = ctx.r1.u32;\n"
+                 + TAB + "PPCContext engineRegisters;\n"
+                 + TAB + "uint32_t coroutineKey;\n")
+        body = body[:at + len(prologue)] + decls + body[at + len(prologue):]
 
         declaration = ("namespace Coroutines {\n"
                        "    void Resume(::PPCContext& ctx, uint8_t* base, uint32_t key);\n"

@@ -17,7 +17,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Every target has to agree on this, because the host links the recompiled
 # code together with XenonUtils, and XenonRecomp's own CMake selects the
 # static runtime.
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+if (MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
 
 add_subdirectory(CoD3RecompLib)
 
@@ -25,7 +27,9 @@ add_subdirectory(CoD3RecompLib)
 # and analyser targets come along with it but are not built by default.
 add_subdirectory(tools/XenonRecomp "${CMAKE_BINARY_DIR}/XenonRecomp" EXCLUDE_FROM_ALL)
 
-add_subdirectory(CoD3Host)
+if (TARGET CoD3RecompLib AND (WIN32 OR COD3_BUILD_HOST))
+    add_subdirectory(CoD3Host)
+endif()
 
 # Verification tooling. Not built by default: it is only needed when checking
 # the recompiler against Xenia's instruction tests.
