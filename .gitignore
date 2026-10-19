@@ -69,3 +69,7 @@ docs/build-logs/
 *.rar
 *.obj
 *.lib
+
+# FFmpeg 8.0's headers, which the build needs for the game's sound
+# (thirdparty/ffmpeg/include): supplied on each machine, not committed.
+thirdparty/ffmpeg/
