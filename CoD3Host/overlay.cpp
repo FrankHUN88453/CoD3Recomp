@@ -333,6 +333,15 @@ namespace
                     ImGui::Checkbox("Fast shadow maps", &g_edit.fastShadowMaps);
                     ImGui::SameLine();
                     ImGui::TextDisabled("(shadow maps drawn on the GPU's fast depth only path; turn off if shadows flicker)");
+                    ImGui::Checkbox("Films as video", &g_edit.filmVideoLevels);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(the cutscene films without the console's TV gamma curve: no crushed blacks)");
+                    ImGui::Checkbox("Save textures for texture packs", &g_edit.textureDump);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(each texture the game uses saved once to textures\\dump, up to 3000 a run)");
+                    ImGui::Checkbox("Use replacement textures", &g_edit.textureReplace);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(textures\\replace\\<name>.png or .dds in the game's place)");
                     ImGui::Checkbox("Native command lists (experimental)", &g_edit.nativeCommands);
                     ImGui::SameLine();
                     ImGui::TextDisabled("(the draws' state straight from the game's own calls: faster; after a restart)");

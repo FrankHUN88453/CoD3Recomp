@@ -1748,6 +1748,15 @@ uint32_t Gpu::InterruptContext()
 
 bool Kernel::FrameRateUnlocked() { return g_frameRateUnlocked.load(std::memory_order_relaxed); }
 
+bool Kernel::FilmPlaying()
+{
+#ifdef COD3_MP
+    return false;   // multiplayer has no films
+#else
+    return Guest::Read32(Guest::Base, 0x82A2A24Cu) != 0;   // the film player (TitlePlaying above)
+#endif
+}
+
 void Kernel::QueueConsoleCommand(const std::string& text)
 {
     if (text.empty() || text.size() > 4000) return;

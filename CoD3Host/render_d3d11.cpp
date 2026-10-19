@@ -140,6 +140,9 @@ namespace
     ComPtr<ID3D11Buffer> g_quadConstants;
     ComPtr<ID3D11Texture1D> g_gammaTexture;           // the display's colour table (Gpu::DisplayGamma)
     ComPtr<ID3D11ShaderResourceView> g_gammaView;
+    ComPtr<ID3D11Texture1D> g_identityGammaTexture;   // a table that changes nothing, for the films
+    ComPtr<ID3D11ShaderResourceView> g_identityGammaView;
+    std::atomic<bool> g_filmVideoLevels{ true };       // the setting, taken at each swap
     uint64_t g_gammaVersion = ~0ull;
 
     // The console's rectangle list, three corners with the fourth implied,
@@ -1482,8 +1485,36 @@ namespace
     // The display's colour table as a texture for the output programs: the
     // identity until the title writes one, then the title's, again each
     // time it changes. COD3_NOGAMMA=1 keeps the identity, to compare.
+    //
+    // While a film plays the identity is used, unless "Films as video" is
+    // off. The title's table is the console's ramp for a television: the
+    // picture taken as sRGB and re-encoded with BT.709's camera curve
+    // (32 of 255 out as 66 of 1023, the dark end at a third), which the
+    // game's own drawing was made to be seen through. The films are video
+    // already, encoded for the screen as they are; put through it again
+    // their dark scenes sank into black. A video player shows them as
+    // decoded, and so does this.
     ID3D11ShaderResourceView* GammaTable()
     {
+        if (g_filmVideoLevels.load(std::memory_order_relaxed) && Kernel::FilmPlaying())
+        {
+            if (!g_identityGammaTexture)
+            {
+                D3D11_TEXTURE1D_DESC desc{};
+                desc.Width = 256;
+                desc.MipLevels = 1;
+                desc.ArraySize = 1;
+                desc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
+                desc.Usage = D3D11_USAGE_IMMUTABLE;
+                desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                uint32_t identity[256];
+                for (uint32_t i = 0; i < 256; i++) { const uint32_t v = (i << 2) | (i >> 6); identity[i] = v | (v << 10) | (v << 20) | (3u << 30); }
+                const D3D11_SUBRESOURCE_DATA initial{ identity, 0, 0 };
+                if (SUCCEEDED(g_device->CreateTexture1D(&desc, &initial, &g_identityGammaTexture)))
+                    g_device->CreateShaderResourceView(g_identityGammaTexture.Get(), nullptr, &g_identityGammaView);
+            }
+            if (g_identityGammaView) return g_identityGammaView.Get();
+        }
         if (!g_gammaTexture)
         {
             D3D11_TEXTURE1D_DESC desc{};
@@ -1628,6 +1659,7 @@ namespace
     // What the settings ask of the renderer, applied at the frame's edge.
     void ApplySettings(const Settings::Values& settings)
     {
+        g_filmVideoLevels.store(settings.filmVideoLevels, std::memory_order_relaxed);
         // The optimizations' switches (tuning.h), for the next frame.
         Tuning::depthThread.store(settings.depthThread, std::memory_order_relaxed);
         Tuning::fastConstants.store(settings.fastConstants, std::memory_order_relaxed);

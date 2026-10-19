@@ -52,6 +52,7 @@ namespace Settings
         int effectsResolution = 0;    // the half size surfaces (smoke, soft particles, shadow cascades): 0 the console's half size, 1 three quarters (1.5x), 2 full size (2x) (render_resources.cpp)
         bool foliageCoverage = true;  // with MSAA, alpha tested edges (foliage, fences) spread over the samples (xenos_hlsl.cpp)
         bool fastShadowMaps = true;   // the shadow maps' casters drawn with no pixel program, the GPU's depth only path (render_commands.cpp)
+        bool filmVideoLevels = true;  // the films shown as a video player shows them, without the display's TV gamma ramp (render_d3d11.cpp)
         bool nativeCommands = false;  // the draws' state taken from the game's own D3D calls, the command stream run only for what the GPU still does (docs/native-d3d11-plan.md, N3; experimental, after a restart)
         bool watchWrites = false;     // still textures and vertex buffers known unchanged by their pages, not hashed every frame (write_watch.h; experimental, after a restart)
         // The optimizations, each of which can be turned off to find one
