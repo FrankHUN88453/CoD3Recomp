@@ -400,10 +400,17 @@ namespace
         }
     }
 
+    // The draw's buffers that want the part it reads looked at again
+    // (RenderResources::NeedsRangeLook), for LookRanges once its indices
+    // are known.
+    struct RangeLook { Handle buffer; uint32_t physical; uint32_t stride; };
+    std::vector<RangeLook> g_rangeLooks;
+
     // The vertex buffers the vertex program fetches. False when one could
     // not be had.
     bool Buffers(const RenderShaders::Program* vs, DrawCommand& out)
     {
+        g_rangeLooks.clear();
         for (const XenosHlsl::VertexFetch& fetch : vs->vertexFetches)
         {
             uint32_t word0, word1;
@@ -422,8 +429,74 @@ namespace
             DrawCommand::Buffer& binding = out.buffers[out.bufferCount++];
             binding.slot = uint8_t(fetch.slot);
             binding.view = view;
+            if (RenderResources::NeedsRangeLook(buffer)) g_rangeLooks.push_back(RangeLook{ buffer, word0 & ~3u, fetch.stride });
         }
         return true;
+    }
+
+    // With "Watch memory writes" off: the vertices this draw reads, of a
+    // big buffer the frame's first draw looked at and the title has been
+    // changing, compared again and sent where they differ. The title
+    // writes its dynamic geometry (marks, effects) into one big pool a
+    // piece at a time through the frame, each piece just before the draw
+    // that uses it; looked at only by the frame's first draw, a later draw
+    // got what its piece held before, and its vertices were flung across
+    // the screen as lines. That took the command thread running alongside
+    // the title's writes, rather than a frame behind them, to show. Which
+    // vertices: the indices' lowest and highest, with the index offset.
+    void LookRanges(const RenderState::Snapshot& state, const DrawCommand& out)
+    {
+        const uint32_t count = state.indexCount;
+        if (count == 0) return;
+        uint32_t lowest = 0xFFFFFFFFu, highest = 0;
+        if (state.sourceSelect == 0)
+        {
+            const bool strips = out.topology == D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP || out.topology == D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP;
+            const bool resetEnabled = strips && (state.suScModeControl & (1u << 21)) != 0;
+            const uint8_t* data = Guest::Base + Guest::PhysicalAlias(state.indexBase);
+            if (state.wideIndices)
+            {
+                const uint32_t reset = resetEnabled ? state.resetIndex & 0xFFFFFFu : 0xFFFFFFFFu;
+                const uint32_t* from = reinterpret_cast<const uint32_t*>(data);
+                for (uint32_t i = 0; i < count; i++)
+                {
+                    const uint32_t index = _byteswap_ulong(from[i]);
+                    if (resetEnabled && (index & 0xFFFFFFu) == reset) continue;
+                    lowest = std::min(lowest, index); highest = std::max(highest, index);
+                }
+            }
+            else
+            {
+                const uint32_t reset = resetEnabled ? state.resetIndex & 0xFFFFu : 0xFFFFFFFFu;
+                const uint16_t* from = reinterpret_cast<const uint16_t*>(data);
+                for (uint32_t i = 0; i < count; i++)
+                {
+                    const uint32_t index = BSwap16(from[i]);
+                    if (index == reset) continue;
+                    lowest = std::min(lowest, index); highest = std::max(highest, index);
+                }
+            }
+        }
+        else { lowest = 0; highest = count - 1; }
+        if (lowest > highest) return;
+        const int64_t offset = state.indexOffset;
+        for (const RangeLook& look : g_rangeLooks)
+        {
+            if (look.stride == 0) continue;
+            const int64_t strideBytes = int64_t(look.stride) * 4;
+            auto send = [&](int64_t first, int64_t last)
+            {
+                if (last < 0) return;
+                first = std::max<int64_t>(first, 0);
+                const int64_t from = std::min<int64_t>(first * strideBytes, 0xFFFFFFFFll);
+                const int64_t to = std::min<int64_t>((last + 1) * strideBytes, 0xFFFFFFFFll);
+                RenderResources::LookRange(look.buffer, look.physical, uint32_t(from), uint32_t(to));
+            };
+            // With the offset, as the program sees the vertex; and without,
+            // should the host's vertex id not carry it.
+            send(int64_t(lowest) + offset, int64_t(highest) + offset);
+            if (offset != 0) send(lowest, highest);
+        }
     }
 
     // The float files, packed to what the programs read, and the draw's own
@@ -1166,6 +1239,12 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
     RenderStats::Enter(RenderStats::SectionIndices);
     if (!Indices(state, convertQuads, convertFan, out)) return false;
     out.baseVertex = state.indexOffset;
+    if (!g_rangeLooks.empty())
+    {
+        RenderStats::Enter(RenderStats::SectionBuffers);
+        LookRanges(state, out);
+        RenderStats::Enter(RenderStats::SectionIndices);
+    }
     IndexCheck(state, vs, out);
     switch (out.topology)
     {

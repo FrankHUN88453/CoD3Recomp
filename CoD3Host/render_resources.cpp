@@ -600,8 +600,11 @@ namespace
         uint8_t falseWrites = 0;        // looks its pages said written that found it the same: past a few, not watched
         bool live = false;
         std::vector<uint8_t> shadow;    // a big buffer: what went up, to send only what changed
+        uint64_t changedFrame = 0;      // the frame a look last found it changed
+        uint64_t lookedCall = 0;        // the VertexBufferFor call that last looked at it
     };
     std::deque<BufferEntry> g_buffers;
+    uint64_t g_vertexCalls = 0;         // VertexBufferFor's calls, counted
 
     // A vertex buffer this big is compared with a copy of what went up, a
     // piece at a time, and only the pieces that changed go up. The title
@@ -1835,6 +1838,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
     const uint8_t* data = Guest::Base + Guest::PhysicalAlias(physical);
     bytes = (bytes + 3) & ~3u;
     uint32_t wanted = bytes;
+    const uint64_t call = ++g_vertexCalls;
 
     if (handle != 0)
     {
@@ -1880,7 +1884,18 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
                 const uint32_t span = std::min(entry.seen, entry.bytes);
                 if (WriteWatch::Clean(physical, span, since)) return handle;
                 const uint64_t now = WriteWatch::Sequence();
-                uint64_t sent = 0;
+                // Which pieces were written is found first, then the pages
+                // are watched again, and only then are the pieces read and
+                // sent. They were read first and watched after: a page
+                // already written once is no longer protected, so the title
+                // carrying on writing it (the next mark, the next effect,
+                // into the same page) between the read and the watch went
+                // unseen, and a later draw took the piece as it was half
+                // written: its vertices flung across the screen as lines.
+                // It took the command thread running alongside the title's
+                // writes, rather than a frame behind them, to show.
+                static thread_local std::vector<std::pair<uint32_t, uint32_t>> runs;
+                runs.clear();
                 uint32_t runStart = 0xFFFFFFFFu;
                 for (uint32_t at = 0; at < span; at += BufferPieceBytes)
                 {
@@ -1890,17 +1905,21 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
                     const bool last = at + length >= span;
                     if (runStart != 0xFFFFFFFFu && (!written || last))
                     {
-                        const uint32_t end = written ? at + length : at;
-                        D3D11_BOX box{ runStart, 0, 0, end, 1, 1 };
-                        g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data + runStart, 0, 0);
-                        if (entry.shadow.size() >= end) memcpy(entry.shadow.data() + runStart, data + runStart, end - runStart);
-                        sent += end - runStart;
+                        runs.emplace_back(runStart, written ? at + length : at);
                         runStart = 0xFFFFFFFFu;
                     }
                 }
                 entry.watchedSince = 0;
                 entry.stable = 0;
                 entry.liveSince = WriteWatch::Arm(physical, span) ? now : 0;
+                uint64_t sent = 0;
+                for (const auto& [first, end] : runs)
+                {
+                    D3D11_BOX box{ first, 0, 0, end, 1, 1 };
+                    g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data + first, 0, 0);
+                    if (entry.shadow.size() >= end) memcpy(entry.shadow.data() + first, data + first, end - first);
+                    sent += end - first;
+                }
                 if (entry.dense) entry.fingerprint = 0;   // the next frame's look sends it whole if it is not the same
                 static int told = 0;
                 if (told++ < 8)
@@ -1959,6 +1978,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
         entry.usedFrame = g_frame;
         if (!look) return handle;
         entry.checkedFrame = g_frame;
+        entry.lookedCall = call;
         wanted = std::max(bytes, entry.seen);
         // Its pages watched from its last look and none written since: the
         // same as it was sent, without a byte of it hashed. Most of what
@@ -2039,6 +2059,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
             if (sent != 0)
             {
                 entry.stable = 0;
+                entry.changedFrame = g_frame;
                 g_bufferUploads.fetch_add(1, std::memory_order_relaxed);
                 g_bufferBytes.fetch_add(sent, std::memory_order_relaxed);
                 RenderStats::Frame().bufferUploads++;
@@ -2100,6 +2121,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
             return handle;
         }
         entry.stable = 0;
+        entry.changedFrame = g_frame;
         entry.fingerprint = entry.dense ? fingerprint : Fingerprint(data, wanted, true);
         entry.dense = true;
         entry.seen = wanted;
@@ -2138,6 +2160,8 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
     entry.fingerprint = Fingerprint(data, wanted, entry.dense);
     if (wanted <= AlwaysDenseBytes) entry.sampled = Fingerprint(data, wanted, false);
     entry.checkedFrame = entry.usedFrame = g_frame;
+    entry.changedFrame = g_frame;
+    entry.lookedCall = call;
     entry.seen = wanted;
     // A little room to grow: the title's dynamic buffers are asked for at
     // whatever size the frame needs, and a buffer made again every time
@@ -2166,6 +2190,76 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
     RenderStats::Frame().bufferUploads++;
     RenderStats::Frame().uploadBytes += wanted;
     return handle;
+}
+
+bool RenderResources::NeedsRangeLook(Handle handle)
+{
+    // COD3_NORANGELOOKS=1: once a frame, as before.
+    static const bool off = getenv("COD3_NORANGELOOKS") != nullptr;
+    if (off || handle == 0 || handle > g_buffers.size()) return false;
+    const BufferEntry& entry = g_buffers[handle - 1];
+    // Watched (the pages say what was written within the frame): left to
+    // the watch, unless its pages could not be watched.
+    if (WriteWatch::Enabled() && (entry.liveSince != 0 || entry.watchedSince != 0)) return false;
+    // Changing in the last few seconds: the title's pools of dynamic
+    // geometry change most frames; the level's own models stop changing
+    // once they are loaded, and are not looked at again.
+    return entry.live && entry.buffer && entry.seen > AlwaysDenseBytes && entry.checkedFrame == g_frame
+        && entry.lookedCall != g_vertexCalls && entry.changedFrame != 0 && g_frame - entry.changedFrame <= 600;
+}
+
+void RenderResources::LookRange(Handle handle, uint32_t physical, uint32_t firstByte, uint32_t endByte)
+{
+    if (handle == 0 || handle > g_buffers.size()) return;
+    BufferEntry& entry = g_buffers[handle - 1];
+    endByte = std::min(endByte, std::min(entry.seen, entry.bytes));
+    if (!entry.buffer || firstByte >= endByte) return;
+    const uint8_t* data = Guest::Base + Guest::PhysicalAlias(physical);
+    uint64_t sent = 0;
+    if (entry.shadow.size() >= endByte)
+    {
+        // A page at a time against what went up: only what differs goes.
+        constexpr uint32_t Piece = 4096;
+        uint8_t* shadow = entry.shadow.data();
+        uint32_t runStart = 0xFFFFFFFFu;
+        for (uint32_t at = firstByte & ~(Piece - 1); at < endByte; at += Piece)
+        {
+            const uint32_t length = std::min(Piece, endByte - at);
+            const bool changed = memcmp(data + at, shadow + at, length) != 0;
+            if (changed)
+            {
+                if (runStart == 0xFFFFFFFFu) runStart = at;
+                memcpy(shadow + at, data + at, length);
+            }
+            const bool last = at + length >= endByte;
+            if (runStart != 0xFFFFFFFFu && (!changed || last))
+            {
+                const uint32_t end = changed ? at + length : at;
+                D3D11_BOX box{ runStart, 0, 0, end, 1, 1 };
+                g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data + runStart, 0, 0);
+                sent += end - runStart;
+                runStart = 0xFFFFFFFFu;
+            }
+        }
+    }
+    else
+    {
+        // No copy kept (under a megabyte): the part is sent as it is, and
+        // the next frame's look, finding the memory changed, sends it whole.
+        D3D11_BOX box{ firstByte, 0, 0, endByte, 1, 1 };
+        g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data + firstByte, 0, 0);
+        sent = endByte - firstByte;
+        // Not a change found, so not counted as one: whether it keeps
+        // being looked at is the frame's first look's to say.
+    }
+    if (sent != 0)
+    {
+        if (entry.shadow.size() >= endByte) entry.changedFrame = g_frame;
+        g_bufferUploads.fetch_add(1, std::memory_order_relaxed);
+        g_bufferBytes.fetch_add(sent, std::memory_order_relaxed);
+        RenderStats::Frame().bufferUploads++;
+        RenderStats::Frame().uploadBytes += sent;
+    }
 }
 
 ID3D11ShaderResourceView* RenderResources::VertexBufferView(Handle handle)

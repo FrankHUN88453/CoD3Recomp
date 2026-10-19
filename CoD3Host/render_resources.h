@@ -153,6 +153,15 @@ namespace RenderResources
     Handle VertexBufferFor(uint32_t physical, uint32_t bytes, uint32_t endian);
     ID3D11ShaderResourceView* VertexBufferView(Handle handle);
 
+    // With "Watch memory writes" off, a big buffer is looked at whole once
+    // a frame, by its first draw. NeedsRangeLook: the buffer VertexBufferFor
+    // just gave was not looked at by that call, and has been changing (the
+    // title's pool of dynamic geometry, written a piece at a time through
+    // the frame). LookRange: the part a draw reads, compared with what went
+    // up and sent again where it differs.
+    bool NeedsRangeLook(Handle handle);
+    void LookRange(Handle handle, uint32_t physical, uint32_t firstByte, uint32_t endByte);
+
     // --- the rings ---------------------------------------------------------------------------
 
     // Indices for a draw, appended: where they start in the index ring.
