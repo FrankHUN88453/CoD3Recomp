@@ -24,6 +24,7 @@
 #include "debug_probe.h"
 #include "parallel.h"
 #include "tuning.h"
+#include "verify.h"
 
 #include <algorithm>
 #include <atomic>
@@ -1844,6 +1845,25 @@ void Render::Swap(uint32_t frontBufferPhysical, uint32_t width, uint32_t height)
     const Settings::Values settings = Settings::Get();
     PresentLocked(settings);
     RenderStats::EndFrame();
+    // Verify mode (verify.h): what each check has looked at, every ten
+    // seconds while any is on, so the log says it ran even when it found
+    // nothing wrong.
+    {
+        static auto told = std::chrono::steady_clock::now();
+        bool any = false;
+        for (int k = 0; k < Verify::KindCount; k++) any = any || Verify::On(Verify::Kind(k));
+        if (any && std::chrono::steady_clock::now() - told > std::chrono::seconds(10))
+        {
+            told = std::chrono::steady_clock::now();
+            printf("verify:");
+            for (int k = 0; k < Verify::KindCount; k++)
+                if (Verify::On(Verify::Kind(k)))
+                    printf(" %s %llu checked, %llu wrong;", Verify::Name(Verify::Kind(k)),
+                        (unsigned long long)Verify::checks[k].load(), (unsigned long long)Verify::mismatches[k].load());
+            printf("\n");
+            fflush(stdout);
+        }
+    }
     FrameSwapped();
     g_swaps.fetch_add(1, std::memory_order_relaxed);
     g_frame++;
