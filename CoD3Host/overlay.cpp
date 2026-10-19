@@ -1,6 +1,7 @@
 #include "version.h"
 #include "overlay.h"
 #include "kernel.h"
+#include "verify.h"
 #include "settings.h"
 #include "input.h"
 #include "net.h"
@@ -389,6 +390,44 @@ namespace
                             g_edit.depthThread = g_edit.fastConstants = g_edit.shaderLoadCache = g_edit.strongChangeCheck = false;
                             g_edit.rangeLooks = g_edit.opaqueShaders = g_edit.stagingUploads = g_edit.texturePool = false;
                         }
+                    }
+                    // Verify mode (verify.h): each shortcut checked against the
+                    // slow, exact answer. Takes effect at once, is never saved.
+                    if (ImGui::CollapsingHeader("Verify the shortcuts (diagnostics, slow)"))
+                    {
+                        ImGui::TextDisabled("Checks each shortcut against the exact answer and logs every disagreement to CoD3.log.");
+                        ImGui::TextDisabled("Stale vertex buffers, textures and constants it finds are also sent again, so the picture is corrected.");
+                        static const char* const hints[Verify::KindCount] = {
+                            "(the vertices each draw reads against what the GPU was sent)",
+                            "(each texture's memory against what it was made from, once a frame)",
+                            "(constant uploads skipped as unchanged against what they would have been)",
+                            "(buffers and textures judged unchanged by their pages or by samples, hashed whole)",
+                            "(with Native command lists on: each draw's state against its record)" };
+                        for (int k = 0; k < Verify::KindCount; k++)
+                        {
+                            const Verify::Kind kind = Verify::Kind(k);
+                            bool value = Verify::On(kind);
+                            char label[64];
+                            snprintf(label, sizeof(label), "Verify %s", Verify::Name(kind));
+                            if (ImGui::Checkbox(label, &value)) Verify::Set(kind, value);
+                            ImGui::SameLine();
+                            ImGui::TextDisabled("%s", hints[k]);
+                            const uint64_t checked = Verify::checks[k].load(), wrong = Verify::mismatches[k].load();
+                            if (checked != 0 || wrong != 0)
+                            {
+                                ImGui::Indent();
+                                if (wrong != 0) ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "%llu checked, %llu wrong", (unsigned long long)checked, (unsigned long long)wrong);
+                                else ImGui::Text("%llu checked, none wrong", (unsigned long long)checked);
+                                const std::string last = Verify::Last(kind);
+                                if (!last.empty()) { ImGui::PushTextWrapPos(0.0f); ImGui::TextDisabled("Last: %s", last.c_str()); ImGui::PopTextWrapPos(); }
+                                ImGui::Unindent();
+                            }
+                        }
+                        if (ImGui::Button("Verify all")) for (int k = 0; k < Verify::KindCount; k++) Verify::Set(Verify::Kind(k), true);
+                        ImGui::SameLine();
+                        if (ImGui::Button("Verify none")) for (int k = 0; k < Verify::KindCount; k++) Verify::Set(Verify::Kind(k), false);
+                        ImGui::SameLine();
+                        if (ImGui::Button("Reset counts")) Verify::Reset();
                     }
                     ImGui::Checkbox("Vertical sync (VSync)", &g_edit.vsync);
                     ImGui::Checkbox("Unlimited frame rate in levels", &g_edit.unlockFrameRate);

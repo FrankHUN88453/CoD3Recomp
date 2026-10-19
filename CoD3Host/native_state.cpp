@@ -37,6 +37,7 @@
 // packets set. A draw's record is the model at its packet, the shadows
 // standing in for what the stream has not said yet.
 
+#include "verify.h"
 #include "native_state.h"
 #include "kernel.h"
 #include "gpu.h"
@@ -1031,8 +1032,8 @@ bool NativeState::Begin(uint32_t lastWordPhysical)
 
     // COD3_IMAGECHECK=1: the image, filled a chunk at a time and put back a
     // word at a time, held against one made whole from the record.
-    static const bool imageCheck = getenv("COD3_IMAGECHECK") != nullptr;
-    if (imageCheck)
+    static const bool imageCheckEnv = getenv("COD3_IMAGECHECK") != nullptr;
+    if (imageCheckEnv || Verify::On(Verify::Native))
     {
         static uint64_t checked = 0, wrong = 0;
         static auto reported = std::chrono::steady_clock::now();
@@ -1042,9 +1043,16 @@ bool NativeState::Begin(uint32_t lastWordPhysical)
             for (uint32_t i = 0; i < 4; i++) whole[CopyIndex(0x4000 + index * 4u + i)] = Guest::Read32(Guest::Base, Guest::PhysicalAlias(address + i * 4));
         for (const auto& [reg, value] : passRegisters) whole[CopyIndex(reg)] = value;
         bool same = true;
-        for (uint32_t at = 0; at < ShadowWords && same; at++) same = whole[at] == g_image[g_copy.reg[at]];
+        uint32_t at = 0;
+        for (; at < ShadowWords && same; at++) same = whole[at] == g_image[g_copy.reg[at]];
         checked++;
-        if (!same) wrong++;
+        Verify::Checked(Verify::Native);
+        if (!same)
+        {
+            wrong++;
+            const uint32_t reg = g_copy.reg[at - 1];
+            Verify::Mismatch(Verify::Native, "a draw's register %04X is %08X, its record says %08X", reg, g_image[reg], whole[at - 1]);
+        }
         if (std::chrono::steady_clock::now() - reported > std::chrono::seconds(5))
         {
             printf("native image: %llu draws, %llu not as the record says\n", (unsigned long long)checked, (unsigned long long)wrong);

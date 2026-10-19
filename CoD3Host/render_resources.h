@@ -161,6 +161,9 @@ namespace RenderResources
     // up and sent again where it differs.
     bool NeedsRangeLook(Handle handle);
     void LookRange(Handle handle, uint32_t physical, uint32_t firstByte, uint32_t endByte);
+    // Verify mode (verify.h): the part a draw reads held against what was
+    // sent of the buffer; a difference is said and sent again.
+    void VerifyRange(Handle handle, uint32_t physical, uint32_t firstByte, uint32_t endByte);
 
     // --- the rings ---------------------------------------------------------------------------
 

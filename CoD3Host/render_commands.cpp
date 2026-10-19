@@ -11,6 +11,7 @@
 #include "render_commands.h"
 #include "render_internal.h"
 #include "tuning.h"
+#include "verify.h"
 #include "render_pipeline.h"
 #include "render_shaders.h"
 #include "render_resources.h"
@@ -406,12 +407,15 @@ namespace
     // are known.
     struct RangeLook { Handle buffer; uint32_t physical; uint32_t stride; };
     std::vector<RangeLook> g_rangeLooks;
+    std::vector<RangeLook> g_verifyBuffers;   // verify mode: every buffer the draw reads
 
     // The vertex buffers the vertex program fetches. False when one could
     // not be had.
     bool Buffers(const RenderShaders::Program* vs, DrawCommand& out)
     {
         g_rangeLooks.clear();
+        g_verifyBuffers.clear();
+        const bool verify = Verify::On(Verify::Buffers);
         for (const XenosHlsl::VertexFetch& fetch : vs->vertexFetches)
         {
             uint32_t word0, word1;
@@ -431,6 +435,7 @@ namespace
             binding.slot = uint8_t(fetch.slot);
             binding.view = view;
             if (RenderResources::NeedsRangeLook(buffer)) g_rangeLooks.push_back(RangeLook{ buffer, word0 & ~3u, fetch.stride });
+            if (verify) g_verifyBuffers.push_back(RangeLook{ buffer, word0 & ~3u, fetch.stride });
         }
         return true;
     }
@@ -445,11 +450,13 @@ namespace
     // the screen as lines. That took the command thread running alongside
     // the title's writes, rather than a frame behind them, to show. Which
     // vertices: the indices' lowest and highest, with the index offset.
-    void LookRanges(const RenderState::Snapshot& state, const DrawCommand& out)
+    // The lowest and highest vertex the draw's indices name, without the
+    // index offset. False for a draw with none.
+    bool DrawVertexRange(const RenderState::Snapshot& state, const DrawCommand& out, uint32_t& lowest, uint32_t& highest)
     {
         const uint32_t count = state.indexCount;
-        if (count == 0) return;
-        uint32_t lowest = 0xFFFFFFFFu, highest = 0;
+        if (count == 0) return false;
+        lowest = 0xFFFFFFFFu; highest = 0;
         if (state.sourceSelect == 0)
         {
             const bool strips = out.topology == D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP || out.topology == D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP;
@@ -479,7 +486,13 @@ namespace
             }
         }
         else { lowest = 0; highest = count - 1; }
-        if (lowest > highest) return;
+        return lowest <= highest;
+    }
+
+    void LookRanges(const RenderState::Snapshot& state, const DrawCommand& out)
+    {
+        uint32_t lowest, highest;
+        if (!DrawVertexRange(state, out, lowest, highest)) return;
         const int64_t offset = state.indexOffset;
         for (const RangeLook& look : g_rangeLooks)
         {
@@ -497,6 +510,24 @@ namespace
             // should the host's vertex id not carry it.
             send(int64_t(lowest) + offset, int64_t(highest) + offset);
             if (offset != 0) send(lowest, highest);
+        }
+    }
+
+    // Verify mode: the vertices the draw reads, with the index offset, held
+    // against what was sent of each of its buffers (verify.h).
+    void VerifyDrawBuffers(const RenderState::Snapshot& state, const DrawCommand& out)
+    {
+        uint32_t lowest, highest;
+        if (!DrawVertexRange(state, out, lowest, highest)) return;
+        const int64_t first = std::max<int64_t>(int64_t(lowest) + state.indexOffset, 0);
+        const int64_t last = int64_t(highest) + state.indexOffset;
+        if (last < first) return;
+        for (const RangeLook& look : g_verifyBuffers)
+        {
+            if (look.stride == 0) continue;
+            const int64_t strideBytes = int64_t(look.stride) * 4;
+            RenderResources::VerifyRange(look.buffer, look.physical, uint32_t(std::min<int64_t>(first * strideBytes, 0xFFFFFFFFll)),
+                                         uint32_t(std::min<int64_t>((last + 1) * strideBytes, 0xFFFFFFFFll)));
         }
     }
 
@@ -577,25 +608,24 @@ namespace
             // COD3_CONSTCHECK=1: a stage whose upload is skipped held against
             // what the upload before it packed: a constant that differs is
             // one the skip got wrong.
-            static const bool constCheck = getenv("COD3_CONSTCHECK") != nullptr;
+            static const bool constCheckEnv = getenv("COD3_CONSTCHECK") != nullptr;
+            const bool constCheck = constCheckEnv || Verify::On(Verify::Constants);
             if (constCheck && !upload[stage] && g_packedShadow[stage].size() == size_t(need[stage]) * 4)
             {
+                Verify::Checked(Verify::Constants);
                 const uint32_t* from = file + (stage == 0 ? 0x4000 : 0x4400);
                 const size_t count = map.empty() ? 256 : map.size();
                 for (size_t i = 0; i < count; i++)
                 {
                     const uint32_t constant = map.empty() ? uint32_t(i) : map[i];
                     if (memcmp(&g_packedShadow[stage][i * 4], from + constant * 4, 16) == 0) continue;
-                    static int told = 0;
-                    if (told++ < 30)
-                    {
-                        printf("render: constant check: %s %016llx c%u was uploaded as %08X %08X %08X %08X, is %08X %08X %08X %08X now, the sent file says %08X; record %d\n",
-                            stage == 0 ? "vs" : "ps", (unsigned long long)programs[stage]->hash, constant,
-                            g_packedShadow[stage][i * 4], g_packedShadow[stage][i * 4 + 1], g_packedShadow[stage][i * 4 + 2], g_packedShadow[stage][i * 4 + 3],
-                            from[constant * 4], from[constant * 4 + 1], from[constant * 4 + 2], from[constant * 4 + 3],
-                            g_sentFile[stage][constant * 4], record ? 1 : 0);
-                        fflush(stdout);
-                    }
+                    Verify::Mismatch(Verify::Constants, "%s %016llx c%u was uploaded as %08X %08X %08X %08X, is %08X %08X %08X %08X now; skipped as unchanged (record %d)",
+                        stage == 0 ? "vs" : "ps", (unsigned long long)programs[stage]->hash, constant,
+                        g_packedShadow[stage][i * 4], g_packedShadow[stage][i * 4 + 1], g_packedShadow[stage][i * 4 + 2], g_packedShadow[stage][i * 4 + 3],
+                        from[constant * 4], from[constant * 4 + 1], from[constant * 4 + 2], from[constant * 4 + 3], record ? 1 : 0);
+                    // Uploaded after all, so the draw is right and the miss
+                    // is said once rather than by every draw after it.
+                    upload[stage] = true;
                     break;
                 }
             }
@@ -675,8 +705,8 @@ namespace
                         fflush(stdout);
                     }
                 }
-                static const bool constCheck = getenv("COD3_CONSTCHECK") != nullptr;
-                if (constCheck) g_packedShadow[stage].assign(words, words + need[stage] * 4);
+                static const bool constCheckEnv = getenv("COD3_CONSTCHECK") != nullptr;
+                if (constCheckEnv || Verify::On(Verify::Constants)) g_packedShadow[stage].assign(words, words + need[stage] * 4);
                 g_uploaded.floatAt[stage] = base + at;
                 g_uploaded.floatCount[stage] = need[stage];
                 g_uploaded.floatProgram[stage] = handles[stage];
@@ -1240,10 +1270,11 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
     RenderStats::Enter(RenderStats::SectionIndices);
     if (!Indices(state, convertQuads, convertFan, out)) return false;
     out.baseVertex = state.indexOffset;
-    if (!g_rangeLooks.empty())
+    if (!g_rangeLooks.empty() || !g_verifyBuffers.empty())
     {
         RenderStats::Enter(RenderStats::SectionBuffers);
-        LookRanges(state, out);
+        if (!g_rangeLooks.empty()) LookRanges(state, out);
+        if (!g_verifyBuffers.empty()) VerifyDrawBuffers(state, out);
         RenderStats::Enter(RenderStats::SectionIndices);
     }
     IndexCheck(state, vs, out);

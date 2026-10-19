@@ -5,6 +5,7 @@
 #include "kernel.h"
 #include "write_watch.h"
 #include "tuning.h"
+#include "verify.h"
 #include "texture_pack.h"
 
 #include <algorithm>
@@ -340,13 +341,13 @@ namespace
     // how much, a texture or a buffer.
     void MissAudit(const char* kind, uint32_t physical, const uint8_t* data, size_t bytes, bool dense, uint64_t& auditDense)
     {
-        static const bool audit = getenv("COD3_MISSAUDIT") != nullptr;
-        if (!audit || dense) return;
+        static const bool auditEnv = getenv("COD3_MISSAUDIT") != nullptr;
+        if ((!auditEnv && !Verify::On(Verify::Watched)) || dense) return;
+        Verify::Checked(Verify::Watched);
         const uint64_t whole = Fingerprint(data, bytes, true);
         if (whole == auditDense) return;
-        static std::atomic<int> said{ 0 };
-        if (auditDense != 0 && said.fetch_add(1) < 200)
-            printf("render: missed a change: %s at %08X, %zu bytes\n", kind, physical, bytes);
+        if (auditDense != 0)
+            Verify::Mismatch(Verify::Watched, "%s at %08X (%zu bytes) changed and its sampled look missed it", kind, physical, bytes);
         auditDense = whole;
     }
 
@@ -355,12 +356,16 @@ namespace
     // tell is named.
     void WatchAudit(const char* kind, uint32_t physical, const uint8_t* data, size_t bytes, bool dense, uint64_t fingerprint)
     {
-        static const bool audit = getenv("COD3_WATCHAUDIT") != nullptr;
-        if (!audit) return;
+        static const bool auditEnv = getenv("COD3_WATCHAUDIT") != nullptr;
+        if (!auditEnv && !Verify::On(Verify::Watched)) return;
+        Verify::Checked(Verify::Watched);
         static std::atomic<uint64_t> looks{ 0 }, missed{ 0 };
         const uint64_t look = looks.fetch_add(1) + 1;
-        if (Fingerprint(data, bytes, dense) != fingerprint && missed.fetch_add(1) < 8)
-            printf("render: watch audit: the %s at %08X (%zu bytes) changed with no write seen\n", kind, physical, bytes);
+        if (Fingerprint(data, bytes, dense) != fingerprint)
+        {
+            missed.fetch_add(1);
+            Verify::Mismatch(Verify::Watched, "the %s at %08X (%zu bytes) changed with no write seen by its pages", kind, physical, bytes);
+        }
         if ((look & 0xFFFF) == 0)
         {
             printf("render: watch audit: %llu looks by the pages, %llu missed\n", (unsigned long long)look,
@@ -395,6 +400,9 @@ namespace
         uint32_t width = 0, height = 0, levels = 0;
         uint64_t bytes = 0;
         bool live = false;
+        std::vector<uint8_t> sourceMirror;   // verify mode: the memory it was last made from
+        uint32_t mirrorEpoch = 0;
+        uint64_t verifiedFrame = 0;
     };
     std::deque<TextureEntry> g_textures;   // by handle less one; handle 1 is the white texture
 
@@ -630,7 +638,22 @@ namespace
         std::vector<uint8_t> shadow;    // a big buffer: what went up, to send only what changed
         uint64_t changedFrame = 0;      // the frame a look last found it changed
         uint64_t lookedCall = 0;        // the VertexBufferFor call that last looked at it
+        std::vector<uint8_t> mirror;    // verify mode: what was sent to the GPU
+        uint32_t mirrorEpoch = 0;       // the verify epoch the mirror was last whole in
+        const char* lastSent = "";      // how it was last sent, for verify mode's report
     };
+
+    // Verify mode (verify.h): what was sent of a buffer kept beside it, so
+    // a draw's vertices can be held against it. `data` is the buffer's start.
+    void Sent(BufferEntry& entry, uint32_t first, uint32_t end, const uint8_t* data, const char* how)
+    {
+        entry.lastSent = how;
+        if (!Verify::On(Verify::Buffers) || entry.bytes == 0) return;
+        if (entry.mirror.size() < entry.bytes) entry.mirror.resize(entry.bytes);
+        end = std::min(end, entry.bytes);
+        if (first < end) memcpy(entry.mirror.data() + first, data + first, end - first);
+        if (first == 0 && end >= entry.seen) entry.mirrorEpoch = Verify::epoch.load(std::memory_order_relaxed);
+    }
     std::deque<BufferEntry> g_buffers;
     uint64_t g_vertexCalls = 0;         // VertexBufferFor's calls, counted
 
@@ -1693,7 +1716,64 @@ RenderState::Handle RenderResources::WhiteTexture() { return 1; }
 namespace { const char* g_whiteReason = ""; }
 const char* RenderResources::WhiteReason() { return g_whiteReason; }
 
+namespace
+{
+    // Verify mode (verify.h): the memory a texture was made from, kept.
+    void TextureSent(TextureEntry& entry, const uint32_t fetch[6], const uint8_t* data)
+    {
+        if (!Verify::On(Verify::Textures)) return;
+        const size_t span = std::min(SourceBytes(fetch), size_t(64u << 20));
+        entry.sourceMirror.assign(data, data + span);
+        entry.mirrorEpoch = Verify::epoch.load(std::memory_order_relaxed);
+    }
+
+    // Made again at its next look: its fingerprint forgotten.
+    void LookAgain(TextureEntry& entry)
+    {
+        entry.fingerprint = 0;
+        entry.dense = true;
+        entry.denseFingerprint = 0;
+        entry.watchedSince = 0;
+        entry.checkedFrame = 0;
+    }
+
+    // A texture at its first use in a frame, after that frame's look, held
+    // against what it was made from: a difference is a change the look
+    // missed. It is made again, and said.
+    void VerifyTexture(RenderState::Handle handle, const uint32_t fetch[6])
+    {
+        if (handle <= 1 || handle > g_textures.size()) return;
+        TextureEntry& entry = g_textures[handle - 1];
+        if (!entry.live) return;
+        if (entry.mirrorEpoch != Verify::epoch.load(std::memory_order_relaxed)) { LookAgain(entry); return; }
+        if (entry.verifiedFrame == g_frame) return;
+        entry.verifiedFrame = g_frame;
+        Verify::Checked(Verify::Textures);
+        const uint32_t base = fetch[1] & 0xFFFFF000u;
+        const uint8_t* data = Guest::Base + Guest::PhysicalAlias(base);
+        const size_t span = std::min(std::min(SourceBytes(fetch), size_t(64u << 20)), entry.sourceMirror.size());
+        if (span == 0 || memcmp(data, entry.sourceMirror.data(), span) == 0) return;
+        size_t differ = 0;
+        for (size_t i = 0; i < span; i++) differ += data[i] != entry.sourceMirror[i];
+        Verify::Mismatch(Verify::Textures, "texture %08X, format %u, %ux%u: %zu of %zu bytes changed and its look missed it",
+            base, fetch[1] & 0x3F, (fetch[2] & 0x1FFF) + 1, ((fetch[2] >> 13) & 0x1FFF) + 1, differ, span);
+        LookAgain(entry);
+    }
+}
+
+namespace RenderResources
+{
+    Handle TextureForUnchecked(const uint32_t fetch[6], uint32_t& width, uint32_t& height, bool& resolved);
+}
+
 RenderState::Handle RenderResources::TextureFor(const uint32_t fetch[6], uint32_t& width, uint32_t& height, bool& resolved)
+{
+    const Handle handle = TextureForUnchecked(fetch, width, height, resolved);
+    if (Verify::On(Verify::Textures) && !resolved) VerifyTexture(handle, fetch);
+    return handle;
+}
+
+RenderState::Handle RenderResources::TextureForUnchecked(const uint32_t fetch[6], uint32_t& width, uint32_t& height, bool& resolved)
 {
     t_fingerprintKind = "texture";
     const uint32_t format = fetch[1] & 0x3F;
@@ -1806,6 +1886,7 @@ RenderState::Handle RenderResources::TextureFor(const uint32_t fetch[6], uint32_
         entry.denseFingerprint = 0;
         g_resourceBytes -= entry.bytes;
         if (!UploadTexture(entry, fetch, data)) { g_textureKeys.Erase(entry.key); entry.live = false; g_freeTextures.push_back(handle); g_whiteReason = "upload failed"; return 1; }
+        TextureSent(entry, fetch, data);
         g_resourceBytes += entry.bytes;
         return handle;
     }
@@ -1819,6 +1900,7 @@ RenderState::Handle RenderResources::TextureFor(const uint32_t fetch[6], uint32_
     entry.fingerprint = Fingerprint(data, std::min(SourceBytes(fetch), size_t(64u << 20)), entry.dense);
     entry.checkedFrame = entry.usedFrame = g_frame;
     if (!UploadTexture(entry, fetch, data)) { g_freeTextures.push_back(handle); g_whiteReason = "upload failed"; return 1; }
+    TextureSent(entry, fetch, data);
     entry.live = true;
     g_textureKeys.Insert(key, handle);
     g_resourceBytes += entry.bytes;
@@ -1871,6 +1953,17 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
     if (handle != 0)
     {
         BufferEntry& entry = g_buffers[handle - 1];
+        // Verify mode, just switched on: sent whole once, so what each draw
+        // is held against is known to be what the GPU has.
+        if (Verify::On(Verify::Buffers) && entry.mirrorEpoch != Verify::epoch.load(std::memory_order_relaxed)
+            && entry.buffer && entry.seen != 0 && entry.bytes >= entry.seen)
+        {
+            D3D11_BOX box{ 0, 0, 0, entry.seen, 1, 1 };
+            g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data, 0, 0);
+            if (entry.shadow.size() >= entry.seen) memcpy(entry.shadow.data(), data, entry.seen);
+            entry.fingerprint = Fingerprint(data, entry.seen, entry.dense);
+            Sent(entry, 0, entry.seen, data, "sent whole as verify mode began");
+        }
         // Already looked at this frame. A buffer is looked at once a frame,
         // like a texture, but the title rewrites some of its small ones
         // between the draws of a frame: a tank's treads are strips built
@@ -1945,6 +2038,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
                 {
                     D3D11_BOX box{ first, 0, 0, end, 1, 1 };
                     g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data + first, 0, 0);
+                    Sent(entry, first, end, data, "written within the frame (pieces)");
                     if (entry.shadow.size() >= end) memcpy(entry.shadow.data() + first, data + first, end - first);
                     sent += end - first;
                 }
@@ -2057,6 +2151,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
                 entry.shadow.assign(data, data + wanted);
                 D3D11_BOX box{ 0, 0, 0, wanted, 1, 1 };
                 g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data, 0, 0);
+                Sent(entry, 0, wanted, data, "big, first sent whole");
                 sent = wanted;
             }
             else
@@ -2078,6 +2173,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
                         const uint32_t end = changed ? at + length : at;
                         D3D11_BOX box{ runStart, 0, 0, end, 1, 1 };
                         g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data + runStart, 0, 0);
+                        Sent(entry, runStart, end, data, "big, compared by pieces");
                         sent += end - runStart;
                         runStart = 0xFFFFFFFFu;
                     }
@@ -2170,6 +2266,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
         {
             D3D11_BOX box{ 0, 0, 0, wanted, 1, 1 };
             g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data, 0, 0);
+            Sent(entry, 0, wanted, data, "changed, sent whole");
             if (!entry.midFrame && wanted <= AlwaysDenseBytes) entry.sampled = Fingerprint(data, wanted, false);
             g_bufferUploads.fetch_add(1, std::memory_order_relaxed);
             g_bufferBytes.fetch_add(wanted, std::memory_order_relaxed);
@@ -2210,6 +2307,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
     if (FAILED(g_device->CreateShaderResourceView(entry.buffer.Get(), &view, &entry.resource))) { entry.buffer.Reset(); g_freeBuffers.push_back(handle); return 0; }
     D3D11_BOX box{ 0, 0, 0, wanted, 1, 1 };
     g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data, 0, 0);
+    Sent(entry, 0, wanted, data, "new");
     entry.live = true;
     g_bufferKeys.Insert(key, handle);
     g_resourceBytes += entry.bytes;
@@ -2265,6 +2363,7 @@ void RenderResources::LookRange(Handle handle, uint32_t physical, uint32_t first
                 const uint32_t end = changed ? at + length : at;
                 D3D11_BOX box{ runStart, 0, 0, end, 1, 1 };
                 g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data + runStart, 0, 0);
+                Sent(entry, runStart, end, data, "range looked at again by a draw");
                 sent += end - runStart;
                 runStart = 0xFFFFFFFFu;
             }
@@ -2276,6 +2375,7 @@ void RenderResources::LookRange(Handle handle, uint32_t physical, uint32_t first
         // the next frame's look, finding the memory changed, sends it whole.
         D3D11_BOX box{ firstByte, 0, 0, endByte, 1, 1 };
         g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data + firstByte, 0, 0);
+        Sent(entry, firstByte, endByte, data, "range sent again by a draw");
         sent = endByte - firstByte;
         // Not a change found, so not counted as one: whether it keeps
         // being looked at is the frame's first look's to say.
@@ -2288,6 +2388,29 @@ void RenderResources::LookRange(Handle handle, uint32_t physical, uint32_t first
         RenderStats::Frame().bufferUploads++;
         RenderStats::Frame().uploadBytes += sent;
     }
+}
+
+void RenderResources::VerifyRange(Handle handle, uint32_t physical, uint32_t firstByte, uint32_t endByte)
+{
+    if (handle == 0 || handle > g_buffers.size()) return;
+    BufferEntry& entry = g_buffers[handle - 1];
+    if (!entry.buffer || entry.mirrorEpoch != Verify::epoch.load(std::memory_order_relaxed)) return;
+    endByte = std::min(std::min(endByte, entry.seen), std::min(entry.bytes, uint32_t(entry.mirror.size())));
+    if (firstByte >= endByte) return;
+    Verify::Checked(Verify::Buffers);
+    const uint8_t* data = Guest::Base + Guest::PhysicalAlias(physical);
+    if (memcmp(data + firstByte, entry.mirror.data() + firstByte, endByte - firstByte) == 0) return;
+    uint32_t firstDiff = 0, lastDiff = 0, differ = 0;
+    for (uint32_t at = firstByte; at < endByte; at++)
+        if (data[at] != entry.mirror[at]) { if (differ++ == 0) firstDiff = at; lastDiff = at; }
+    Verify::Mismatch(Verify::Buffers, "vertex buffer %08X (%u bytes): a draw reads %u..%u, %u bytes there are not what the GPU has (%u..%u); last sent: %s",
+        physical, entry.seen, firstByte, endByte, differ, firstDiff, lastDiff + 1, entry.lastSent);
+    // Sent again, so the picture is right and one miss is not said by
+    // every draw after it.
+    D3D11_BOX box{ firstDiff, 0, 0, lastDiff + 1, 1, 1 };
+    g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data + firstDiff, 0, 0);
+    memcpy(entry.mirror.data() + firstDiff, data + firstDiff, lastDiff + 1 - firstDiff);
+    if (entry.shadow.size() >= lastDiff + 1) memcpy(entry.shadow.data() + firstDiff, data + firstDiff, lastDiff + 1 - firstDiff);
 }
 
 ID3D11ShaderResourceView* RenderResources::VertexBufferView(Handle handle)
