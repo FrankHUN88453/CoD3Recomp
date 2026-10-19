@@ -105,7 +105,7 @@ namespace
             // it does the reason matters more than the run continuing.
             g_timeouts.fetch_add(1, std::memory_order_relaxed);
             static std::atomic<int> announced{ 0 };
-            if (announced.fetch_add(1) < 4)
+            if ((announced.load(std::memory_order_relaxed) < 4 && announced.fetch_add(1) < 4))
             {
                 printf("scheduling: hardware thread %d could not be taken in "
                        "two seconds, so two guest threads now share it\n",

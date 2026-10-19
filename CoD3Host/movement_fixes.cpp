@@ -93,7 +93,7 @@ PPC_FUNC(sub_8250CDB0)
 {
     const Input::Pad pad = Input::State();
     static int said = 0;
-    if (said++ < 40)
+    if ((said < 40 && said++ < 40))
     {
         printf("binoculars: +binoculars with buttons 0x%04X, left stick %d,%d%s\n", pad.buttons, pad.thumbLX, pad.thumbLY,
                Input::Running() ? ": running, not taken out" : "");

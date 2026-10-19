@@ -145,7 +145,7 @@ void Coroutines::Begin(PPCContext& ctx, uint8_t* base, uint32_t key, PPCFunc* en
     Window();
     coroutine.fiber = CreateFiberEx(FiberCommit, FiberReserve, FIBER_FLAG_FLOAT_SWITCH,
                                     Start, &coroutine);
-    if (g_announced++ < 12)
+    if ((g_announced < 12 && g_announced++ < 12))
     {
         printf("coroutines: thread 0x%08X begins\n", key);
         fflush(stdout);
@@ -181,7 +181,7 @@ void Coroutines::Resume(PPCContext& ctx, uint8_t* base, uint32_t key)
     g_resumed++;
     g_windowResumed++;
     Window();
-    if (coroutine->generation != g_generation && g_staleResumes++ < 20)
+    if (coroutine->generation != g_generation && (g_staleResumes < 20 && g_staleResumes++ < 20))
     {
         printf("coroutines: thread 0x%08X resumed on a fiber begun in generation %u, now %u: its host frames are from before the restart\n",
             key, coroutine->generation, g_generation);

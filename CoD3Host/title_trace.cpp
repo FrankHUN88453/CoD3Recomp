@@ -106,7 +106,7 @@ PPC_FUNC(sub_82517840)
     const char* pending = Text(base, 0x829C3A48);
     const bool interesting = pending[0] != 0;
     __imp__sub_82517840(ctx, base);
-    if (Wanted() && interesting && shown++ < 20)
+    if (Wanted() && interesting && (shown < 20 && shown++ < 20))
     {
         printf("title: launcher saw \"%s\", returned %u, gate object %08X (+40 %08X vs %08X), loading flag %08X\n", pending, ctx.r3.u32,
             Guest::Read32(base, 0x829C39E8), Guest::Read32(base, 0x829C39E8) ? Guest::Read32(base, Guest::Read32(base, 0x829C39E8) + 40) : 0,
@@ -124,7 +124,7 @@ PPC_FUNC(sub_823B8C60)
     const uint32_t voice = ctx.r3.u32, dest = ctx.r4.u32, arg5 = ctx.r5.u32, countPtr = ctx.r6.u32;
     const uint32_t before = countPtr ? Guest::Read32(base, countPtr) : 0;
     __imp__sub_823B8C60(ctx, base);
-    if (getenv("COD3_XMATRACE") != nullptr && shown++ < 60)
+    if (getenv("COD3_XMATRACE") != nullptr && (shown < 60 && shown++ < 60))
     {
         printf("title: xma step voice %08X dest %08X r5 %08X count %u -> returned %u, count now %u, dest words %08X %08X\n",
             voice, dest, arg5, before, ctx.r3.u32, countPtr ? Guest::Read32(base, countPtr) : 0,
@@ -160,7 +160,7 @@ PPC_FUNC(sub_822C1108)
     const uint32_t mixer = ctx.r3.u32;
     const uint32_t thread = Guest::Read32(base, mixer + 304);
     calls++;
-    if (MixTrace() && shown++ < 8)
+    if (MixTrace() && (shown < 8 && shown++ < 8))
         printf("title: audio callback mixer %08X thread %08X at %llu ms\n", mixer, thread, (unsigned long long)Now());
     __imp__sub_822C1108(ctx, base);
     if (MixTrace() && Now() - lastSecond >= 1000)
@@ -194,7 +194,7 @@ PPC_FUNC(sub_822C0F90)
     const uint32_t a = ctx.r3.u32, b = ctx.r4.u32;
     if (MixTrace() && shown < 20) printf("title: mixer thread function (%08X, %08X) enters on thread %lu at %llu ms\n", a, b, GetCurrentThreadId(), (unsigned long long)Now());
     __imp__sub_822C0F90(ctx, base);
-    if (MixTrace() && shown++ < 20) printf("title: mixer thread function (%08X, %08X) returns %u at %llu ms\n", a, b, ctx.r3.u32, (unsigned long long)Now());
+    if (MixTrace() && (shown < 20 && shown++ < 20)) printf("title: mixer thread function (%08X, %08X) returns %u at %llu ms\n", a, b, ctx.r3.u32, (unsigned long long)Now());
     fflush(stdout);
 }
 
@@ -244,7 +244,7 @@ extern "C" PPC_FUNC(__imp__sub_82539518);
 PPC_FUNC(sub_82539518)
 {
     static int said = 0;
-    if (said++ < 200)
+    if ((said < 200 && said++ < 200))
     {
         std::string text = Kernel::FormatGuestCall(ctx, base, ctx.r3.u32, 4);
         while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
@@ -262,7 +262,7 @@ PPC_FUNC(sub_8253C490)
     const uint32_t from = uint32_t(ctx.lr);
     __imp__sub_8253C490(ctx, base);
     static int told = 0;
-    if (Wanted() && told++ < 40) { printf("title: animation tree generic_human is %08X (from %08X)\n", ctx.r3.u32, from); fflush(stdout); }
+    if (Wanted() && (told < 40 && told++ < 40)) { printf("title: animation tree generic_human is %08X (from %08X)\n", ctx.r3.u32, from); fflush(stdout); }
 }
 
 // Three more of the title's own reports the release build keeps quiet,
@@ -277,7 +277,7 @@ extern "C" PPC_FUNC(__imp__sub_821279C0);
 PPC_FUNC(sub_821279C0)
 {
     static int said = 0;
-    if (said++ < 300)
+    if ((said < 300 && said++ < 300))
     {
         std::string text = Kernel::FormatGuestCall(ctx, base, ctx.r3.u32, 4);
         while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
@@ -291,7 +291,7 @@ extern "C" PPC_FUNC(__imp__sub_820FBDB8);
 PPC_FUNC(sub_820FBDB8)
 {
     static int said = 0;
-    if (said++ < 300)
+    if ((said < 300 && said++ < 300))
     {
         std::string text = Kernel::FormatGuestCall(ctx, base, ctx.r5.u32, 6);
         while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
@@ -338,7 +338,7 @@ PPC_FUNC(sub_82144CA8)
         // The streamer's per-chunk decompression line is not a complaint.
         const bool chatter = memcmp(base + format, "LZO ", 4) == 0;
         static int said = 0;
-        if (text && length >= 4 && !chatter && said++ < 2000)
+        if (text && length >= 4 && !chatter && (said < 2000 && said++ < 2000))
         {
             std::string message = Kernel::FormatGuestCall(ctx, base, format, 4);
             while (!message.empty() && (message.back() == '\n' || message.back() == '\r')) message.pop_back();

@@ -69,7 +69,7 @@ namespace
             std::lock_guard<std::mutex> lock(g_mutex);
             known = g_live.erase(pointer) != 0;
         }
-        if (known || g_reported.fetch_add(1) >= 12) return;
+        if (known || (g_reported.load(std::memory_order_relaxed) >= 12 || g_reported.fetch_add(1) >= 12)) return;
         const uint32_t header = Guest::Read32(base, pointer - 4);
         printf("heap: %s of 0x%08X, which is not a live block (chunk header %08X, size %u)", what, pointer, header, header & ~7u);
         PrintChain(ctx, base);
@@ -168,7 +168,7 @@ namespace
         uint32_t repeat = 0;
         int steps = 0;
         if (UnsortedIsSound(base, mstate, repeat, steps)) return;
-        if (g_cycleReported.fetch_add(1) >= 3) return;
+        if ((g_cycleReported.load(std::memory_order_relaxed) >= 3 || g_cycleReported.fetch_add(1) >= 3)) return;
         printf("heap: the unsorted list is a cycle through %08X after %d chunks, %s", repeat, steps, when);
         PrintChain(ctx, base);
         printf("\n");
@@ -182,7 +182,7 @@ const uint32_t mstate = MallocState(base);
         if (g_binsReported.load(std::memory_order_relaxed) >= 4) return;
         uint32_t bad = 0, repeat = 0;
         if (BinsAreSound(base, mstate, bad, repeat)) return;
-        if (g_binsReported.fetch_add(1) >= 4) return;
+        if ((g_binsReported.load(std::memory_order_relaxed) >= 4 || g_binsReported.fetch_add(1) >= 4)) return;
         printf("heap: bin %u holds a cycle through %08X %s 0x%08X", bad, repeat, when, pointer);
         PrintChain(ctx, base);
         printf("\n");

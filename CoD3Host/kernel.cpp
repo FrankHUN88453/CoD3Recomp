@@ -114,7 +114,7 @@ namespace
         if (rawFaults && record->ExceptionCode == EXCEPTION_ACCESS_VIOLATION)
         {
             static std::atomic<int> raw{ 0 };
-            if (raw.fetch_add(1) < 400)
+            if ((raw.load(std::memory_order_relaxed) < 400 && raw.fetch_add(1) < 400))
                 fprintf(stderr, "fault: code %08lX kind %llu at %p (exe+%llx) address %p thread %lu unwinding %d guest ctx %p\n",
                     record->ExceptionCode, (unsigned long long)record->ExceptionInformation[0],
                     record->ExceptionAddress,
@@ -163,7 +163,7 @@ namespace
         {
             static std::atomic<int> announced{ 0 };
             if ((record->ExceptionCode & 0x20000000) == 0 &&
-                announced.fetch_add(1) < 4)
+                (announced.load(std::memory_order_relaxed) < 4 && announced.fetch_add(1) < 4))
             {
                 printf("\n");
                 uint32_t functions[12] = {};
@@ -343,7 +343,7 @@ namespace
         if (Kernel::FreedMemoryTouched(uint32_t(offset)))
         {
             static std::atomic<int> announced{ 0 };
-            if (announced.fetch_add(1) < 12)
+            if ((announced.load(std::memory_order_relaxed) < 12 && announced.fetch_add(1) < 12))
             {
                 uint32_t functions[10] = {};
                 const int count = Sampler::WalkGuestStack(info->ContextRecord, functions, 10);
@@ -366,7 +366,7 @@ namespace
             const bool inHeap = (guest >= Guest::PhysicalHeapBase && guest < Guest::PhysicalHeapLimit) ||
                                 (guest >= Guest::VirtualHeapBase && guest < Guest::VirtualHeapLimit);
             static std::atomic<int> strays{ 0 };
-            if (inHeap && strays.fetch_add(1) < 16)
+            if (inHeap && (strays.load(std::memory_order_relaxed) < 16 && strays.fetch_add(1) < 16))
             {
                 uint32_t functions[10] = {};
                 const int count = Sampler::WalkGuestStack(info->ContextRecord, functions, 10);
@@ -401,8 +401,8 @@ namespace
             // A run through memory: hundreds of megabytes committed on demand
             // is a pointer gone wild, and the thread it is on is named.
             static std::atomic<int> runaway{ 0 };
-            const bool running = g_demandCommitted > (256ull << 20) && runaway.fetch_add(1) < 12;
-            if ((!inImage && !inHeaps && announced.fetch_add(1) < 12) || running)
+            const bool running = g_demandCommitted > (256ull << 20) && (runaway.load(std::memory_order_relaxed) < 12 && runaway.fetch_add(1) < 12);
+            if ((!inImage && !inHeaps && (announced.load(std::memory_order_relaxed) < 12 && announced.fetch_add(1) < 12)) || running)
             {
                 uint32_t functions[8] = {};
                 const int count = Sampler::WalkGuestStack(info->ContextRecord, functions, 8);
@@ -709,7 +709,7 @@ namespace
                 }
 
                 static int announced = 0;
-                if (announced++ < 24)
+                if ((announced < 24 && announced++ < 24))
                     printf("  variable import %s (%s ordinal %u) at 0x%08X -> 0x%08X\n",
                         name ? name : "?", libraries[i].c_str(), ordinal, slot, variable);
             }

@@ -44,7 +44,7 @@ namespace
         // file opened instead (a second level's load is past eighty).
         static const long from = []() { const char* t = getenv("COD3_TRACEPOOL"); const long v = t ? strtol(t, nullptr, 10) : 0; return v > 1 ? v : 40L; }();
         if (!Enabled() || Kernel::Stats().filesOpened.load(std::memory_order_relaxed) < uint64_t(from)) return;
-        if (g_lines.fetch_add(1) >= LineLimit) return;
+        if ((g_lines.load(std::memory_order_relaxed) >= LineLimit || g_lines.fetch_add(1) >= LineLimit)) return;
         const uint32_t block = Guest::Read32(base, device + 10768);
         printf("pool: %-9s os %-5lu at %08X lap %u segment %08X.. next %08X recording %08X/%u "
                "gpu word %08X counter %u owner %u pending %u/%u flags %02X%02X  [%08X %08X]\n",
@@ -284,7 +284,7 @@ PPC_FUNC(decomp_sub_822FDB70);
 PPC_FUNC(sub_822FDB70)
 {
     static std::atomic<int> announced{ 0 };
-    if (announced.fetch_add(1) < 8)
+    if ((announced.load(std::memory_order_relaxed) < 8 && announced.fetch_add(1) < 8))
     {
         printf("pool: the title's own GPU timeout fired on os thread %lu, from %08X\n", GetCurrentThreadId(), uint32_t(ctx.lr));
         fflush(stdout);

@@ -574,7 +574,7 @@ PPC_FUNC(__imp__NtPulseEvent)
                 if (entry.second.object == ctx.r3.u32) waiting++;
         }
         static std::atomic<int> announced{ 0 };
-        if (announced.fetch_add(1) < 120)
+        if ((announced.load(std::memory_order_relaxed) < 120 && announced.fetch_add(1) < 120))
         {
             printf("pulse: 0x%08X from 0x%08X released %d waiter%s\n",
                 ctx.r3.u32, uint32_t(ctx.lr), waiting, waiting == 1 ? "" : "s");
@@ -918,7 +918,7 @@ PPC_FUNC(__imp__KeSetEvent)
     // COD3_XMATRACE: the mixer's two events, the first few times.
     static const bool audioTrace = getenv("COD3_XMATRACE") != nullptr;
     static int shown = 0;
-    if (audioTrace && (event == 0x8291EB7Cu || event == 0x8291EB6Cu) && shown++ < 40)
+    if (audioTrace && (event == 0x8291EB7Cu || event == 0x8291EB6Cu) && (shown < 40 && shown++ < 40))
     {
         printf("title: set event %08X (was %u) from %08X on thread %lu\n", event, previous, uint32_t(ctx.lr), GetCurrentThreadId());
         fflush(stdout);
@@ -1463,7 +1463,7 @@ PPC_FUNC(__imp__NtSetTimerEx)
     if (ctx.r5.u32 != 0)
     {
         static std::atomic<int> shown{ 0 };
-        if (shown.fetch_add(1) < 4)
+        if ((shown.load(std::memory_order_relaxed) < 4 && shown.fetch_add(1) < 4))
         {
             printf("object: timer 0x%08X has a completion routine 0x%08X, which this runtime does not call\n", handle, ctx.r5.u32);
             fflush(stdout);

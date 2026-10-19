@@ -322,7 +322,7 @@ namespace
 
     void DumpDraw(const char* which, uint32_t header, uint32_t w1, uint32_t w2)
     {
-        if (g_drawsDumped.fetch_add(1) >= 2) return;
+        if ((g_drawsDumped.load(std::memory_order_relaxed) >= 2 || g_drawsDumped.fetch_add(1) >= 2)) return;
         printf("draw: %s header %08X payload %08X %08X -> count %u, prim %u\n",
             which, header, w1, w2, w1 >> 16, w1 & 0x3F);
         fflush(stdout);
@@ -332,14 +332,17 @@ namespace
     // resolve destination are not guessed: on the first draw of each primitive
     // type the whole render backend block is printed, and the addresses in it
     // are matched against what VdSwap reports as the front buffer.
-    std::mutex g_stateMutex;
-    std::map<uint32_t, int> g_statedPrimitives;
+    // A bit for each of the 64 primitive types, tested without a lock: this
+    // runs on every draw, and a counter there wraps past two billion draws
+    // (two hours at 300 thousand a second) and then prints every draw.
+    std::atomic<uint64_t> g_statedPrimitives{ 0 };
 
     void DumpDrawState(uint32_t primitive)
     {
         {
-            std::lock_guard<std::mutex> lock(g_stateMutex);
-            if (g_statedPrimitives[primitive]++ >= 1) return;
+            const uint64_t bit = 1ull << (primitive & 63);
+            if ((g_statedPrimitives.load(std::memory_order_relaxed) & bit) != 0) return;
+            if ((g_statedPrimitives.fetch_or(bit) & bit) != 0) return;
         }
 
         const uint32_t mode = Gpu::ReadRegister(Gpu::ApertureBase + 0x2208 * 4) & 7;
@@ -506,7 +509,7 @@ namespace
             pixel = Render::CurrentProgramHash(true);
             if (told.load() < 80)
                 NativeState::DiffImage([](uint32_t reg, uint32_t mine, uint32_t file) {
-                    if (told.fetch_add(1) < 80)
+                    if ((told.load(std::memory_order_relaxed) < 80 && told.fetch_add(1) < 80))
                         printf("native: a draw (ps %016llx) has %04X = %08X from its record, %08X in the register file\n",
                             (unsigned long long)pixel, reg, mine, file);
                 });
@@ -614,7 +617,7 @@ namespace
         // COD3_TRACELUT=N: the first N writes to these registers.
         static const int traceLut = []() { const char* t = getenv("COD3_TRACELUT"); return t ? int(strtol(t, nullptr, 10)) : 0; }();
         static std::atomic<int> traced{ 0 };
-        if (traceLut > 0 && traced.fetch_add(1) < traceLut)
+        if (traceLut > 0 && (traced.load(std::memory_order_relaxed) < traceLut && traced.fetch_add(1) < traceLut))
             printf("gpu: lut register %04X = %08X (%s)\n", index, value, t_writeSource ? t_writeSource : "a register write");
         std::lock_guard<std::mutex> lock(g_lutMutex);
         switch (index)
@@ -688,7 +691,7 @@ namespace
             // two sizes is a picture that jumps on the screen.
             static uint32_t lastWidth = 0, lastHeight = 0;
             static int announced = 0;
-            if ((width != lastWidth || height != lastHeight) && announced++ < 40)
+            if ((width != lastWidth || height != lastHeight) && (announced < 40 && announced++ < 40))
             {
                 printf("video: swap of %08X at %ux%u\n", surface, width, height);
                 fflush(stdout);
@@ -705,7 +708,7 @@ namespace
             static int announced = 0;
             reached++;
             const int64_t ahead = int64_t(Kernel::Stats().swaps.load(std::memory_order_relaxed)) - int64_t(reached);
-            if (ahead != lastAhead && announced++ < 60)
+            if (ahead != lastAhead && (announced < 60 && announced++ < 60))
             {
                 printf("video: the title is %lld swaps ahead of the GPU at swap %llu\n", (long long)ahead, (unsigned long long)reached);
                 fflush(stdout);
@@ -747,7 +750,7 @@ namespace
         }
 
         static std::atomic<int> announced{ 0 };
-        if (announced.fetch_add(1) < 12)
+        if ((announced.load(std::memory_order_relaxed) < 12 && announced.fetch_add(1) < 12))
         {
             printf("gpu: fence write of 0x%08X to physical 0x%08X\n", written, target);
             fflush(stdout);
@@ -924,7 +927,7 @@ namespace
         if (levelSince == 0 && Kernel::Stats().filesOpened.load(std::memory_order_relaxed) >= 40) levelSince = now;
         if (levelSince == 0 || now - levelSince < 14) return false;
         static std::atomic<int> lines{ 0 };
-        return lines.fetch_add(1) < 30000;
+        return (lines.load(std::memory_order_relaxed) < 30000 && lines.fetch_add(1) < 30000);
     }
 
     void LoadConstantsFromMemory(uint32_t address, uint32_t offsetAndType, uint32_t count)
@@ -1021,7 +1024,7 @@ namespace
     void TraceShaderLoad(bool pixel, uint32_t startSize, uint32_t sizeDwords)
     {
         if (ShaderLoadTraceLimit() <= 0 || Kernel::Stats().filesOpened.load(std::memory_order_relaxed) < 40) return;
-        if (g_shaderLoadsTraced.fetch_add(1) >= ShaderLoadTraceLimit()) return;
+        if ((g_shaderLoadsTraced.load(std::memory_order_relaxed) >= ShaderLoadTraceLimit() || g_shaderLoadsTraced.fetch_add(1) >= ShaderLoadTraceLimit())) return;
         printf("gpu: load %s start %u size %u hash %016llx\n", pixel ? "ps" : "vs", startSize >> 16, sizeDwords,
             (unsigned long long)Render::CurrentProgramHash(pixel));
     }
@@ -1258,7 +1261,7 @@ void Gpu::WriteRegister(uint32_t address, uint32_t value)
         Timeline::Mark("scratch", mirrorTo, value);
 
         static std::atomic<int> announced{ 0 };
-        if (announced.fetch_add(1) < 40)
+        if ((announced.load(std::memory_order_relaxed) < 40 && announced.fetch_add(1) < 40))
         {
             printf("gpu: scratch register %u = 0x%08X, mirrored to physical "
                    "0x%08X\n", (address - ApertureBase) / 4 - 0x578, value, mirrorTo);
@@ -1382,7 +1385,7 @@ uint32_t Gpu::ProcessRing(uint32_t ringBase, uint32_t ringSizeDwords,
             if (baseRegister >= 0x1C0 && baseRegister + count > 0x1DC && baseRegister < 0x200)
             {
                 static std::atomic<int> announced{ 0 };
-                if (announced.fetch_add(1) < 8)
+                if ((announced.load(std::memory_order_relaxed) < 8 && announced.fetch_add(1) < 8))
                 {
                     const uint32_t from = cursor > 24 ? cursor - 24 : 0;
                     printf("gpu: ring register write of %u from 0x%04X, header 0x%08X, "
@@ -1558,7 +1561,7 @@ uint32_t Gpu::ProcessRing(uint32_t ringBase, uint32_t ringSizeDwords,
                 if (tracePool && Kernel::Stats().filesOpened.load(std::memory_order_relaxed) >= 40)
                 {
                     static std::atomic<int> announced{ 0 };
-                    if (announced.fetch_add(1) < 3000)
+                    if ((announced.load(std::memory_order_relaxed) < 3000 && announced.fetch_add(1) < 3000))
                     {
                         printf("pool:   ring runs buffer %08X, %u dwords, at ring %u\n",
                             target, targetDwords, cursor);
@@ -1619,7 +1622,7 @@ uint32_t Gpu::ProcessRing(uint32_t ringBase, uint32_t ringSizeDwords,
             if (distance != 0 && length > distance)
             {
                 static std::atomic<int> announced{ 0 };
-                if (announced.fetch_add(1) < 6)
+                if ((announced.load(std::memory_order_relaxed) < 6 && announced.fetch_add(1) < 6))
                 {
                     const uint32_t now = Gpu::WritePointer();
                     printf("gpu: a %u dword packet at ring dword %u runs past the write "
@@ -1679,8 +1682,12 @@ namespace
             items.swap(t_items);
         }
 
+        // Looked at before it is counted: this runs for every buffer, and a
+        // count kept going wrapped after two billion (half an hour of play
+        // with the native lists, each packet its own buffer) and then printed
+        // every one of them, the game down to two frames a second.
         static std::atomic<int> announced{ 0 };
-        if (announced.fetch_add(1) < 3)
+        if ((announced.load(std::memory_order_relaxed) < 3 && announced.fetch_add(1) < 3))
         {
             printf("gpu: indirect buffer at 0x%08X, %u dwords, starts:", base, dwords);
             for (uint32_t i = 0; i < 6 && i < dwords; i++)
@@ -1728,7 +1735,7 @@ namespace
                 if (baseRegister != 0 && baseRegister >= 0x1C0 && baseRegister + count > 0x1DC && baseRegister < 0x200)
                 {
                     static std::atomic<int> announced{ 0 };
-                    if (announced.fetch_add(1) < 20)
+                    if ((announced.load(std::memory_order_relaxed) < 20 && announced.fetch_add(1) < 20))
                     {
                         printf("gpu: register write of %u from 0x%04X, header 0x%08X, "
                                "at dword %u of a %u dword buffer at 0x%08X\n",
@@ -2202,7 +2209,7 @@ void Mmio::CallIndirect(PPCContext& ctx, uint8_t* base, uint32_t address)
     if (traceModule && (Modules::Contains(address) != Modules::Contains(uint32_t(ctx.lr))))
     {
         static std::atomic<int> crossings{ 0 };
-        if (crossings.fetch_add(1) < 400) tracing = true;
+        if ((crossings.load(std::memory_order_relaxed) < 400 && crossings.fetch_add(1) < 400)) tracing = true;
     }
     if (tracing)
     {

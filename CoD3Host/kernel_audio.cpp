@@ -47,7 +47,7 @@ namespace
     {
         if (!XmaTrace()) return;
         static std::atomic<int> count{ 0 };
-        if (count.fetch_add(1) >= 2000) return;
+        if ((count.load(std::memory_order_relaxed) >= 2000 || count.fetch_add(1) >= 2000)) return;
         printf("xma: %s(0x%08X, 0x%08X, 0x%08X) from 0x%08X\n",
             name, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, uint32_t(ctx.lr));
         fflush(stdout);
@@ -238,7 +238,7 @@ namespace
                 if (OutputPtr(base, context) != state.output)
                 {
                     static std::atomic<int> told{ 0 };
-                    if (told.fetch_add(1) < 20)
+                    if ((told.load(std::memory_order_relaxed) < 20 && told.fetch_add(1) < 20))
                     {
                         printf("xma: context 0x%08X would write to 0x%08X, but was initialised with 0x%08X\n",
                             context, OutputPtr(base, context), state.output);
@@ -274,7 +274,7 @@ namespace
                     if (XmaTrace())
                     {
                         static std::atomic<int> count{ 0 };
-                        if (count.fetch_add(1) < 40)
+                        if ((count.load(std::memory_order_relaxed) < 40 && count.fetch_add(1) < 40))
                         {
                             const uint8_t* ring = Guest::Ptr(Guest::PhysicalAlias(OutputPtr(base, context)));
                             printf("xma:   decoded %u blocks this enable; ring words %02X%02X%02X%02X %02X%02X%02X%02X ... write %u read %u valid %u%s",
@@ -377,7 +377,7 @@ PPC_FUNC(__imp__XMAReleaseContext)
     }
     {
         static std::atomic<int> told{ 0 };
-        if (told.fetch_add(1) < 40) { printf("xma: context 0x%08X released%s\n", ctx.r3.u32, known ? "" : " (not known)"); fflush(stdout); }
+        if ((told.load(std::memory_order_relaxed) < 40 && told.fetch_add(1) < 40)) { printf("xma: context 0x%08X released%s\n", ctx.r3.u32, known ? "" : " (not known)"); fflush(stdout); }
     }
     ctx.r3.u32 = X_ERROR_SUCCESS;
 }
@@ -415,7 +415,7 @@ PPC_FUNC(__imp__XMAInitializeContext)
 
     {
         static std::atomic<int> announced{ 0 };
-        if (announced.fetch_add(1) < 3 || XmaTrace())
+        if ((announced.load(std::memory_order_relaxed) < 3 && announced.fetch_add(1) < 3) || XmaTrace())
         {
             printf("xma: context 0x%08X: inputs 0x%08X x%u and 0x%08X x%u, read offset %u bits, output 0x%08X x%u blocks, "
                    "%u subframes, stereo %u, %d Hz, loop %u..%u x%u%s",
@@ -474,7 +474,7 @@ PPC_FUNC(__imp__XMAEnableContext)
         {
             static auto first = std::chrono::steady_clock::now();
             static std::atomic<int> count{ 0 };
-            if (count.fetch_add(1) < 200)
+            if ((count.load(std::memory_order_relaxed) < 200 && count.fetch_add(1) < 200))
                 printf("xma:   enable at %.1f ms on thread %lu%s", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - first).count(), GetCurrentThreadId(), "\n");
         }
     }
@@ -505,7 +505,7 @@ namespace
         if (XmaTrace())
         {
             static std::atomic<int> count{ 0 };
-            if (count.fetch_add(1) < 400)
+            if ((count.load(std::memory_order_relaxed) < 400 && count.fetch_add(1) < 400))
                 printf("xma:   -> word %u bits %u+%u = %u (write %u read %u valid %u in0 %u in1 %u)%s", word, shift, bits, value,
                     WriteOffset(base, context), ReadOffset(base, context), OutputValid(base, context), Input0Valid(base, context), Input1Valid(base, context), "\n");
         }

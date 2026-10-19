@@ -99,7 +99,7 @@ extern "C" PPC_FUNC(__imp__sub_824E03F0);
 PPC_FUNC(sub_824E03F0)
 {
     static std::atomic<int> s_walks{ 0 };
-    if (Wanted() && Plausible(ctx.r3.u32) && Guest::Read32(base, ctx.r3.u32 + 28) == 0 && s_walks.fetch_add(1) < 40)
+    if (Wanted() && Plausible(ctx.r3.u32) && Guest::Read32(base, ctx.r3.u32 + 28) == 0 && (s_walks.load(std::memory_order_relaxed) < 40 && s_walks.fetch_add(1) < 40))
     {
         const int count = int32_t(Guest::Read32(base, CountAddress));
         printf("table: walk by %08X for %08X, os %lu, count %d\n", ctx.r3.u32, uint32_t(ctx.lr), GetCurrentThreadId(), count);

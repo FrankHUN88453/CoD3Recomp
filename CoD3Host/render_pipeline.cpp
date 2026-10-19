@@ -331,7 +331,7 @@ RenderState::Handle RenderPipeline::Rasterizer(uint32_t suScModeControl, bool sc
     if (const uint32_t handle = g_rasterizer.Find(key)) return handle;
     // Each new offset once, to see what the title asks for.
     static int announced = 0;
-    if ((scale != 0.0f || offset != 0.0f) && announced++ < 12)
+    if ((scale != 0.0f || offset != 0.0f) && (announced < 12 && announced++ < 12))
     {
         printf("render: polygon offset scale %g offset %g (mode control %08X)\n", scale, offset, suScModeControl);
         fflush(stdout);

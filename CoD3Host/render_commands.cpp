@@ -285,7 +285,7 @@ namespace
             // The first few, with their state: what a draw with nowhere to
             // draw is asking for.
             static int announced = 0;
-            if (announced++ < 6)
+            if ((announced < 6 && announced++ < 6))
             {
                 printf("render: draw with no target: primitive %u, %u indices, mode %u, colour mask %08X, depth control %08X, targets written %X, colour info %08X, depth info %08X, vs %016llx ps %016llx\n",
                     state.primitive, state.indexCount, state.modeControl, state.colorMask, state.depthControl, ps->colourTargets, state.colorInfo[0], state.depthInfo,
@@ -337,7 +337,7 @@ namespace
         static std::atomic<int> said{ 0 };
         static uint64_t last = 0;
         const uint64_t what = (uint64_t(words[1]) << 32) ^ (uint64_t(slot) << 8) ^ uint64_t(desc.Format);
-        if (what == last || said.fetch_add(1) >= 100) return;
+        if (what == last || (said.load(std::memory_order_relaxed) >= 100 || said.fetch_add(1) >= 100)) return;
         last = what;
         printf("render: frame %llu, %s texture %u, format %u at %08X (%ux%u), is bound to a view of DXGI format %u%s\n",
             (unsigned long long)RenderInternal::Swaps(), stage == 0 ? "pixel" : "vertex", slot, format, words[1] & 0xFFFFF000u,
@@ -426,7 +426,7 @@ namespace
             if ((word1 & 3) != 2)
             {
                 static int announced = 0;
-                if (announced++ < 4) printf("render: a vertex buffer in byte order %u, drawn as order 2\n", word1 & 3);
+                if ((announced < 4 && announced++ < 4)) printf("render: a vertex buffer in byte order %u, drawn as order 2\n", word1 & 3);
             }
             const Handle buffer = RenderResources::VertexBufferFor(word0 & ~3u, ((word1 >> 2) & 0xFFFFFF) * 4, 2);
             ID3D11ShaderResourceView* view = RenderResources::VertexBufferView(buffer);
@@ -769,7 +769,7 @@ namespace
         if (!past) return;
         static std::atomic<int> said{ 0 };
         static uint64_t lastHash = 0;
-        if (vs->hash == lastHash || said.fetch_add(1) >= 60) return;
+        if (vs->hash == lastHash || (said.load(std::memory_order_relaxed) >= 60 || said.fetch_add(1) >= 60)) return;
         lastHash = vs->hash;
         printf("render: frame %llu, vs %016llx: %u indices (%u resets) from %u to %u, offset %d, clamp %u..%u, the buffer has %u vertices\n",
             (unsigned long long)RenderInternal::Swaps(), (unsigned long long)vs->hash, state.indexCount, resets, lowest, highest,
@@ -1090,7 +1090,7 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
         // The host draws a point as one pixel; a wider one is noted.
         out.topology = D3D11_PRIMITIVE_TOPOLOGY_POINTLIST;
         static int announced = 0;
-        if (((state.pointSize & 0xFFFF) > 8 || (state.pointSize >> 16) > 8) && announced++ < 4)
+        if (((state.pointSize & 0xFFFF) > 8 || (state.pointSize >> 16) > 8) && (announced < 4 && announced++ < 4))
             printf("render: a point list of %u with a point size of %u by %u eighths of a pixel, drawn as pixels\n", state.indexCount, state.pointSize & 0xFFFF, state.pointSize >> 16);
         break;
     }

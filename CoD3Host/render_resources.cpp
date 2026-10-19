@@ -2044,7 +2044,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
                 }
                 if (entry.dense) entry.fingerprint = 0;   // the next frame's look sends it whole if it is not the same
                 static int told = 0;
-                if (told++ < 8)
+                if ((told < 8 && told++ < 8))
                     printf("render: the vertex buffer at %08X (%u bytes) was written within a frame: %llu bytes of it sent again for a later draw\n",
                         physical, span, (unsigned long long)sent);
                 if (sent != 0)
@@ -2090,7 +2090,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
                 else if (Fingerprint(data, entry.seen, false) == entry.sampled) return handle;
                 entry.midFrame = true;
                 static int announced = 0;
-                if (announced++ < 16)
+                if ((announced < 16 && announced++ < 16))
                     printf("render: the vertex buffer at %08X (%u bytes) changes within a frame; every draw looks at it now\n",
                         physical, entry.seen);
             }

@@ -168,7 +168,7 @@ namespace
         Kernel::Stats().bytesAllocated.fetch_add(size, std::memory_order_relaxed);
         // The first few reuses, for telling a reuse problem from another.
         static int announced = 0;
-        if (announced++ < 8)
+        if ((announced < 8 && announced++ < 8))
         {
             printf("memory: %s 0x%08X, %u KB, given out again from a free range of %u KB freed %llu ms before\n",
                 physical ? "physical" : "virtual", start, size >> 10, rangeSize >> 10, (unsigned long long)(GetTickCount64() - freed));
@@ -390,7 +390,7 @@ PPC_FUNC(__imp__NtFreeVirtualMemory)
         // is also the one place this runtime erases memory it was not asked to
         // erase if the recorded size is wrong.
         static std::atomic<int> announced{ 0 };
-        if (announced.fetch_add(1) < 4)
+        if ((announced.load(std::memory_order_relaxed) < 4 && announced.fetch_add(1) < 4))
         {
             printf("memory: decommit zeroes 0x%08X to 0x%08X\n",
                 address, address + size);
@@ -478,7 +478,7 @@ PPC_FUNC(__imp__MmFreePhysicalMemory)
     auto found = Regions().find(address);
     {
         static std::atomic<int> announced{ 0 };
-        if (announced.fetch_add(1) < 8)
+        if ((announced.load(std::memory_order_relaxed) < 8 && announced.fetch_add(1) < 8))
         {
             printf("memory: physical free of 0x%08X (%u KB), from 0x%08X\n",
                 address, found != Regions().end() ? found->second.size >> 10 : 0u, uint32_t(ctx.lr));
@@ -609,7 +609,7 @@ PPC_FUNC(__imp__MmQueryAddressProtect)
         {
             static const bool logged = getenv("COD3_PROTECTLOG") != nullptr;
             static std::atomic<int> announced{ 0 };
-            if (logged && announced.fetch_add(1) < 400)
+            if (logged && (announced.load(std::memory_order_relaxed) < 400 && announced.fetch_add(1) < 400))
             {
                 printf("protect: 0x%08X -> 0 (freed), from 0x%08X\n", address, uint32_t(ctx.lr));
                 fflush(stdout);
@@ -623,7 +623,7 @@ PPC_FUNC(__imp__MmQueryAddressProtect)
     // COD3_PROTECTLOG=1: every ask, for seeing what the title walks.
     static const bool logged = getenv("COD3_PROTECTLOG") != nullptr;
     static std::atomic<int> announced{ 0 };
-    if (logged && announced.fetch_add(1) < 400)
+    if (logged && (announced.load(std::memory_order_relaxed) < 400 && announced.fetch_add(1) < 400))
     {
         printf("protect: 0x%08X -> %u, from 0x%08X\n", address, ctx.r3.u32, uint32_t(ctx.lr));
         fflush(stdout);

@@ -87,7 +87,7 @@ void Kernel::DeliverApcs(PPCContext& ctx, bool alertable)
             if (age > std::chrono::seconds(2))
             {
                 static std::atomic<int> announced{ 0 };
-                if (announced.fetch_add(1) < 3)
+                if ((announced.load(std::memory_order_relaxed) < 3 && announced.fetch_add(1) < 3))
                 {
                     printf("apc: a completion routine has waited two seconds "
                            "for an alertable wait on thread %u\n",

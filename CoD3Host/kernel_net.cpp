@@ -471,7 +471,7 @@ PPC_FUNC(__imp__NetDll_sendto)
             each.sin_addr = target;
             const int sent = sendto(host, reinterpret_cast<const char*>(base + ctx.r5.u32), int(ctx.r6.u32), int(ctx.r7.u32),
                                     reinterpret_cast<sockaddr*>(&each), sizeof(each));
-            if (shown.fetch_add(1) < 8)
+            if ((shown.load(std::memory_order_relaxed) < 8 && shown.fetch_add(1) < 8))
             {
                 printf("net: socket %u broadcast %u bytes to %s:%u%s\n", ctx.r4.u32, ctx.r6.u32,
                     Dotted(each.sin_addr).c_str(), ntohs(each.sin_port), sent == SOCKET_ERROR ? " (failed)" : "");
@@ -485,7 +485,7 @@ PPC_FUNC(__imp__NetDll_sendto)
         : send(host, reinterpret_cast<const char*>(base + ctx.r5.u32), int(ctx.r6.u32), int(ctx.r7.u32));
     if (result != SOCKET_ERROR) g_sent.fetch_add(1);
     static std::atomic<int> shown{ 0 };
-    if (shown.fetch_add(1) < 12)
+    if ((shown.load(std::memory_order_relaxed) < 12 && shown.fetch_add(1) < 12))
     {
         printf("net: socket %u sent %u bytes to %s:%u%s\n", ctx.r4.u32, ctx.r6.u32,
             addressed ? Dotted(to.sin_addr).c_str() : "its peer", addressed ? ntohs(to.sin_port) : 0,
@@ -531,7 +531,7 @@ PPC_FUNC(__imp__NetDll_recvfrom)
         if (ctx.r8.u32 != 0) ToGuest(base, from, ctx.r8.u32);
         if (ctx.r9.u32 != 0) Guest::Write32(base, ctx.r9.u32, 16);
         static std::atomic<int> shown{ 0 };
-        if (shown.fetch_add(1) < 12)
+        if ((shown.load(std::memory_order_relaxed) < 12 && shown.fetch_add(1) < 12))
         {
             printf("net: socket %u received %d bytes from %s:%u\n", ctx.r4.u32, result,
                 Dotted(from.sin_addr).c_str(), ntohs(from.sin_port));
@@ -612,7 +612,7 @@ PPC_FUNC(__imp__NetDll_XNetXnAddrToInAddr)
     }
     memcpy(base + ctx.r6.u32, &chosen, 4);
     static std::atomic<int> shown{ 0 };
-    if (shown.fetch_add(1) < 8)
+    if ((shown.load(std::memory_order_relaxed) < 8 && shown.fetch_add(1) < 8))
     {
         printf("net: a player's address resolved to %s\n", Dotted(chosen).c_str());
         fflush(stdout);
