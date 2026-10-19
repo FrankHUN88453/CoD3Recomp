@@ -120,22 +120,19 @@ namespace
         g_mouseHeld.store(hold);
     }
 
-    // How far the pointer moved since the last look, in stick units. Full
-    // deflection at about twenty five pixels in a sixtieth of a second, a
-    // brisk turn rather than a twitch.
-    void ReadMouse(int16_t& outX, int16_t& outY)
+    // The mouse's movement since the last take, in its own counts (or the
+    // pointer's pixels), false when the window does not hold it. Taken
+    // whether it is used or not, so that what piled up while the menu was
+    // open is not a jump the moment the window takes the mouse back.
+    std::mutex g_takeMutex;   // the pad's read and the view hook may both take
+    bool TakeMovement(long& dx, long& dy, bool& raw)
     {
-        outX = 0;
-        outY = 0;
-
-        // The mouse's own movement is taken whether it is used or not, so
-        // that what piled up while the menu was open is not a jump the
-        // moment the window takes the mouse back.
+        std::lock_guard<std::mutex> lock(g_takeMutex);
+        dx = 0;
+        dy = 0;
         long rawX = 0, rawY = 0;
-        const bool raw = Window::TakeRawMouse(rawX, rawY) && Settings::Get().rawMouse;
-        if (!g_mouseHeld.load()) return;
-
-        long dx = 0, dy = 0;
+        raw = Window::TakeRawMouse(rawX, rawY) && Settings::Get().rawMouse;
+        if (!g_mouseHeld.load()) return false;
         if (raw)
         {
             dx = rawX;
@@ -150,11 +147,35 @@ namespace
         else
         {
             POINT now{};
-            if (!GetCursorPos(&now)) return;
+            if (!GetCursorPos(&now)) return false;
             dx = now.x - g_centre.x;
             dy = now.y - g_centre.y;
             if (dx != 0 || dy != 0) SetCursorPos(g_centre.x, g_centre.y);
         }
+        return true;
+    }
+
+    // When the view hook last took the look (mouse_look.cpp): while it does,
+    // the mouse is not the right stick.
+    std::atomic<uint64_t> g_lookTakenAt{ 0 };
+    bool LookIsTaken()
+    {
+        static const bool stick = getenv("COD3_STICKMOUSE") != nullptr;
+        return !stick && GetTickCount64() - g_lookTakenAt.load(std::memory_order_relaxed) < 250;
+    }
+
+    // How far the pointer moved since the last look, in stick units, when the
+    // mouse is a stick (in a mounted gun or a vehicle, or with
+    // COD3_STICKMOUSE=1). Full deflection at about twenty five pixels in a
+    // sixtieth of a second, a brisk turn rather than a twitch.
+    void ReadMouse(int16_t& outX, int16_t& outY)
+    {
+        outX = 0;
+        outY = 0;
+        if (LookIsTaken()) return;
+        long dx = 0, dy = 0;
+        bool raw = false;
+        if (!TakeMovement(dx, dy, raw)) return;
 
         // COD3_MOUSELOG=1: what the look took, once a second, to see that
         // the mouse's own counts arrive and how many a turn is worth.
@@ -615,6 +636,14 @@ bool Input::MouseHeld()
 {
     return g_mouseHeld.load();
 }
+
+bool Input::TakeLook(long& dx, long& dy)
+{
+    bool raw = false;
+    return TakeMovement(dx, dy, raw);
+}
+
+void Input::LookTaken() { g_lookTakenAt.store(GetTickCount64(), std::memory_order_relaxed); }
 
 uint32_t Input::PacketNumber()
 {

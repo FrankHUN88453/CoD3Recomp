@@ -49,7 +49,7 @@ namespace Settings
         bool subtitles = true;        // the title's cg_subtitles (on by default there too)
         bool console = false;         // the key left of 1 opens the console (the host's: the title's own was left out of this build)
         bool controller = true;       // read a pad when one is there
-        float mouseSensitivity = 1.0f;   // both axes, 0.1 .. 3
+        float mouseSensitivity = 1.0f;   // the look's, both axes, 0.05 .. 5: 1 is 0.066 degrees a count (mouse_look.cpp); look_sensitivity in the ini
         bool rawMouse = true;            // the mouse's own counts, not the pointer's travel
         int keys[ActionCount] = {};
     };

@@ -36,6 +36,13 @@ namespace Input
     // stick. Clicking in the window takes it; Escape gives it back.
     bool MouseHeld();
 
+    // The mouse looking around straight into the view angles
+    // (mouse_look.cpp): the counts it moved since the last call, false
+    // when the window does not hold it. LookTaken says the view hook
+    // takes the look this frame, so the mouse stays off the right stick.
+    bool TakeLook(long& dx, long& dy);
+    void LookTaken();
+
     // Changes only when the buttons do. Titles use it to tell a held button
     // from a new press without comparing states themselves.
     uint32_t PacketNumber();

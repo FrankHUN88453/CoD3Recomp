@@ -352,8 +352,8 @@ namespace
                 }
                 if (ImGui::BeginTabItem("Controls"))
                 {
-                    ImGui::SliderFloat("Mouse sensitivity", &g_edit.mouseSensitivity, 0.1f, 3.0f, "%.2f");
-                    ImGui::TextDisabled("Both axes alike.");
+                    ImGui::SliderFloat("Mouse sensitivity", &g_edit.mouseSensitivity, 0.05f, 5.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+                    ImGui::TextDisabled("Turns the view by the mouse's own movement, both axes alike, as the PC games do.");
                     ImGui::Checkbox("Raw mouse input", &g_edit.rawMouse);
                     ImGui::SameLine();
                     ImGui::TextDisabled("(the mouse's own movement, without Windows' pointer speed and acceleration)");

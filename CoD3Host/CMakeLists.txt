@@ -58,6 +58,7 @@ add_executable(CoD3 WIN32
     "scheduler.cpp"
     "window.cpp"
     "input.cpp"
+    "mouse_look.cpp"
     "settings.cpp"
     "overlay.cpp"
     "../thirdparty/imgui/imgui.cpp"
