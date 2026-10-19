@@ -679,6 +679,11 @@ namespace
                             ImGui::TableNextRow();
                             ImGui::TableNextColumn();
                             ImGui::TextUnformatted(Settings::ActionName(Settings::Action(i)));
+#ifndef COD3_MP
+                            if (i == Settings::BinocularsOut && ImGui::IsItemHovered())
+                                ImGui::SetTooltip("Campaign: hold to look through the binoculars, standing still\n"
+                                                  "(as holding the left stick in does on the controller).");
+#endif
                             ImGui::TableNextColumn();
                             ImGui::PushID(i);
                             const bool waiting = g_capturing == i;
