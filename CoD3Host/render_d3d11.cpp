@@ -34,8 +34,11 @@
 #include <cstring>
 #include <ctime>
 #include <filesystem>
+#include <condition_variable>
+#include <deque>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <Windows.h>
@@ -815,7 +818,9 @@ namespace
             if (g_bound.pixelShader != command.pixelShader || g_bound.flat != flat)
             {
                 ID3D11PixelShader* program = flat ? g_flatPixelShader.Get() : command.ps;
-                if (program == nullptr) program = g_depthOnlyPixelShader.Get();
+                // No pixel program: the depth cutting one, except for a shadow
+                // map's casters (render_commands.cpp's NoPixelProgramFast).
+                if (program == nullptr && command.pixelShader != 0xFFFFFFFEu) program = g_depthOnlyPixelShader.Get();
                 g_context->PSSetShader(program, nullptr, 0);
                 g_bound.pixelShader = command.pixelShader;
                 g_bound.flat = flat;
@@ -1049,19 +1054,192 @@ namespace
     // not wait; the title sees the depth that late, as glows fading in and
     // out a frame behind, which is not to be seen.
     // debug.txt depth_writeback 0 leaves it out, to compare.
+    //
+    // The title reads it at its own size (1040 by 624 for the frame, 512 by
+    // 512 for a shadow cascade), but the copy read back was the host's: at
+    // 4K the frame's depth alone is 31 MB across the bus to the CPU, and
+    // with the shadow maps over a hundred a frame, which measured 5 to 6 ms
+    // of the GPU's frame (the "resolve depth copy" lines of COD3_GPU_DRAWS,
+    // each the size of its copy over the bus's speed). So the copy is first
+    // brought down to the title's size on the GPU, a point sampled pass into
+    // a small target, and only that is read back: 2.6 MB for the frame.
+    // COD3_FULLDEPTHREADBACK=1 reads the host's whole copy as before.
     struct DepthWriteback
     {
         ComPtr<ID3D11Texture2D> staging;
+        ComPtr<ID3D11Texture2D> shrunk;             // the copy at the title's size (not "small": a Windows macro)
+        ComPtr<ID3D11RenderTargetView> shrunkView;
         D3D11_TEXTURE2D_DESC desc{};
         bool pending = false;
         uint64_t order = 0;
         uint32_t hostWidth = 0, hostHeight = 0;
         uint32_t guestBase = 0, guestPitch = 0, guestWidth = 0, guestHeight = 0, guestEndian = 0;
         bool guestFloatDepth = false;
+        bool mapped = false;               // read back and mapped, the depth thread on it or done with it
+        bool converting = false;           // the depth thread not yet done (under g_depthJobMutex)
+        std::vector<uint32_t> columns;
     };
-    constexpr int DepthWritebackSlots = 6;
+    // Enough slots for two frames' depth copies (the frame's, and its
+    // shadow maps', three to five a frame) to be in flight: the device
+    // runs up to two frames behind when the GPU is the limit, and with six
+    // a new copy found its slot still on the GPU and waited for it there,
+    // the command thread stopped until the GPU caught up.
+    constexpr int DepthWritebackSlots = 12;
     DepthWriteback g_depthWritebacks[DepthWritebackSlots];
     uint64_t g_depthWritebackOrder = 0;
+
+    // The conversion of a depth copy into the title's memory, from the
+    // texels read back. A 32 by 32 tile of four byte texels is one 4 KB
+    // block of the surface, wherever it is, and where a texel lands inside
+    // its tile depends only on its place in the tile: so the tiled address
+    // is the tile's block plus an entry of this table, not the twenty
+    // operations of TiledByteOffset for every texel. (The two agree for any
+    // pitch: checked against TiledByteOffset for every texel of every pitch
+    // the title uses.)
+    struct TileTable
+    {
+        uint16_t offset[32][32];
+        TileTable()
+        {
+            for (uint32_t y = 0; y < 32; y++)
+                for (uint32_t x = 0; x < 32; x++)
+                    offset[y][x] = uint16_t(TiledByteOffset(x, y, 32, 2));
+        }
+    };
+    const TileTable& Tiles() { static const TileTable table; return table; }
+
+    // One texel's depth as the console keeps it: 24 bits, fixed or 20e4,
+    // above eight of stencil, in the surface's byte order. Made once for
+    // each of the eight kinds, so the loop has no branch on either.
+    template <bool FloatDepth, uint32_t Endian>
+    inline uint32_t EncodeDepth(float z)
+    {
+        uint32_t depth;
+        if constexpr (FloatDepth) depth = Float32To20e4(z);
+        else depth = uint32_t((z > 0.0f ? (z < 1.0f ? z : 1.0f) : 0.0f) * 16777215.0f + 0.5f);
+        uint32_t value = depth << 8;
+        if constexpr (Endian == 1) value = ((value & 0xFF00FF00u) >> 8) | ((value & 0x00FF00FFu) << 8);
+        else if constexpr (Endian == 2) value = __builtin_bswap32(value);
+        else if constexpr (Endian == 3) value = (value >> 16) | (value << 16);
+        return value;
+    }
+
+    struct DepthRows
+    {
+        const uint8_t* texels; uint32_t rowPitch;
+        uint8_t* destination;
+        const uint32_t* column;   // the host column of each of the title's, or null when they are the same
+        uint32_t hostWidth, hostHeight, guestPitch, guestWidth, guestHeight;
+    };
+
+    template <bool FloatDepth, uint32_t Endian>
+    void ConvertDepthRows(const DepthRows& d, uint32_t first, uint32_t last)
+    {
+        const TileTable& tiles = Tiles();
+        const size_t tilesAcross = ((d.guestPitch + 31u) & ~31u) >> 5;
+        for (uint32_t y = first; y < last; y++)
+        {
+            const uint32_t hy = d.guestHeight == d.hostHeight ? y
+                : std::min(d.hostHeight - 1, uint32_t(uint64_t(y) * d.hostHeight / d.guestHeight));
+            const float* row = reinterpret_cast<const float*>(d.texels + size_t(hy) * d.rowPitch);
+            const uint16_t* inTile = tiles.offset[y & 31u];
+            uint8_t* tileRow = d.destination + size_t(y >> 5) * tilesAcross * 4096u;
+            for (uint32_t x0 = 0; x0 < d.guestWidth; x0 += 32)
+            {
+                uint8_t* block = tileRow + size_t(x0 >> 5) * 4096u;
+                const uint32_t n = std::min(32u, d.guestWidth - x0);
+                if (d.column == nullptr)
+                {
+                    const float* source = row + x0;
+                    for (uint32_t i = 0; i < n; i++)
+                    {
+                        const uint32_t value = EncodeDepth<FloatDepth, Endian>(source[i]);
+                        memcpy(block + inTile[i], &value, 4);
+                    }
+                }
+                else
+                {
+                    const uint32_t* columns = d.column + x0;
+                    for (uint32_t i = 0; i < n; i++)
+                    {
+                        const uint32_t value = EncodeDepth<FloatDepth, Endian>(row[columns[i]]);
+                        memcpy(block + inTile[i], &value, 4);
+                    }
+                }
+            }
+        }
+    }
+
+    using ConvertRows = void (*)(const DepthRows&, uint32_t, uint32_t);
+    ConvertRows ConverterFor(bool floatDepth, uint32_t endian)
+    {
+        static const ConvertRows table[2][4] = {
+            { ConvertDepthRows<false, 0>, ConvertDepthRows<false, 1>, ConvertDepthRows<false, 2>, ConvertDepthRows<false, 3> },
+            { ConvertDepthRows<true, 0>,  ConvertDepthRows<true, 1>,  ConvertDepthRows<true, 2>,  ConvertDepthRows<true, 3> },
+        };
+        return table[floatDepth ? 1 : 0][endian & 3u];
+    }
+
+    // The conversion is off the command processor: it ran there, a depth
+    // copy or more a frame (the frame's and three to five shadow maps',
+    // over a million texels), and was the largest single part of the
+    // command thread's time with the native command lists on. The title
+    // reads these a frame or two late anyway, so a moment more on a thread
+    // of its own changes nothing it sees. The staging copy stays mapped
+    // while the thread works on it and is unmapped by the command thread
+    // when it is done; one thread, so two copies to the same place land in
+    // order. COD3_SYNCDEPTHWRITEBACK=1 converts on the command thread.
+    struct DepthJob { DepthWriteback* slot; DepthRows rows; ConvertRows convert; };
+    std::mutex g_depthJobMutex;
+    std::condition_variable g_depthJobWake, g_depthJobDone;
+    std::deque<DepthJob> g_depthJobs;
+
+    void DepthWorker()
+    {
+        for (;;)
+        {
+            DepthJob job;
+            {
+                std::unique_lock<std::mutex> lock(g_depthJobMutex);
+                g_depthJobWake.wait(lock, [] { return !g_depthJobs.empty(); });
+                job = g_depthJobs.front();
+                g_depthJobs.pop_front();
+            }
+            job.convert(job.rows, 0, job.rows.guestHeight);
+            {
+                std::lock_guard<std::mutex> lock(g_depthJobMutex);
+                job.slot->converting = false;
+            }
+            g_depthJobDone.notify_all();
+        }
+    }
+
+    bool DepthWorkerRunning()
+    {
+        static const bool running = [] {
+            if (getenv("COD3_SYNCDEPTHWRITEBACK") != nullptr) return false;
+            try { std::thread(DepthWorker).detach(); return true; }
+            catch (...) { return false; }
+        }();
+        return running;
+    }
+
+    // A slot the depth thread has finished with goes back: unmapped, free.
+    // With `wait`, it waits for the thread first.
+    void ReleaseDepthWriteback(DepthWriteback& slot, bool wait)
+    {
+        if (!slot.mapped) return;
+        {
+            std::unique_lock<std::mutex> lock(g_depthJobMutex);
+            if (slot.converting)
+            {
+                if (!wait) return;
+                g_depthJobDone.wait(lock, [&] { return !slot.converting; });
+            }
+        }
+        g_context->Unmap(slot.staging.Get(), 0);
+        slot.mapped = false;
+    }
 
     void FinishDepthWriteback(DepthWriteback& slot, bool wait)
     {
@@ -1070,47 +1248,45 @@ namespace
         if (hr == DXGI_ERROR_WAS_STILL_DRAWING) return;
         slot.pending = false;
         if (FAILED(hr)) return;
-        uint8_t* destination = Guest::Base + Guest::PhysicalAlias(slot.guestBase);
         const DepthWriteback& w = slot;
-        // Which host column each of the title's columns reads, worked out
-        // once rather than with a division for every pixel; and the depth's
-        // conversion and byte order with no double or branch per pixel
-        // either. This ran on the command processor's critical path, a
-        // depth copy or more a frame, and was a fifteenth of its time.
-        static thread_local std::vector<uint32_t> columns;
-        columns.resize(w.guestWidth);
-        for (uint32_t x = 0; x < w.guestWidth; x++)
-            columns[x] = std::min(w.hostWidth - 1, uint32_t(uint64_t(x) * w.hostWidth / w.guestWidth));
-        const uint32_t* column = columns.data();
-        Parallel::For(0, int(w.guestHeight), 32, [&](int first, int last)
+        DepthRows rows{};
+        rows.texels = static_cast<const uint8_t*>(mapped.pData);
+        rows.rowPitch = mapped.RowPitch;
+        rows.destination = Guest::Base + Guest::PhysicalAlias(w.guestBase);
+        rows.hostWidth = w.hostWidth; rows.hostHeight = w.hostHeight;
+        rows.guestPitch = w.guestPitch; rows.guestWidth = w.guestWidth; rows.guestHeight = w.guestHeight;
+        // Which host column each of the title's columns reads, when the
+        // two differ (the whole host copy read back), worked out once
+        // rather than with a division for every texel.
+        if (w.hostWidth != w.guestWidth)
         {
-            for (uint32_t y = uint32_t(first); y < uint32_t(last); y++)
+            slot.columns.resize(w.guestWidth);
+            for (uint32_t x = 0; x < w.guestWidth; x++)
+                slot.columns[x] = std::min(w.hostWidth - 1, uint32_t(uint64_t(x) * w.hostWidth / w.guestWidth));
+            rows.column = slot.columns.data();
+        }
+        const ConvertRows convert = ConverterFor(w.guestFloatDepth, w.guestEndian);
+        if (DepthWorkerRunning())
+        {
+            slot.mapped = true;
             {
-                const uint32_t hy = std::min(w.hostHeight - 1, uint32_t(uint64_t(y) * w.hostHeight / w.guestHeight));
-                const float* row = reinterpret_cast<const float*>(static_cast<const uint8_t*>(mapped.pData) + size_t(hy) * mapped.RowPitch);
-                for (uint32_t x = 0; x < w.guestWidth; x++)
-                {
-                    const float z = row[column[x]];
-                    const uint32_t depth = w.guestFloatDepth ? Float32To20e4(z)
-                        : uint32_t(std::min(std::max(z, 0.0f), 1.0f) * 16777215.0f + 0.5f);
-                    uint32_t value = depth << 8;
-                    switch (w.guestEndian)
-                    {
-                    case 1: value = ((value & 0xFF00FF00u) >> 8) | ((value & 0x00FF00FFu) << 8); break;
-                    case 2: value = __builtin_bswap32(value); break;
-                    case 3: value = (value >> 16) | (value << 16); break;
-                    default: break;
-                    }
-                    memcpy(destination + TiledByteOffset(x, y, w.guestPitch, 2), &value, 4);
-                }
+                std::lock_guard<std::mutex> lock(g_depthJobMutex);
+                slot.converting = true;
+                g_depthJobs.push_back(DepthJob{ &slot, rows, convert });
             }
-        });
+            g_depthJobWake.notify_one();
+            return;
+        }
+        Parallel::For(0, int(w.guestHeight), 32, [&](int first, int last) { convert(rows, uint32_t(first), uint32_t(last)); });
         g_context->Unmap(slot.staging.Get(), 0);
     }
 
-    // The copies the GPU has finished, oldest first, into the title's memory.
+    // The copies the GPU has finished, oldest first, into the title's
+    // memory; and the slots the depth thread is done with, back.
     void PollDepthWritebacks()
     {
+        for (DepthWriteback& slot : g_depthWritebacks)
+            if (slot.mapped) ReleaseDepthWriteback(slot, false);
         for (;;)
         {
             DepthWriteback* oldest = nullptr;
@@ -1137,29 +1313,60 @@ namespace
             if (!said) { said = true; printf("render: a depth copy of format %u is not written back to the title's memory\n", unsigned(desc.Format)); }
             return;
         }
+        static const bool fullReadback = getenv("COD3_FULLDEPTHREADBACK") != nullptr;
+        const uint32_t copiedWidth = std::max(1u, std::min<uint32_t>(command.width ? command.width : desc.Width, desc.Width));
+        const uint32_t copiedHeight = std::max(1u, std::min<uint32_t>(command.height ? command.height : desc.Height, desc.Height));
+        const bool shrink = !fullReadback && (command.guestWidth < copiedWidth || command.guestHeight < copiedHeight);
         PollDepthWritebacks();
-        // The slot used longest ago; if the GPU still has it, this waits.
+        // The slot used longest ago; if the GPU or the depth thread still
+        // has it, this waits.
         DepthWriteback* slot = &g_depthWritebacks[0];
+        auto busy = [](const DepthWriteback& s) { return s.pending || s.mapped; };
         for (DepthWriteback& candidate : g_depthWritebacks)
         {
-            if (!candidate.pending) { if (slot->pending || candidate.order < slot->order) slot = &candidate; }
-            else if (slot->pending && candidate.order < slot->order) slot = &candidate;
+            if (!busy(candidate)) { if (busy(*slot) || candidate.order < slot->order) slot = &candidate; }
+            else if (busy(*slot) && candidate.order < slot->order) slot = &candidate;
         }
         if (slot->pending) FinishDepthWriteback(*slot, true);
-        if (!slot->staging || slot->desc.Width != desc.Width || slot->desc.Height != desc.Height || slot->desc.Format != desc.Format)
+        if (slot->mapped) ReleaseDepthWriteback(*slot, true);
+        // What is read back: the host's copy, or the title's size of it.
+        const uint32_t readWidth = shrink ? command.guestWidth : desc.Width;
+        const uint32_t readHeight = shrink ? command.guestHeight : desc.Height;
+        if (!slot->staging || slot->desc.Width != readWidth || slot->desc.Height != readHeight || slot->desc.Format != desc.Format)
         {
             slot->staging.Reset();
+            slot->shrunk.Reset();
+            slot->shrunkView.Reset();
             D3D11_TEXTURE2D_DESC s = desc;
+            s.Width = readWidth; s.Height = readHeight;
             s.MipLevels = 1; s.ArraySize = 1; s.SampleDesc.Count = 1; s.SampleDesc.Quality = 0;
             s.Usage = D3D11_USAGE_STAGING; s.BindFlags = 0; s.CPUAccessFlags = D3D11_CPU_ACCESS_READ; s.MiscFlags = 0;
             if (FAILED(g_device->CreateTexture2D(&s, nullptr, &slot->staging))) return;
             slot->desc = s;
         }
-        g_context->CopySubresourceRegion(slot->staging.Get(), 0, 0, 0, 0, texture.Get(), 0, nullptr);
+        if (shrink)
+        {
+            if (!slot->shrunk)
+            {
+                D3D11_TEXTURE2D_DESC t{};
+                t.Width = readWidth; t.Height = readHeight; t.MipLevels = 1; t.ArraySize = 1;
+                t.Format = DXGI_FORMAT_R32_FLOAT; t.SampleDesc.Count = 1;
+                t.Usage = D3D11_USAGE_DEFAULT; t.BindFlags = D3D11_BIND_RENDER_TARGET;
+                if (FAILED(g_device->CreateTexture2D(&t, nullptr, &slot->shrunk))) return;
+                if (FAILED(g_device->CreateRenderTargetView(slot->shrunk.Get(), nullptr, &slot->shrunkView))) { slot->shrunk.Reset(); return; }
+            }
+            // Each of the title's pixels from the host pixel at its centre,
+            // as the CPU's conversion took one host pixel for each before.
+            const D3D11_VIEWPORT viewport{ 0.0f, 0.0f, float(readWidth), float(readHeight), 0.0f, 1.0f };
+            DrawQuad(command.destinationResource, desc.Width, desc.Height, 0.0f, 0.0f, float(copiedWidth), float(copiedHeight),
+                     slot->shrunkView.Get(), viewport, g_copyPixelShader.Get(), g_pointSampler.Get());
+            g_context->CopySubresourceRegion(slot->staging.Get(), 0, 0, 0, 0, slot->shrunk.Get(), 0, nullptr);
+        }
+        else g_context->CopySubresourceRegion(slot->staging.Get(), 0, 0, 0, 0, texture.Get(), 0, nullptr);
         slot->pending = true;
         slot->order = ++g_depthWritebackOrder;
-        slot->hostWidth = std::max(1u, std::min<uint32_t>(command.width ? command.width : desc.Width, desc.Width));
-        slot->hostHeight = std::max(1u, std::min<uint32_t>(command.height ? command.height : desc.Height, desc.Height));
+        slot->hostWidth = shrink ? readWidth : copiedWidth;
+        slot->hostHeight = shrink ? readHeight : copiedHeight;
         slot->guestBase = command.guestBase;
         slot->guestPitch = command.guestPitch;
         slot->guestWidth = command.guestWidth;
@@ -1170,7 +1377,13 @@ namespace
 
     void ExecuteResolve(const RenderState::ResolveCommand& command)
     {
-        struct ResolveStamp { ~ResolveStamp() { RenderStats::DrawTimed(1); } } resolveStamp;
+        // COD3_GPU_DRAWS: a resolve timed in parts, so the report says which
+        // resolves the time goes to. A stamp first, with nothing issued since
+        // the last one: what it measures is the GPU idle before the resolve,
+        // not the resolve. Then the copy, by kind and host size, and then
+        // the clears. (Keys: the top four bits D, E and F, never a draw's.)
+        const bool timed = RenderStats::DrawsTimed();
+        if (timed) RenderStats::DrawTimed(0xDull << 60);
         if (command.bindingsLost) ForgetBindings();
         if (command.copy)
         {
@@ -1188,6 +1401,9 @@ namespace
                 DrawQuad(command.source, command.sourceWidth, command.sourceHeight, command.x0, command.y0, float(command.width), float(command.height),
                          command.destination, viewport, copy, g_pointSampler.Get());
             if (command.writeBack) WriteDepthBack(command);
+            if (timed)
+                RenderStats::DrawTimed((0xEull << 60) | (command.fromDepth ? (1ull << 32) : 0ull) |
+                                       (uint64_t(command.width & 0xFFFF) << 16) | uint64_t(command.height & 0xFFFF));
         }
         if (command.colorClear)
         {
@@ -1200,6 +1416,13 @@ namespace
         }
         if (command.depthClear)
             g_context->ClearDepthStencilView(command.clearDepth, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, command.clearDepthValue, command.clearStencilValue);
+        if (timed && (command.colorClear || command.depthClear))
+        {
+            const uint32_t width = command.colorClear ? uint32_t(command.clearRect[2] - command.clearRect[0]) : 0u;
+            const uint32_t height = command.colorClear ? uint32_t(command.clearRect[3] - command.clearRect[1]) : 0u;
+            RenderStats::DrawTimed((0xFull << 60) | (command.colorClear ? (1ull << 33) : 0ull) | (command.depthClear ? (1ull << 34) : 0ull) |
+                                   (uint64_t(width & 0xFFFF) << 16) | uint64_t(height & 0xFFFF));
+        }
     }
 
     // --- the present ------------------------------------------------------------------------------------
@@ -1344,14 +1567,33 @@ namespace
             static clock::time_point due = clock::now();
             const auto period = std::chrono::nanoseconds(1000000000ll / settings.frameCap);
             auto now = clock::now();
+            const auto waitStarted = now;
             if (now - due > period * 2) due = now;   // behind by more than a frame: start the clock again
+            // A high resolution waitable timer for all but the last 0.3 ms,
+            // then a spin: Sleep(1) came back up to two milliseconds late,
+            // which at a cap of 144 or more is a third of a frame of jitter.
+            static const HANDLE timer = []() {
+                HANDLE made = CreateWaitableTimerExW(nullptr, nullptr, 0x00000002 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
+                return made;
+            }();
+            if (timer != nullptr && due - now > std::chrono::microseconds(600))
+            {
+                LARGE_INTEGER wait;
+                wait.QuadPart = -int64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(due - now - std::chrono::microseconds(300)).count() / 100);
+                if (SetWaitableTimerEx(timer, &wait, 0, nullptr, nullptr, nullptr, 0)) WaitForSingleObject(timer, INFINITE);
+                now = clock::now();
+            }
             while (now < due)
             {
-                if (due - now > std::chrono::microseconds(1500)) Sleep(1);
+                if (timer == nullptr && due - now > std::chrono::microseconds(1500)) Sleep(1);
                 else YieldProcessor();
                 now = clock::now();
             }
             due += period;
+            // The wait is idle time, not work: left out of the "cpu" the
+            // stats report, which otherwise read 14 ms at a 60 cap however
+            // little the frame cost. (Timed adds the whole present after.)
+            RenderStats::Frame().presentNanoseconds -= uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(now - waitStarted).count());
         }
         const HRESULT hr = g_swapChain->Present(vsync ? 1 : 0, (!vsync && g_tearing) ? DXGI_PRESENT_ALLOW_TEARING : 0);
         if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET)
@@ -1408,6 +1650,9 @@ namespace
         // The blur while aiming: COD3_AIMBLUR=0|1 over the settings.
         static const int aimBlurOverride = []() { const char* t = getenv("COD3_AIMBLUR"); return t ? (t[0] == '0' ? 0 : 1) : -1; }();
         RenderCommands::SetAimBlur(aimBlurOverride >= 0 ? aimBlurOverride != 0 : settings.aimBlur);
+        RenderCommands::SetShellShockBlur(settings.shellShockBlur);
+        RenderCommands::SetRendering(settings.sharpShadows, settings.fastShadowMaps, settings.foliageCoverage);
+        RenderResources::RequestEffectsScale(settings.effectsResolution >= 2 ? 2.0 : settings.effectsResolution == 1 ? 1.5 : 1.0);
         // The texture quality: COD3_TEXQUALITY=0|1|2 over the settings.
         static const int qualityOverride = []() { const char* t = getenv("COD3_TEXQUALITY"); return t ? int(strtol(t, nullptr, 10)) : -1; }();
         const int quality = qualityOverride >= 0 ? qualityOverride : settings.textureQuality;

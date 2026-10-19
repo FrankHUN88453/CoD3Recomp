@@ -196,6 +196,70 @@ PPC_FUNC(__imp__KeQuerySystemTime)
     Guest::Write64(base, ctx.r3.u32, value);
 }
 
+// A short delay, kept to its length. The title's frame loop (its com_maxfps
+// wait) sleeps a millisecond at a time until the frame's milliseconds are
+// up, five or so times a frame. Windows' Sleep(1) is late by up to another
+// millisecond even with the timer at its finest, and the last sleep of a
+// frame overshot by that much: frames came at 8, 9 or 10 ms by chance, a
+// 117 fps average with a saw-tooth frame time. A high resolution waitable
+// timer for most of the wait and a short spin for the end make a 1 ms sleep
+// take 1 ms. COD3_PRECISESLEEP=0 goes back to Sleep. Long waits (20 ms or
+// more) and a zero interval are as before.
+namespace
+{
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+    struct DelayTimer
+    {
+        HANDLE handle = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+        ~DelayTimer() { if (handle) CloseHandle(handle); }
+    };
+
+    int64_t QpcFrequency()
+    {
+        static const int64_t frequency = []() { LARGE_INTEGER f; QueryPerformanceFrequency(&f); return int64_t(f.QuadPart); }();
+        return frequency;
+    }
+
+    void PreciseDelay(int64_t interval)
+    {
+        static const bool precise = []() { const char* t = getenv("COD3_PRECISESLEEP"); return !(t && t[0] == '0'); }();
+        const DWORD milliseconds = DWORD(interval / 10000);
+        if (!precise || interval <= 0 || interval >= 200000)
+        {
+            Sleep(milliseconds);
+            return;
+        }
+        thread_local DelayTimer timer;
+        if (timer.handle == nullptr)   // before Windows 10 1803: no such timer
+        {
+            Sleep(milliseconds);
+            return;
+        }
+        LARGE_INTEGER start;
+        QueryPerformanceCounter(&start);
+        const int64_t end = start.QuadPart + interval * QpcFrequency() / 10000000;
+        // The timer for all but the last 0.3 ms, which it can be late by.
+        const int64_t coarse = interval - 3000;
+        if (coarse > 0)
+        {
+            LARGE_INTEGER due;
+            due.QuadPart = -coarse;
+            if (SetWaitableTimerEx(timer.handle, &due, 0, nullptr, nullptr, nullptr, 0))
+                WaitForSingleObject(timer.handle, INFINITE);
+            else
+                Sleep(milliseconds > 0 ? milliseconds - 1 : 0);
+        }
+        for (LARGE_INTEGER now;;)
+        {
+            QueryPerformanceCounter(&now);
+            if (now.QuadPart >= end) break;
+            YieldProcessor();
+        }
+    }
+}
+
 // NTSTATUS KeDelayExecutionThread(mode, alertable, LARGE_INTEGER* interval)
 PPC_FUNC(__imp__KeDelayExecutionThread)
 {
@@ -203,15 +267,14 @@ PPC_FUNC(__imp__KeDelayExecutionThread)
     Scheduler::Release();
     struct Resume { ~Resume() { Scheduler::Acquire(); } } resume;
     Kernel::DeliverApcs(ctx, ctx.r4.u32 != 0);
-    uint32_t milliseconds = 0;
+    int64_t interval = 0;   // 100 nanosecond units
     if (ctx.r5.u32 != 0)
     {
         // Negative means relative, in 100 nanosecond units.
-        const int64_t interval = static_cast<int64_t>(Guest::Read64(base, ctx.r5.u32));
-        if (interval < 0)
-            milliseconds = static_cast<uint32_t>((-interval) / 10000);
+        const int64_t value = static_cast<int64_t>(Guest::Read64(base, ctx.r5.u32));
+        if (value < 0) interval = -value;
     }
-    Sleep(milliseconds);
+    PreciseDelay(interval);
     ctx.r3.u32 = X_STATUS_SUCCESS;
 }
 

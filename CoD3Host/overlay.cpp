@@ -320,6 +320,19 @@ namespace
                     ImGui::Checkbox("Console depth precision", &g_edit.consoleDepth);
                     ImGui::SameLine();
                     ImGui::TextDisabled("(no flickering surfaces; costs frame rate with MSAA; after a restart)");
+                    ImGui::Checkbox("Sharp shadows", &g_edit.sharpShadows);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(shadow edges filtered at the shadow map's real resolution; off: the console's blocky ones)");
+                    const char* effectSizes[] = { "Console (half)", "High (3/4)", "Full" };
+                    ImGui::Combo("Smoke and shadow resolution", &g_edit.effectsResolution, effectSizes, 3);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(higher: smoother edges in front of smoke, sharper shadow cascades; Full cost a third of the frame rate at 4K)");
+                    ImGui::Checkbox("Smooth foliage edges", &g_edit.foliageCoverage);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(grass, leaves and fences antialiased; needs an MSAA anti-aliasing mode)");
+                    ImGui::Checkbox("Fast shadow maps", &g_edit.fastShadowMaps);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(shadow maps drawn on the GPU's fast depth only path; turn off if shadows flicker)");
                     ImGui::Checkbox("Native command lists (experimental)", &g_edit.nativeCommands);
                     ImGui::SameLine();
                     ImGui::TextDisabled("(the draws' state straight from the game's own calls: faster; after a restart)");
@@ -333,12 +346,12 @@ namespace
                     {
                         // A cap holds the frames to an even pace: a steady 60
                         // feels smoother than a rate swinging between 50 and 140.
-                        static const int caps[] = { 0, 60, 90, 120, 144 };
-                        static const char* const names[] = { "Off", "60", "90", "120", "144" };
+                        static const int caps[] = { 0, 60, 90, 120, 144, 165, 240 };
+                        static const char* const names[] = { "Off", "60", "90", "120", "144", "165", "240" };
                         int current = 0;
-                        for (int i = 0; i < 5; i++) if (caps[i] == g_edit.frameCap) current = i;
+                        for (int i = 0; i < 7; i++) if (caps[i] == g_edit.frameCap) current = i;
                         ImGui::SetNextItemWidth(120);
-                        if (ImGui::Combo("Frame rate cap", &current, names, 5)) g_edit.frameCap = caps[current];
+                        if (ImGui::Combo("Frame rate cap", &current, names, 7)) g_edit.frameCap = caps[current];
                         ImGui::SameLine();
                         ImGui::TextDisabled("(an even pace; 60 for the steadiest picture)");
                     }
@@ -349,6 +362,13 @@ namespace
                 if (ImGui::BeginTabItem("Controls"))
                 {
                     ImGui::SliderInt("Master volume", &g_edit.masterVolume, 0, 100, "%d%%");
+                    {
+                        static const char* const outputs[] = { "Automatic", "Stereo", "5.1 surround" };
+                        ImGui::SetNextItemWidth(160);
+                        ImGui::Combo("Speakers", &g_edit.audioChannels, outputs, 3);
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("(the console's own six channel mix; Automatic picks 5.1 when Windows' speakers are set up for it)");
+                    }
                     ImGui::SliderFloat("Mouse sensitivity", &g_edit.mouseSensitivity, 0.1f, 3.0f, "%.2f");
                     ImGui::TextDisabled("Both axes alike.");
                     ImGui::Checkbox("Raw mouse input", &g_edit.rawMouse);
@@ -370,6 +390,8 @@ namespace
                     ImGui::TextDisabled("(%s)", Input::ControllerStatus().c_str());
                     ImGui::Checkbox("Controller vibration", &g_edit.rumble);
                     ImGui::SliderInt("Stick deadzone", &g_edit.stickDeadzone, 0, 50, "%d%%");
+                    ImGui::SliderInt("Vertical look speed", &g_edit.stickVerticalScale, 50, 300, g_edit.stickVerticalScale == 200 ? "200%% (matches turning)" : g_edit.stickVerticalScale == 100 ? "100%% (the game's own)" : "%d%%");
+                    ImGui::TextDisabled("The game looks up and down at half the speed it turns; 200%% makes them match.");
                     ImGui::TextDisabled("Raise it if the view or the soldier drifts with the sticks untouched.");
                     ImGui::Separator();
                     ImGui::TextUnformatted("Keys");
@@ -850,7 +872,7 @@ void Overlay::Render(ID3D11RenderTargetView* back, ID3D11Texture2D* backTexture,
             {
                 // The renderer's own counters, averaged over the last second.
                 const RenderStats::Snapshot s = RenderStats::Current();
-                ImGui::Text("frame %.2f ms  cpu %.2f ms  gpu %s", s.frameMilliseconds, s.cpuMilliseconds,
+                ImGui::Text("frame %.2f ms (worst %.1f)  cpu %.2f ms  gpu %s", s.frameMilliseconds, s.worstMilliseconds, s.cpuMilliseconds,
                     s.gpuProfiled ? "" : "(COD3_GPU_PROFILE=1)");
                 if (s.gpuProfiled) { ImGui::SameLine(); ImGui::Text("%.2f ms", s.gpuMilliseconds); }
                 ImGui::Text("%.0f draws  %.0f k triangles  %.0f resolves  %.0f skipped", s.draws, s.triangles / 1000.0f, s.resolves, s.skipped);

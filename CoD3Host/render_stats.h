@@ -49,6 +49,8 @@ namespace RenderStats
         uint64_t uploadBytes = 0;          // textures and vertex buffers
         uint64_t streamBytes = 0;          // indices and constants through the rings
         uint64_t drawNanoseconds = 0;      // CPU time inside the draw path
+        uint64_t uploadLayoutNanoseconds = 0;   // of it, laying out new textures' texels (untiling)
+        uint64_t uploadCreateNanoseconds = 0;   // and making them on the device
         uint64_t resolveNanoseconds = 0;
         uint64_t presentNanoseconds = 0;
         uint64_t sectionCycles[SectionCount] = {};
@@ -83,6 +85,7 @@ namespace RenderStats
     {
         float fps = 0;
         float frameMilliseconds = 0;       // between swaps
+        float worstMilliseconds = 0;       // the longest gap between swaps in the second
         float cpuMilliseconds = 0;         // on the command thread, drawing
         float gpuMilliseconds = 0;         // between the frame's timestamps, when profiled
         float draws = 0, triangles = 0, skipped = 0, resolves = 0;

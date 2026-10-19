@@ -233,6 +233,7 @@ namespace
         const uint32_t mag = (key >> 9) & 3, min = (key >> 11) & 3, mip = (key >> 13) & 3;
         const uint32_t aniso = (key >> 15) & 7;
         const uint32_t border = (key >> 18) & 3;
+        const bool forcedPoint = ((key >> 20) & 1) != 0;
 
         D3D11_SAMPLER_DESC desc{};
         bool linearMag = mag == 1, linearMin = min == 1, linearMip = mip == 1;
@@ -240,7 +241,8 @@ namespace
         // "base map") keeps that: its levels are not there to be used.
         const bool noMips = mip == 2;
         uint32_t anisotropy = (aniso >= 1 && aniso <= 4) ? (1u << aniso) : 1;
-        switch (g_filter)
+        if (forcedPoint) { linearMag = linearMin = linearMip = false; anisotropy = 1; }
+        else switch (g_filter)
         {
         case RenderPipeline::Filter::Native: break;
         case RenderPipeline::Filter::Bilinear: linearMag = linearMin = true; anisotropy = 1; break;
@@ -347,6 +349,15 @@ RenderState::Handle RenderPipeline::Sampler(const uint32_t fetch[6])
     if (min == 3) min = 1;
     if (mip == 3) mip = 1;
     const uint32_t key[2] = { clampX | (clampY << 3) | (clampZ << 6) | (mag << 9) | (min << 11) | (mip << 13) | (aniso << 15) | (border << 18), 0 };
+    if (const uint32_t handle = g_sampler.Find(key)) return handle;
+    return g_sampler.Insert(key, MakeSampler(key[0]));
+}
+
+RenderState::Handle RenderPipeline::SamplerPoint(const uint32_t fetch[6])
+{
+    const uint32_t clampX = (fetch[0] >> 10) & 7, clampY = (fetch[0] >> 13) & 7, clampZ = (fetch[0] >> 16) & 7;
+    const uint32_t border = fetch[5] & 3;
+    const uint32_t key[2] = { clampX | (clampY << 3) | (clampZ << 6) | (2u << 13) | (border << 18) | (1u << 20), 0 };
     if (const uint32_t handle = g_sampler.Find(key)) return handle;
     return g_sampler.Insert(key, MakeSampler(key[0]));
 }

@@ -31,4 +31,12 @@ namespace RenderCommands
     // Whether the title's blur while aiming down the sights is drawn: its
     // depth of field pass, three draws the pixel programs name.
     void SetAimBlur(bool drawn);
+
+    // Whether the shell shock's full screen pass is drawn (F11's "Shell
+    // shock screen blur"), set once a frame with the other settings.
+    void SetShellShockBlur(bool drawn);
+
+    // F11's "Sharp shadows", "Fast shadow maps" and "Smooth foliage edges",
+    // set once a frame with the other settings.
+    void SetRendering(bool sharpShadows, bool fastShadowMaps, bool foliageCoverage);
 }

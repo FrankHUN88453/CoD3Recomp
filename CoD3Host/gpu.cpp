@@ -35,6 +35,7 @@
 #include "timeline.h"
 #include "window.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <thread>
@@ -43,6 +44,7 @@
 #include <map>
 #include <vector>
 #include <mutex>
+#include <condition_variable>
 
 #include <Windows.h>
 
@@ -76,6 +78,55 @@ namespace
         while (offset + 1 > high && !g_constantDirtyHigh[range].compare_exchange_weak(high, offset + 1, std::memory_order_relaxed)) {}
     }
     std::mutex g_registerMutex;   // for the trace map below, not the file
+
+    // A run of words written to consecutive registers, as the constant
+    // packets do: most of the stream's words, the matrices and colours of
+    // every draw. Each went through Gpu::WriteRegister, with its checks for
+    // the experiments' overrides, the traces, the scratch registers and the
+    // display's table, and its locked compare for the constants' dirty
+    // span, word by word: a fifth of the command processor's time with the
+    // native command lists off. The constant packets only reach 0x2000 and
+    // up, where none of those apply, so with no experiment on the run goes
+    // straight into the file and the dirty span is widened once for it.
+    // COD3_SLOWREGISTERS=1 writes them one at a time as before.
+    int ShaderLoadTraceLimit();
+    bool PlainRegisterRuns()
+    {
+        static const bool plain = []() {
+            auto wanted = [](const char* name) { const char* t = getenv(name); return t != nullptr && t[0] != 0 && t[0] != '0'; };
+            return getenv("COD3_VSCONST") == nullptr && !wanted("COD3_TRACEREG") && !wanted("COD3_SLOWREGISTERS")
+                && ShaderLoadTraceLimit() <= 0 && !NativeState::Checking();
+        }();
+        return plain;
+    }
+    inline void NoteConstantSpan(uint32_t range, uint32_t first, uint32_t end)
+    {
+        g_constantWrites[range].store(g_constantWrites[range].load(std::memory_order_relaxed) + (end - first), std::memory_order_relaxed);
+        uint32_t low = g_constantDirtyLow[range].load(std::memory_order_relaxed);
+        while (first < low && !g_constantDirtyLow[range].compare_exchange_weak(low, first, std::memory_order_relaxed)) {}
+        uint32_t high = g_constantDirtyHigh[range].load(std::memory_order_relaxed);
+        while (end > high && !g_constantDirtyHigh[range].compare_exchange_weak(high, end, std::memory_order_relaxed)) {}
+    }
+    // `read(i)` gives the run's i'th word.
+    template <typename Read>
+    void WriteRegisterRun(uint32_t index, uint32_t count, Read&& read)
+    {
+        if (count == 0) return;
+        if (!PlainRegisterRuns() || index < 0x2000 || index + count > 0x5000)
+        {
+            for (uint32_t i = 0; i < count; i++) Gpu::WriteRegister(Gpu::ApertureBase + (index + i) * 4, read(i));
+            return;
+        }
+        std::atomic<uint32_t>* file = g_registerFile + index;
+        for (uint32_t i = 0; i < count; i++) file[i].store(read(i), std::memory_order_relaxed);
+        static constexpr uint32_t ranges[3][2] = { { 0x4000, 0x4400 }, { 0x4400, 0x4800 }, { 0x4900, 0x4930 } };
+        const uint32_t end = index + count;
+        for (uint32_t range = 0; range < 3; range++)
+        {
+            const uint32_t first = std::max(index, ranges[range][0]), last = std::min(end, ranges[range][1]);
+            if (first < last) NoteConstantSpan(range, first - ranges[range][0], last - ranges[range][0]);
+        }
+    }
 
     inline bool RegisterIndex(uint32_t address, uint32_t& index)
     {
@@ -616,6 +667,14 @@ namespace
         else g_pendingInterrupts.fetch_add(1, std::memory_order_relaxed);
     }
 
+    // The title's wait at VdSwap for the GPU to reach the swap before:
+    // woken by the swap packet. It polled every 200 microseconds, which on
+    // Windows is a sleep of a whole timer tick, a millisecond or more: the
+    // title's next frame started up to that long after the GPU let it, at
+    // two hundred frames a second a fifth of the frame.
+    std::mutex g_swapMutex;
+    std::condition_variable g_swapReached;
+
     // The swap packet VdSwap writes into the driver's reservation: the
     // picture changes here, when the GPU reaches it, so a frame is shown
     // once its draws are done and never before.
@@ -652,6 +711,12 @@ namespace
             }
             lastAhead = ahead;
             Kernel::Stats().swapsReached.store(reached, std::memory_order_release);
+            // The title waiting at VdSwap for this swap (WaitForSwapsReached)
+            // goes on at once.
+            {
+                std::lock_guard<std::mutex> lock(g_swapMutex);
+            }
+            g_swapReached.notify_all();
         }
         Window::SetFrontBuffer(Guest::PhysicalAlias(surface), width, height);
         Render::Swap(surface, width, height);
@@ -875,8 +940,7 @@ namespace
         }
         const uint32_t source = Guest::PhysicalAlias(address & ~3u);
         t_writeSource = "a LOAD_ALU_CONSTANT packet";
-        for (uint32_t i = 0; i < count; i++)
-            Gpu::WriteRegister(Gpu::ApertureBase + (index + i) * 4, Guest::Read32(Guest::Base, source + i * 4));
+        WriteRegisterRun(index, count, [&](uint32_t i) { return Guest::Read32(Guest::Base, source + i * 4); });
     }
 
     // COND_WRITE polls a register or memory until a condition holds and then
@@ -1427,8 +1491,7 @@ uint32_t Gpu::ProcessRing(uint32_t ringBase, uint32_t ringSizeDwords,
                         printf("\n");
                     }
                     t_writeSource = "a SET_CONSTANT packet";
-                    for (uint32_t i = 0; i + 1 < count; i++)
-                        WriteRegister(ApertureBase + (index + i) * 4, ReadDword(cursor + 2 + i));
+                    WriteRegisterRun(index, count - 1, [&](uint32_t i) { return ReadDword(cursor + 2 + i); });
                 }
                 break;
             }
@@ -1440,8 +1503,7 @@ uint32_t Gpu::ProcessRing(uint32_t ringBase, uint32_t ringSizeDwords,
                 if (index >= 0x2000 && index + count < 0x5000)
                 {
                     t_writeSource = "a SET_CONSTANT2 packet";
-                    for (uint32_t i = 0; i + 1 < count; i++)
-                        WriteRegister(ApertureBase + (index + i) * 4, ReadDword(cursor + 2 + i));
+                    WriteRegisterRun(index, count - 1, [&](uint32_t i) { return ReadDword(cursor + 2 + i); });
                 }
                 else ReportOnce("SET_CONSTANT2 outside the constants, ignored", index, count);
                 break;
@@ -1900,8 +1962,9 @@ namespace
                             printf("\n");
                         }
                         t_writeSource = "a SET_CONSTANT packet";
-                        for (uint32_t i = 0; i + 1 < count && cursor + 2 + i < dwords; i++)
-                            Gpu::WriteRegister(Gpu::ApertureBase + (index + i) * 4, Guest::Read32(Guest::Base, base + (cursor + 2 + i) * 4));
+                        const uint32_t words = std::min(count - 1, dwords > cursor + 2 ? dwords - (cursor + 2) : 0u);
+                        const uint32_t from = base + (cursor + 2) * 4;
+                        WriteRegisterRun(index, words, [&](uint32_t i) { return Guest::Read32(Guest::Base, from + i * 4); });
                     }
                 }
                 else if ((opcode == OpSetConstant2 || opcode == OpSetShaderConstants) && cursor + 1 < dwords)
@@ -1915,8 +1978,9 @@ namespace
                     if (index >= 0x2000 && index + count < 0x5000)
                     {
                         t_writeSource = "a SET_CONSTANT2 packet";
-                        for (uint32_t i = 0; i + 1 < count && cursor + 2 + i < dwords; i++)
-                            Gpu::WriteRegister(Gpu::ApertureBase + (index + i) * 4, Guest::Read32(Guest::Base, base + (cursor + 2 + i) * 4));
+                        const uint32_t words = std::min(count - 1, dwords > cursor + 2 ? dwords - (cursor + 2) : 0u);
+                        const uint32_t from = base + (cursor + 2) * 4;
+                        WriteRegisterRun(index, words, [&](uint32_t i) { return Guest::Read32(Guest::Base, from + i * 4); });
                     }
                     else ReportOnce("SET_CONSTANT2 outside the constants, ignored", index, count);
                 }
@@ -2297,4 +2361,13 @@ void Gpu::ReportFences()
 void Gpu::SetInterruptRaiser(void (*raiser)(uint32_t cpuMask))
 {
     g_raiseInterrupt = raiser;
+}
+
+bool Gpu::WaitForSwapsReached(uint64_t needed, std::chrono::milliseconds limit)
+{
+    if (Kernel::Stats().swapsReached.load(std::memory_order_acquire) >= needed) return true;
+    std::unique_lock<std::mutex> lock(g_swapMutex);
+    return g_swapReached.wait_for(lock, limit, [needed]() {
+        return Kernel::Stats().swapsReached.load(std::memory_order_acquire) >= needed;
+    });
 }

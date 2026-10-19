@@ -1661,10 +1661,8 @@ PPC_FUNC(__imp__VdSwap)
             {
                 Scheduler::Release();
                 struct Resume { ~Resume() { Scheduler::Acquire(); } } resume;
-                const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
-                while (Kernel::Stats().swapsReached.load(std::memory_order_acquire) < needed &&
-                       std::chrono::steady_clock::now() < deadline)
-                    std::this_thread::sleep_for(std::chrono::microseconds(200));
+                // Woken by the swap itself (gpu.cpp), up to half a second.
+                Gpu::WaitForSwapsReached(needed, std::chrono::milliseconds(500));
             }
         }
     }

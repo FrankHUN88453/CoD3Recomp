@@ -129,6 +129,18 @@ find_path(COD3_FFMPEG_INCLUDE libavcodec/avcodec.h
     PATHS "$ENV{FFMPEG_DIR}/include" "C:/ffmpeg/include" "${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/ffmpeg/include")
 if (COD3_FFMPEG_INCLUDE)
     message(STATUS "CoD3: XMA decoding through FFmpeg, headers at ${COD3_FFMPEG_INCLUDE}")
+    # The DLLs are loaded by the major version the headers name
+    # (avcodec-NN.dll, xma.cpp), and a release ships FFmpeg 8.0's: avcodec-62
+    # and avutil-60. Headers of another FFmpeg (a nightly build is 63 and 61)
+    # build fine and then find no DLL at all, and every XMA sound is silent.
+    file(STRINGS "${COD3_FFMPEG_INCLUDE}/libavcodec/version_major.h" COD3_AVCODEC_MAJOR_LINE REGEX "^#define LIBAVCODEC_VERSION_MAJOR")
+    string(REGEX MATCH "[0-9]+" COD3_AVCODEC_MAJOR "${COD3_AVCODEC_MAJOR_LINE}")
+    if (NOT COD3_AVCODEC_MAJOR STREQUAL "62")
+        message(WARNING "CoD3: the FFmpeg headers at ${COD3_FFMPEG_INCLUDE} are avcodec ${COD3_AVCODEC_MAJOR}, "
+                        "so the game will look for avcodec-${COD3_AVCODEC_MAJOR}.dll. The port ships FFmpeg 8.0 "
+                        "(avcodec-62.dll): use FFmpeg 8.0's headers, or put that version's DLLs beside CoD3.exe, "
+                        "or the in-game sound will be silent.")
+    endif()
     target_include_directories(CoD3 PRIVATE "${COD3_FFMPEG_INCLUDE}")
     target_compile_definitions(CoD3 PRIVATE COD3_HAVE_FFMPEG_HEADERS=1)
 else()

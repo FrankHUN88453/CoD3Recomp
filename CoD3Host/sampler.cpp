@@ -319,6 +319,9 @@ void Sampler::Start(int intervalSeconds)
     if (!g_running.compare_exchange_strong(expected, true)) return;
 
     BuildFunctionMap();
+    // 0: the map only, for the fault handler and the watchdog's report of a
+    // hang, and no report on a timer (main.cpp says why).
+    if (intervalSeconds <= 0) return;
     g_thread = std::thread([intervalSeconds]()
     {
         // One report after things have settled, then at the requested interval.
@@ -384,5 +387,6 @@ void Sampler::SampleNow()
     // The same report the timer prints, on demand: what every guest thread is
     // doing at this exact moment, which is the question the moment something
     // in memory has just been found overwritten.
+    BuildFunctionMap();
     SampleOnce();
 }

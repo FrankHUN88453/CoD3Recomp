@@ -4,13 +4,14 @@
 //
 // The title mixes its own audio and hands the finished frame to the console
 // once every 5.33 milliseconds: 256 samples for each of six channels, as big
-// endian floats, one channel after another rather than interleaved. Everything
-// here does is take that frame, fold six channels into two, and give it to
-// Windows.
+// endian floats, one channel after another rather than interleaved. All this
+// does is take that frame and give it to Windows: as 5.1 when the speakers
+// have six channels or more (or F11 asks for it), the six channels as they
+// are, or folded into two for stereo.
 //
-// Nothing about this decodes anything. Voices the title fed through the
-// console's XMA hardware are still silent, because that hardware is not here;
-// what comes out is everything it mixed itself.
+// Nothing here decodes anything: the voices the title feeds through the
+// console's XMA hardware are decoded by kernel_audio.cpp (FFmpeg) before the
+// title mixes them.
 
 #include <cstdint>
 
