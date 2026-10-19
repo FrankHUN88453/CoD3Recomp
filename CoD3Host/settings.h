@@ -65,6 +65,29 @@ namespace Settings
         bool opaqueShaders = true;      // pixel programs without the alpha test for the draws that do not test
         bool stagingUploads = true;     // textures sent to the GPU through staging copies
         bool texturePool = true;        // textures of a shape kept and used again
+        // The HDR mode (F11's HDR tab; render_d3d11.cpp, hdr/cod3_hdr.hlsl on
+        // RenoDX): an scRGB swap chain, the frame's targets 16 bit float, and
+        // RenoDX's tone mappers and sliders. The sliders are RenoDX's own
+        // scales: 50 is the game's look.
+        bool hdr = false;
+        int hdrToneMapper = 3;          // 0 vanilla (clipped as SDR), 1 none, 2 ACES, 3 RenoDRT, 4 PsychoV 17, 5 PsychoV 22, 6 PsychoV 30, 7 Prism
+        float hdrPeakNits = 0.0f;       // the display's peak; 0 is what Windows reports for it (1000 when it reports nothing)
+        float hdrGameNits = 203.0f;     // the game's white
+        float hdrUiNits = 203.0f;       // the HUD's and the menus' white
+        int hdrGammaCorrection = 1;     // the SDR picture decoded as 0 sRGB, 1 gamma 2.2, 2 gamma 2.4
+        float hdrExposure = 1.0f;       // 0 .. 4
+        float hdrHighlights = 50.0f;    // 0 .. 100
+        float hdrShadows = 50.0f;
+        float hdrContrast = 50.0f;
+        float hdrSaturation = 50.0f;
+        float hdrHighlightSaturation = 50.0f;   // RenoDRT
+        float hdrBlowout = 0.0f;                // RenoDRT
+        float hdrFlare = 0.0f;                  // RenoDRT
+        float hdrHueCorrection = 100.0f;
+        float hdrConeResponse = 50.0f;          // PsychoV
+        float hdrBloom = 50.0f;         // the bloom's strength (in SDR too): 50 the game's
+        bool hdrTvRamp = true;          // the title's TV gamma ramp first, as the SDR picture has it
+        bool hdrFilmUpgrade = false;    // films expanded to HDR (RenoDX's video upscale)
         int windowMode = 0;           // 0 windowed, 1 borderless full screen
         bool fpsOverlay = false;
         bool statsOverlay = false;    // the renderer's counters over the picture
@@ -148,6 +171,9 @@ namespace Settings
     // The current values, and setting them (which also saves).
     Values Get();
     void Set(const Values& values);
+    // Setting them without saving, for a slider dragged in the menu (the
+    // HDR tabs apply as they move); Save() when the drag is over.
+    void Preview(const Values& values);
 
     // Reads the file beside the executable, or starts from the defaults.
     void Load(const std::filesystem::path& exeDirectory);

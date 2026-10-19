@@ -31,6 +31,9 @@ namespace RenderCommands
     // Whether the title's blur while aiming down the sights is drawn: its
     // depth of field pass, three draws the pixel programs name.
     void SetAimBlur(bool drawn);
+    // The HDR mode's scene pass after the bloom's composite, and the bloom's
+    // strength (one the game's own), from the settings at each frame's edge.
+    void SetHdr(bool scenePass, float bloom);
 
     // Whether the shell shock's full screen pass is drawn (F11's "Shell
     // shock screen blur"), set once a frame with the other settings.

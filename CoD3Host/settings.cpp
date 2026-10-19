@@ -124,6 +124,12 @@ void Settings::Set(const Values& values)
     }
     Save();
 }
+
+void Settings::Preview(const Values& values)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_values = values;
+}
 void Settings::Load(const std::filesystem::path& exeDirectory)
 {
     g_file = exeDirectory / "CoD3Recomp.ini";
@@ -179,6 +185,25 @@ void Settings::Load(const std::filesystem::path& exeDirectory)
             else if (key == "opt_opaque_shaders") v.opaqueShaders = atoi(value.c_str()) != 0;
             else if (key == "opt_staging_uploads") v.stagingUploads = atoi(value.c_str()) != 0;
             else if (key == "opt_texture_pool") v.texturePool = atoi(value.c_str()) != 0;
+            else if (key == "hdr") v.hdr = atoi(value.c_str()) != 0;
+            else if (key == "hdr_tone_mapper") v.hdrToneMapper = std::clamp(atoi(value.c_str()), 0, 7);
+            else if (key == "hdr_peak_nits") v.hdrPeakNits = std::clamp(float(atof(value.c_str())), 0.0f, 10000.0f);
+            else if (key == "hdr_game_nits") v.hdrGameNits = std::clamp(float(atof(value.c_str())), 48.0f, 1000.0f);
+            else if (key == "hdr_ui_nits") v.hdrUiNits = std::clamp(float(atof(value.c_str())), 48.0f, 1000.0f);
+            else if (key == "hdr_gamma_correction") v.hdrGammaCorrection = std::clamp(atoi(value.c_str()), 0, 2);
+            else if (key == "hdr_exposure") v.hdrExposure = std::clamp(float(atof(value.c_str())), 0.0f, 4.0f);
+            else if (key == "hdr_highlights") v.hdrHighlights = std::clamp(float(atof(value.c_str())), 0.0f, 100.0f);
+            else if (key == "hdr_shadows") v.hdrShadows = std::clamp(float(atof(value.c_str())), 0.0f, 100.0f);
+            else if (key == "hdr_contrast") v.hdrContrast = std::clamp(float(atof(value.c_str())), 0.0f, 100.0f);
+            else if (key == "hdr_saturation") v.hdrSaturation = std::clamp(float(atof(value.c_str())), 0.0f, 100.0f);
+            else if (key == "hdr_highlight_saturation") v.hdrHighlightSaturation = std::clamp(float(atof(value.c_str())), 0.0f, 100.0f);
+            else if (key == "hdr_blowout") v.hdrBlowout = std::clamp(float(atof(value.c_str())), 0.0f, 100.0f);
+            else if (key == "hdr_flare") v.hdrFlare = std::clamp(float(atof(value.c_str())), 0.0f, 100.0f);
+            else if (key == "hdr_hue_correction") v.hdrHueCorrection = std::clamp(float(atof(value.c_str())), 0.0f, 100.0f);
+            else if (key == "hdr_cone_response") v.hdrConeResponse = std::clamp(float(atof(value.c_str())), 0.0f, 100.0f);
+            else if (key == "hdr_bloom") v.hdrBloom = std::clamp(float(atof(value.c_str())), 0.0f, 100.0f);
+            else if (key == "hdr_tv_ramp") v.hdrTvRamp = atoi(value.c_str()) != 0;
+            else if (key == "hdr_film_upgrade") v.hdrFilmUpgrade = atoi(value.c_str()) != 0;
             else if (key == "window_mode") v.windowMode = atoi(value.c_str());
             else if (key == "fps_overlay") v.fpsOverlay = atoi(value.c_str()) != 0;
             else if (key == "stats_overlay") v.statsOverlay = atoi(value.c_str()) != 0;
@@ -318,6 +343,11 @@ void Settings::Save()
         fprintf(file, "opt_depth_thread = %d\nopt_fast_constants = %d\nopt_shader_load_cache = %d\nopt_strong_change_check = %d\nopt_range_looks = %d\nopt_opaque_shaders = %d\nopt_staging_uploads = %d\nopt_texture_pool = %d\n",
                 v.depthThread ? 1 : 0, v.fastConstants ? 1 : 0, v.shaderLoadCache ? 1 : 0, v.strongChangeCheck ? 1 : 0,
                 v.rangeLooks ? 1 : 0, v.opaqueShaders ? 1 : 0, v.stagingUploads ? 1 : 0, v.texturePool ? 1 : 0);
+        fprintf(file, "hdr = %d\nhdr_tone_mapper = %d\nhdr_peak_nits = %.0f\nhdr_game_nits = %.0f\nhdr_ui_nits = %.0f\nhdr_gamma_correction = %d\n",
+                v.hdr ? 1 : 0, v.hdrToneMapper, v.hdrPeakNits, v.hdrGameNits, v.hdrUiNits, v.hdrGammaCorrection);
+        fprintf(file, "hdr_exposure = %.2f\nhdr_highlights = %.0f\nhdr_shadows = %.0f\nhdr_contrast = %.0f\nhdr_saturation = %.0f\nhdr_highlight_saturation = %.0f\nhdr_blowout = %.0f\nhdr_flare = %.0f\nhdr_hue_correction = %.0f\nhdr_cone_response = %.0f\nhdr_bloom = %.0f\nhdr_tv_ramp = %d\nhdr_film_upgrade = %d\n",
+                v.hdrExposure, v.hdrHighlights, v.hdrShadows, v.hdrContrast, v.hdrSaturation, v.hdrHighlightSaturation, v.hdrBlowout,
+                v.hdrFlare, v.hdrHueCorrection, v.hdrConeResponse, v.hdrBloom, v.hdrTvRamp ? 1 : 0, v.hdrFilmUpgrade ? 1 : 0);
         fprintf(file, "[game]\nplayer_name = %s\nlan_address = %s\nsystem_link_peers = %s\nmaster_volume = %d\naudio_channels = %d\naim_assist = %d\nbounces = %d\ncontroller = %d\nrumble = %d\nstick_deadzone = %d\nmouse_sensitivity = %.2f\nstick_vertical_scale = %d\nraw_mouse = %d\ndirect_mouse = %d\ntoggle_sprint = %d\nshell_shock_blur = %d\nmelee_lunge = %d\n", v.playerName, v.lanAddress, v.systemLinkPeers, v.masterVolume, v.audioChannels, v.aimAssist ? 1 : 0, v.bounces ? 1 : 0, v.controller ? 1 : 0, v.rumble ? 1 : 0, v.stickDeadzone, v.mouseSensitivity, v.stickVerticalScale, v.rawMouse ? 1 : 0, v.directMouse ? 1 : 0, v.toggleSprint ? 1 : 0, v.shellShockBlur ? 1 : 0, v.meleeLunge ? 1 : 0);
         fprintf(file, "quick_landing = %d\nquick_sprint = %d\ncustom_primary = %d\n", v.quickLanding ? 1 : 0, v.quickSprint ? 1 : 0,
                 v.customPrimary);

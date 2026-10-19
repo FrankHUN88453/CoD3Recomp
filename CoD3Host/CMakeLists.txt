@@ -90,6 +90,13 @@ set(COD3_HOST_SOURCES
     "native_options.cpp")
 add_executable(CoD3 WIN32 ${COD3_HOST_SOURCES} "resources/CoD3.rc")
 
+# The HDR mode's shaders (hdr/cod3_hdr.hlsl on RenoDX's shader library and
+# the Prism tone mapper, thirdparty/renodx and thirdparty/prism, both MIT),
+# built into the executable: hdr/embed_shaders.cmake.
+set(COD3_HDR_EMBED_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/hdr_shader_files.cpp")
+include("${CMAKE_CURRENT_SOURCE_DIR}/hdr/embed_shaders.cmake")
+target_sources(CoD3 PRIVATE "${COD3_HDR_EMBED_OUTPUT}")
+
 # A console application: setup is interactive and the import trap has to be
 # readable. WIN32 above is overridden here deliberately.
 set_target_properties(CoD3 PROPERTIES WIN32_EXECUTABLE OFF)
@@ -217,7 +224,7 @@ if (TARGET CoD3RecompLibMP)
         endif()
     endforeach()
 
-    add_executable(CoD3MP WIN32 ${mpSources} "resources/CoD3.rc")
+    add_executable(CoD3MP WIN32 ${mpSources} "resources/CoD3.rc" "${COD3_HDR_EMBED_OUTPUT}")
     set_target_properties(CoD3MP PROPERTIES WIN32_EXECUTABLE OFF)
     target_link_libraries(CoD3MP PRIVATE
         CoD3RecompLibMP XenonUtils ole32 winmm dbghelp d3d11 dxgi d3dcompiler windowscodecs shell32 ws2_32 iphlpapi)

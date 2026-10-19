@@ -65,6 +65,12 @@ namespace RenderResources
     void RequestMultisample(uint32_t samples);
     uint32_t Multisample();
 
+    // The HDR mode: the title's 8 bit colour targets (formats 0 and 1) made
+    // 16 bit float, so what its drawing puts past one is kept. The targets
+    // are made again at the next frame's start when this changes.
+    void RequestHdrTargets(bool upgraded);
+    bool HdrTargets();
+
     // The texture quality: how many of a texture's top mip levels are left
     // out on upload (0 all of them kept). A change takes effect at the
     // next frame, when every texture is dropped to be uploaded again.
@@ -82,6 +88,7 @@ namespace RenderResources
         uint32_t pitch = 0, rows = 0;        // title pixels
         uint32_t samples = 1;
         DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+        bool upgraded = false;               // an 8 bit target made 16 bit float for the HDR mode
     };
     struct DepthTarget
     {

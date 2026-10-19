@@ -1032,7 +1032,7 @@ uint64_t XenosHlsl::Version()
     // it then starts afresh rather than serving the other translation.
     std::string text = "xenos_hlsl 2026-10-06 bswap packed flat3d fetch offsets alu pairs read first pixel params gradients dx dy depth offset pixel centre";
     text += Depth24() ? " depth 20e4 centroid" : " depth 32";
-    text += " shadow weights, coverage 2026-10-18";
+    text += " shadow weights, coverage 2026-10-18, hdr clamp 2026-10-19";
     if (const char* lanes = getenv("COD3_SCALARLANES")) { text += " lanes="; text += lanes; }
     if (const char* show = getenv("COD3_D3DSHOW")) { text += " show="; text += show; }
     if (const char* sign = getenv("COD3_D3DSHOWSIGN")) { text += " sign="; text += sign; }
@@ -1162,6 +1162,7 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
         else if (cutDepth) hlsl += " float depth : SV_DepthLessEqual;";
         if (alphaTest) hlsl += " uint coverage : SV_Coverage;";
         hlsl += " };\n";
+        hlsl += "float4 hdrClamp(float4 v) { return float4(min(max(v.rgb, 0.0), 65000.0), saturate(v.a)); }\n";
         hlsl += "Output main(Input input) {\n";
         hlsl += "    float4 r[32];\n";
         for (uint32_t i = 0; i < 32; i++)
@@ -1259,7 +1260,14 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
         // out as magenta, for finding where one comes from.
         static const bool nanShow = getenv("COD3_NANSHOW") != nullptr;
         if (nanShow) hlsl += "    if (any(isnan(oC0)) || any(isinf(oC0))) oC0 = float4(1.0, 0.0, 1.0, 1.0);\n";
-        hlsl += "    output.c0 = oC0; output.c1 = oC1; output.c2 = oC2; output.c3 = oC3;\n";
+        // The HDR mode's float targets (render_resources.cpp) keep what an 8
+        // bit one would have clipped. Past one is the point; below nought,
+        // a not-a-number or past the half float's range is not, and the
+        // alpha stays the 8 bit target's, from nought to one, for the
+        // blending that reads it back. The draw says which targets
+        // (coverage.y, a bit a slot); nothing changes without the mode.
+        hlsl += "    output.c0 = (coverage.y & 1u) != 0u ? hdrClamp(oC0) : oC0; output.c1 = (coverage.y & 2u) != 0u ? hdrClamp(oC1) : oC1;\n"
+                "    output.c2 = (coverage.y & 4u) != 0u ? hdrClamp(oC2) : oC2; output.c3 = (coverage.y & 8u) != 0u ? hdrClamp(oC3) : oC3;\n";
         if (alphaTest) hlsl += "    output.coverage = coverageMask;\n";
         if (out.writesDepth) hlsl += "    output.depth = oDepth4.x;\n";
         else if (depth24) hlsl += "    output.depth = Depth20e4(input.position.z);\n";

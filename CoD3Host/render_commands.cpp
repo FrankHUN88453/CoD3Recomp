@@ -53,6 +53,8 @@ namespace
     // sharp. The two before it still run, so the surface they make is
     // there for anything else that reads it.
     bool g_aimBlur = true;
+    bool g_hdrScene = false;    // the HDR mode: the frame tone mapped after the bloom's composite
+    float g_bloom = 1.0f;       // the bloom's strength, the game's at one
     // The shell shock pass (below): taken from the settings once a frame.
     // It was a Settings::Get() on every draw, a lock and a copy of the
     // whole settings block a thousand times a frame.
@@ -268,6 +270,7 @@ namespace
             if (duplicate) continue;
             out.targets[i] = target->view;
             out.targetResources[i] = target->resource;
+            if (target->upgraded) out.upgradedTargets |= 1u << i;
             if (i == 0) out.colorTexture = target->texture;
             out.targetCount = i + 1;
         }
@@ -1177,6 +1180,23 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
     if (RenderPipeline::BlendTakesConstantAlpha(state.blendControl))
         out.blendFactor[0] = out.blendFactor[1] = out.blendFactor[2] = state.blendFactor[3];
     out.stencilReference = state.stencilRefMask & 0xFF;
+    // The bloom's composite: one full screen draw of this pixel program,
+    // adding the blurred bright parts (an 886 pixel square at 4K) to the
+    // frame by the constant colour, right before the HUD (seen with the
+    // RenoDX devkit: draw 2148 of 2180, then the HUD's from 2149). Its
+    // strength is the HDR tab's bloom slider, in SDR too; and in the HDR
+    // mode the frame is tone mapped right after it (render_d3d11.cpp's
+    // HdrScenePass), so the HUD is drawn over the finished picture.
+    // COD3_HDRSCENEPS=hash names another program for the place.
+    {
+        static const uint64_t composite = []() { const char* t = getenv("COD3_HDRSCENEPS"); return t ? uint64_t(strtoull(t, nullptr, 16)) : 0xfe6578445de135eaull; }();
+        const bool adds = ((state.blendControl[0] >> 8) & 0x1F) == 1;   // the destination's factor one
+        if (ps != nullptr && ps->hash == composite && adds && out.targetCount > 0 && out.targets[0] != nullptr)
+        {
+            for (int i = 0; i < 3; i++) out.blendFactor[i] *= g_bloom;
+            out.hdrScene = g_hdrScene && (out.upgradedTargets & 1) != 0;
+        }
+    }
     // Only the opaque draws may go flat: a blended one in a flat colour
     // with an alpha of one would cover the frame.
     out.opaque = state.blendControl[0] == 0x00010001;
@@ -1209,7 +1229,8 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
         const bool noCoverage = noCoverageForced || !g_foliageCoverage;
         const uint32_t samples = RenderResources::TargetSamples(state.pitch);
         constants.coverage[0] = (!noCoverage && samples > 1 && out.targetCount > 0 && constants.flags[1] != 7) ? samples : 0u;
-        constants.coverage[1] = constants.coverage[2] = constants.coverage[3] = 0;
+        constants.coverage[1] = out.upgradedTargets;
+        constants.coverage[2] = constants.coverage[3] = 0;
     }
     // A draw with the alpha test off takes its pixel program's variant
     // without it (render_shaders.cpp), once built: the same picture, and
@@ -1430,6 +1451,11 @@ bool RenderCommands::PrepareResolve(ResolveCommand& out)
 }
 
 void RenderCommands::SetAimBlur(bool drawn) { g_aimBlur = drawn; }
+void RenderCommands::SetHdr(bool scenePass, float bloom)
+{
+    g_hdrScene = scenePass;
+    g_bloom = bloom;
+}
 void RenderCommands::SetShellShockBlur(bool drawn) { g_shellShockBlur = drawn; }
 void RenderCommands::SetRendering(bool sharpShadows, bool fastShadowMaps, bool foliageCoverage)
 {

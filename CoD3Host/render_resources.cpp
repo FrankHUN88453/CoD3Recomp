@@ -54,6 +54,7 @@ namespace
     double g_effectsScale = 1.0, g_requestedEffectsScale = 1.0;   // the 560 pitch surfaces' scale over the frame's (PitchScale)
     uint32_t g_samples = 1;
     uint32_t g_requestedSamples = 1;
+    bool g_hdrTargets = false, g_requestedHdrTargets = false;   // the HDR mode's 16 bit float targets
     uint32_t g_mipSkip = 0, g_requestedMipSkip = 0;   // the texture quality: top levels left out
 
     // The count the device can do, at or under the one asked for.
@@ -62,7 +63,9 @@ namespace
         for (uint32_t samples = wanted; samples > 1; samples /= 2)
         {
             UINT colour = 0, depth = 0;
+            UINT half = 0;
             if (SUCCEEDED(g_device->CheckMultisampleQualityLevels(DXGI_FORMAT_R8G8B8A8_UNORM, samples, &colour)) && colour > 0 &&
+                SUCCEEDED(g_device->CheckMultisampleQualityLevels(DXGI_FORMAT_R16G16B16A16_FLOAT, samples, &half)) && half > 0 &&
                 SUCCEEDED(g_device->CheckMultisampleQualityLevels(DXGI_FORMAT_D32_FLOAT_S8X24_UINT, samples, &depth)) && depth > 0)
                 return samples;
         }
@@ -244,7 +247,10 @@ namespace
         bytesPerSample = 4;
         switch (format)
         {
-        case 0: case 1: return DXGI_FORMAT_R8G8B8A8_UNORM;
+        // The HDR mode's upgrade: the same guest format and the same EDRAM
+        // bytes (the rows a pitch holds stay the console's), a float target
+        // on the host so the drawing is not clipped at one.
+        case 0: case 1: return g_hdrTargets ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
         case 2: case 10: return DXGI_FORMAT_R10G10B10A2_UNORM;
         case 3: case 12: bytesPerSample = 8; return DXGI_FORMAT_R16G16B16A16_FLOAT;
         case 4: return DXGI_FORMAT_R16G16_UNORM;
@@ -1324,6 +1330,16 @@ bool RenderResources::BeginFrame(uint64_t frame)
         g_depthKeys.Clear();
         printf("render: the frame is drawn with %u sample%s a pixel\n", g_samples, g_samples == 1 ? "" : "s");
     }
+    if (g_requestedHdrTargets != g_hdrTargets)
+    {
+        remade = true;
+        g_hdrTargets = g_requestedHdrTargets;
+        g_colorTargets.clear();
+        g_depthTargets.clear();
+        g_colorKeys.Clear();
+        g_depthKeys.Clear();
+        printf("render: the frame's colour targets are %s\n", g_hdrTargets ? "16 bit float (HDR)" : "8 bit");
+    }
     if (g_requestedEffectsScale != g_effectsScale)
     {
         remade = true;
@@ -1468,6 +1484,10 @@ void RenderResources::RequestMultisample(uint32_t samples)
 
 uint32_t RenderResources::Multisample() { return g_samples; }
 
+void RenderResources::RequestHdrTargets(bool upgraded) { g_requestedHdrTargets = upgraded; }
+
+bool RenderResources::HdrTargets() { return g_hdrTargets; }
+
 void RenderResources::TargetSize(uint32_t pitch, uint32_t bytesPerSample, uint32_t& width, uint32_t& height, float& scaleX, float& scaleY)
 {
     const uint32_t rows = TargetRows(pitch, bytesPerSample);
@@ -1487,6 +1507,7 @@ RenderState::Handle RenderResources::ColorTargetFor(uint32_t colorInfo, uint32_t
     uint32_t bytesPerSample = 4;
     const uint32_t format = (colorInfo >> 16) & 0xF;
     entry.target.format = ColorFormat(format, bytesPerSample);
+    entry.target.upgraded = g_hdrTargets && (format == 0 || format == 1);
     entry.target.pitch = pitch;
     entry.target.rows = TargetRows(pitch, bytesPerSample);
     HostSize(pitch, entry.target.rows, entry.target.width, entry.target.height);
@@ -1512,8 +1533,9 @@ RenderState::Handle RenderResources::ColorTargetFor(uint32_t colorInfo, uint32_t
     entry.target.resource = entry.resource.Get();
     entry.target.samples = samples;
     g_resourceBytes += uint64_t(entry.target.width) * entry.target.height * bytesPerSample * samples;
-    printf("render: colour target at tile %u, pitch %u, format %u: %ux%u, %u sample%s\n",
-        colorInfo & 0xFFF, pitch, format, entry.target.width, entry.target.height, samples, samples == 1 ? "" : "s");
+    printf("render: colour target at tile %u, pitch %u, format %u: %ux%u, %u sample%s%s\n",
+        colorInfo & 0xFFF, pitch, format, entry.target.width, entry.target.height, samples, samples == 1 ? "" : "s",
+        entry.target.upgraded ? ", 16 bit float (HDR)" : "");
     fflush(stdout);
     return handle;
 }

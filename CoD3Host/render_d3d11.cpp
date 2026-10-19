@@ -25,6 +25,7 @@
 #include "parallel.h"
 #include "tuning.h"
 #include "verify.h"
+#include "hdr_shaders.h"
 
 #include <algorithm>
 #include <atomic>
@@ -38,6 +39,8 @@
 #include <filesystem>
 #include <condition_variable>
 #include <deque>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -45,7 +48,7 @@
 
 #include <Windows.h>
 #include <d3d11_1.h>
-#include <dxgi1_5.h>
+#include <dxgi1_6.h>
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 
@@ -139,6 +142,7 @@ namespace
     ComPtr<ID3D11PixelShader> g_depthOnlyPixelShader;   // the depth only mode's draws (COD3_DEPTH24)
     ComPtr<ID3D11SamplerState> g_pointSampler, g_linearSampler;
     ComPtr<ID3D11Buffer> g_quadConstants;
+    ComPtr<ID3D11Buffer> g_hdrConstants;              // the HDR mode's settings for its programs (b1)
     ComPtr<ID3D11Texture1D> g_gammaTexture;           // the display's colour table (Gpu::DisplayGamma)
     ComPtr<ID3D11ShaderResourceView> g_gammaView;
     ComPtr<ID3D11Texture1D> g_identityGammaTexture;   // a table that changes nothing, for the films
@@ -169,6 +173,57 @@ namespace
         "    stream.Append(input[c]); stream.Append(input[a]); stream.Append(input[b]); stream.Append(fourth(input[a], input[c], input[b]));\n"
         "    stream.RestartStrip(); }\n";
 
+    // FXAA 3.11, the quality path, on the presented picture: the edges the
+    // title's own picture has, softened by the luma along them. The colour
+    // at uv, before the display's table: the SDR present puts it through
+    // that, the HDR one (hdr/cod3_hdr.hlsl, which includes this as
+    // cod3_fxaa.hlsl) through RenoDX's output. Wants source, smp and texel.
+#define COD3_FXAA_SOURCE \
+        "float luma(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }\n" \
+        "float3 fxaaColor(float2 uv) {\n" \
+        "    float2 px = texel.xy;\n" \
+        "    float3 rgbM = source.Sample(smp, uv).rgb; float lM = luma(rgbM);\n" \
+        "    float lN = luma(source.Sample(smp, uv + float2(0, -px.y)).rgb), lS = luma(source.Sample(smp, uv + float2(0, px.y)).rgb);\n" \
+        "    float lW = luma(source.Sample(smp, uv + float2(-px.x, 0)).rgb), lE = luma(source.Sample(smp, uv + float2(px.x, 0)).rgb);\n" \
+        "    float lMin = min(lM, min(min(lN, lS), min(lW, lE))), lMax = max(lM, max(max(lN, lS), max(lW, lE)));\n" \
+        "    float range = lMax - lMin;\n" \
+        "    if (range < max(0.0312, lMax * 0.125)) return rgbM;\n" \
+        "    float lNW = luma(source.Sample(smp, uv + float2(-px.x, -px.y)).rgb), lNE = luma(source.Sample(smp, uv + float2(px.x, -px.y)).rgb);\n" \
+        "    float lSW = luma(source.Sample(smp, uv + float2(-px.x, px.y)).rgb), lSE = luma(source.Sample(smp, uv + float2(px.x, px.y)).rgb);\n" \
+        "    float lNS = lN + lS, lWE = lW + lE, lWc = lNW + lSW, lEc = lNE + lSE, lNc = lNW + lNE, lSc = lSW + lSE;\n" \
+        "    float edgeH = abs(-2.0 * lW + lWc) + abs(-2.0 * lM + lNS) * 2.0 + abs(-2.0 * lE + lEc);\n" \
+        "    float edgeV = abs(-2.0 * lN + lNc) + abs(-2.0 * lM + lWE) * 2.0 + abs(-2.0 * lS + lSc);\n" \
+        "    bool horizontal = edgeH >= edgeV;\n" \
+        "    float l1 = horizontal ? lS : lE, l2 = horizontal ? lN : lW;\n" \
+        "    float g1 = l1 - lM, g2 = l2 - lM; bool steep1 = abs(g1) >= abs(g2);\n" \
+        "    float gradScaled = 0.25 * max(abs(g1), abs(g2));\n" \
+        "    float step = horizontal ? px.y : px.x; float lAvg = 0.0;\n" \
+        "    if (steep1) { lAvg = 0.5 * (l1 + lM); } else { step = -step; lAvg = 0.5 * (l2 + lM); }\n" \
+        "    float2 cur = uv; if (horizontal) cur.y += step * 0.5; else cur.x += step * 0.5;\n" \
+        "    float2 off = horizontal ? float2(px.x, 0) : float2(0, px.y);\n" \
+        "    float2 uv1 = cur - off, uv2 = cur + off;\n" \
+        "    float e1 = luma(source.Sample(smp, uv1).rgb) - lAvg, e2 = luma(source.Sample(smp, uv2).rgb) - lAvg;\n" \
+        "    bool r1 = abs(e1) >= gradScaled, r2 = abs(e2) >= gradScaled; bool done = r1 && r2;\n" \
+        "    if (!r1) uv1 -= off; if (!r2) uv2 += off;\n" \
+        "    if (!done) { [loop] for (int i = 2; i < 12; i++) {\n" \
+        "        if (!r1) e1 = luma(source.Sample(smp, uv1).rgb) - lAvg; if (!r2) e2 = luma(source.Sample(smp, uv2).rgb) - lAvg;\n" \
+        "        r1 = abs(e1) >= gradScaled; r2 = abs(e2) >= gradScaled; done = r1 && r2;\n" \
+        "        float q = i < 5 ? 1.5 : i < 10 ? 2.0 : 4.0;\n" \
+        "        if (!r1) uv1 -= off * q; if (!r2) uv2 += off * q; if (done) break; } }\n" \
+        "    float d1 = horizontal ? (uv.x - uv1.x) : (uv.y - uv1.y), d2 = horizontal ? (uv2.x - uv.x) : (uv2.y - uv.y);\n" \
+        "    bool dir1 = d1 < d2; float dist = min(d1, d2), edgeLen = d1 + d2;\n" \
+        "    float pixelOffset = -dist / edgeLen + 0.5;\n" \
+        "    bool lessThanAvg = lM < lAvg;\n" \
+        "    bool correct = ((dir1 ? e1 : e2) < 0.0) != lessThanAvg;\n" \
+        "    float finalOffset = correct ? pixelOffset : 0.0;\n" \
+        "    float lAvg12 = (1.0 / 12.0) * (2.0 * (lNS + lWE) + lWc + lEc);\n" \
+        "    float sub = clamp(abs(lAvg12 - lM) / range, 0.0, 1.0);\n" \
+        "    float subFinal = (-2.0 * sub + 3.0) * sub * sub; subFinal = subFinal * subFinal * 0.75;\n" \
+        "    finalOffset = max(finalOffset, subFinal);\n" \
+        "    float2 finalUv = uv; if (horizontal) finalUv.y += finalOffset * step; else finalUv.x += finalOffset * step;\n" \
+        "    return source.Sample(smp, finalUv).rgb; }\n"
+    const char* const FxaaSource = COD3_FXAA_SOURCE;
+
     // One triangle over the target; the rectangle of the source it shows
     // and the source's texel size come in the constants.
     const char* const QuadSource =
@@ -184,51 +239,8 @@ namespace
         " v.position = float4(t * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0); v.uv = uvRect.xy + t * uvRect.zw; return v; }\n"
         "float4 copy(V v) : SV_Target { return source.Sample(smp, v.uv); }\n"
         "float4 present(V v) : SV_Target { return float4(gamma(source.Sample(smp, v.uv).rgb), 1.0); }\n"
-        // FXAA 3.11, the quality path, on the presented picture: the edges
-        // the title's own picture has, softened by the luma along them.
-        "float luma(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }\n"
-        "float4 fxaa(V v) : SV_Target {\n"
-        "    float2 uv = v.uv; float2 px = texel.xy;\n"
-        "    float3 rgbM = source.Sample(smp, uv).rgb; float lM = luma(rgbM);\n"
-        "    float lN = luma(source.Sample(smp, uv + float2(0, -px.y)).rgb), lS = luma(source.Sample(smp, uv + float2(0, px.y)).rgb);\n"
-        "    float lW = luma(source.Sample(smp, uv + float2(-px.x, 0)).rgb), lE = luma(source.Sample(smp, uv + float2(px.x, 0)).rgb);\n"
-        "    float lMin = min(lM, min(min(lN, lS), min(lW, lE))), lMax = max(lM, max(max(lN, lS), max(lW, lE)));\n"
-        "    float range = lMax - lMin;\n"
-        "    if (range < max(0.0312, lMax * 0.125)) return float4(gamma(rgbM), 1.0);\n"
-        "    float lNW = luma(source.Sample(smp, uv + float2(-px.x, -px.y)).rgb), lNE = luma(source.Sample(smp, uv + float2(px.x, -px.y)).rgb);\n"
-        "    float lSW = luma(source.Sample(smp, uv + float2(-px.x, px.y)).rgb), lSE = luma(source.Sample(smp, uv + float2(px.x, px.y)).rgb);\n"
-        "    float lNS = lN + lS, lWE = lW + lE, lWc = lNW + lSW, lEc = lNE + lSE, lNc = lNW + lNE, lSc = lSW + lSE;\n"
-        "    float edgeH = abs(-2.0 * lW + lWc) + abs(-2.0 * lM + lNS) * 2.0 + abs(-2.0 * lE + lEc);\n"
-        "    float edgeV = abs(-2.0 * lN + lNc) + abs(-2.0 * lM + lWE) * 2.0 + abs(-2.0 * lS + lSc);\n"
-        "    bool horizontal = edgeH >= edgeV;\n"
-        "    float l1 = horizontal ? lS : lE, l2 = horizontal ? lN : lW;\n"
-        "    float g1 = l1 - lM, g2 = l2 - lM; bool steep1 = abs(g1) >= abs(g2);\n"
-        "    float gradScaled = 0.25 * max(abs(g1), abs(g2));\n"
-        "    float step = horizontal ? px.y : px.x; float lAvg = 0.0;\n"
-        "    if (steep1) { lAvg = 0.5 * (l1 + lM); } else { step = -step; lAvg = 0.5 * (l2 + lM); }\n"
-        "    float2 cur = uv; if (horizontal) cur.y += step * 0.5; else cur.x += step * 0.5;\n"
-        "    float2 off = horizontal ? float2(px.x, 0) : float2(0, px.y);\n"
-        "    float2 uv1 = cur - off, uv2 = cur + off;\n"
-        "    float e1 = luma(source.Sample(smp, uv1).rgb) - lAvg, e2 = luma(source.Sample(smp, uv2).rgb) - lAvg;\n"
-        "    bool r1 = abs(e1) >= gradScaled, r2 = abs(e2) >= gradScaled; bool done = r1 && r2;\n"
-        "    if (!r1) uv1 -= off; if (!r2) uv2 += off;\n"
-        "    if (!done) { [loop] for (int i = 2; i < 12; i++) {\n"
-        "        if (!r1) e1 = luma(source.Sample(smp, uv1).rgb) - lAvg; if (!r2) e2 = luma(source.Sample(smp, uv2).rgb) - lAvg;\n"
-        "        r1 = abs(e1) >= gradScaled; r2 = abs(e2) >= gradScaled; done = r1 && r2;\n"
-        "        float q = i < 5 ? 1.5 : i < 10 ? 2.0 : 4.0;\n"
-        "        if (!r1) uv1 -= off * q; if (!r2) uv2 += off * q; if (done) break; } }\n"
-        "    float d1 = horizontal ? (uv.x - uv1.x) : (uv.y - uv1.y), d2 = horizontal ? (uv2.x - uv.x) : (uv2.y - uv.y);\n"
-        "    bool dir1 = d1 < d2; float dist = min(d1, d2), edgeLen = d1 + d2;\n"
-        "    float pixelOffset = -dist / edgeLen + 0.5;\n"
-        "    bool lessThanAvg = lM < lAvg;\n"
-        "    bool correct = ((dir1 ? e1 : e2) < 0.0) != lessThanAvg;\n"
-        "    float finalOffset = correct ? pixelOffset : 0.0;\n"
-        "    float lAvg12 = (1.0 / 12.0) * (2.0 * (lNS + lWE) + lWc + lEc);\n"
-        "    float sub = clamp(abs(lAvg12 - lM) / range, 0.0, 1.0);\n"
-        "    float subFinal = (-2.0 * sub + 3.0) * sub * sub; subFinal = subFinal * subFinal * 0.75;\n"
-        "    finalOffset = max(finalOffset, subFinal);\n"
-        "    float2 finalUv = uv; if (horizontal) finalUv.y += finalOffset * step; else finalUv.x += finalOffset * step;\n"
-        "    return float4(gamma(source.Sample(smp, finalUv).rgb), 1.0); }\n";
+        COD3_FXAA_SOURCE
+        "float4 fxaa(V v) : SV_Target { return float4(gamma(fxaaColor(v.uv)), 1.0); }\n";
 
     // The copy of a multisampled target, which has no sampler: the texel
     // by position, a colour as the average of its samples, a depth as its
@@ -321,7 +333,8 @@ namespace
     void DrawQuad(ID3D11ShaderResourceView* source, uint32_t sourceWidth, uint32_t sourceHeight,
                   float x0, float y0, float width, float height,
                   ID3D11RenderTargetView* target, const D3D11_VIEWPORT& viewport,
-                  ID3D11PixelShader* program, ID3D11SamplerState* sampler, ID3D11ShaderResourceView* second = nullptr)
+                  ID3D11PixelShader* program, ID3D11SamplerState* sampler, ID3D11ShaderResourceView* second = nullptr,
+                  ID3D11BlendState* blend = nullptr)
     {
         if (!BuiltInPrograms()) return;
         const float constants[8] = { x0 / sourceWidth, y0 / sourceHeight, width / sourceWidth, height / sourceHeight,
@@ -336,7 +349,7 @@ namespace
         g_context->OMSetRenderTargets(1, targets, nullptr);
         g_context->RSSetViewports(1, &viewport);
         { const float none[4] = {}; g_context->RSSetState(RenderPipeline::RasterizerObject(RenderPipeline::Rasterizer(0, false, true, none))); }
-        g_context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+        g_context->OMSetBlendState(blend, nullptr, 0xFFFFFFFF);
         g_context->OMSetDepthStencilState(nullptr, 0);
         g_context->VSSetShader(g_quadVertexShader.Get(), nullptr, 0);
         g_context->GSSetShader(nullptr, nullptr, 0);
@@ -344,6 +357,9 @@ namespace
         ID3D11Buffer* buffers[1] = { g_quadConstants.Get() };
         g_context->VSSetConstantBuffers(0, 1, buffers);
         g_context->PSSetConstantBuffers(0, 1, buffers);
+        // The HDR programs' settings (hdr/cod3_hdr.hlsl), where the title's
+        // draws have their booleans: those are bound again after this.
+        if (g_hdrConstants) { ID3D11Buffer* hdr[1] = { g_hdrConstants.Get() }; g_context->PSSetConstantBuffers(1, 1, hdr); }
         ID3D11ShaderResourceView* sources[2] = { source, second };
         g_context->PSSetShaderResources(0, 2, sources);
         ID3D11SamplerState* samplers[1] = { sampler };
@@ -539,15 +555,47 @@ namespace
         }
     }
 
+    // A half float as a float.
+    float HalfToFloat(uint16_t h)
+    {
+        const uint32_t sign = uint32_t(h & 0x8000u) << 16, exponent = (h >> 10) & 0x1Fu, mantissa = h & 0x3FFu;
+        uint32_t bits;
+        if (exponent == 0) { const float f = std::ldexp(float(mantissa), -24); return sign ? -f : f; }
+        if (exponent == 31) bits = sign | 0x7F800000u | (mantissa << 13);
+        else bits = sign | ((exponent + 112u) << 23) | (mantissa << 13);
+        float f;
+        memcpy(&f, &bits, 4);
+        return f;
+    }
+
+    // A channel of a 16 bit float picture as a byte: the HDR mode's targets
+    // hold the title's colour as an 8 bit one would, past one clipped; the
+    // scRGB back buffer (scRgbWhite nonzero) is light, one being 80 nits,
+    // shown with the game's white at the top and the sRGB curve.
+    uint8_t HalfToByte(uint16_t h, float scRgbWhite)
+    {
+        float v = HalfToFloat(h);
+        if (!(v > 0.0f)) return 0;
+        if (scRgbWhite > 0.0f)
+        {
+            v /= scRgbWhite;
+            v = v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(std::min(v, 1.0f), 1.0f / 2.4f) - 0.055f;
+        }
+        return uint8_t(std::min(v, 1.0f) * 255.0f + 0.5f);
+    }
+
+    std::atomic<float> g_screenshotWhite{ 0.0f };   // the HDR back buffer's white for pictures of it, scRGB
+
     // A texture read back at a quarter size, as B G R A rows; empty when it
     // could not be.
-    std::vector<uint8_t> ReadBack(ID3D11Texture2D* texture, uint32_t& w, uint32_t& h, uint32_t shrink)
+    std::vector<uint8_t> ReadBack(ID3D11Texture2D* texture, uint32_t& w, uint32_t& h, uint32_t shrink, float scRgbWhite = 0.0f)
     {
         std::vector<uint8_t> pixels;
         if (texture == nullptr) return pixels;
         D3D11_TEXTURE2D_DESC desc{};
         texture->GetDesc(&desc);
-        if (desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM && desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM) return pixels;
+        const bool half = desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT;
+        if (desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM && desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM && !half) return pixels;
         // A multisampled target is resolved to one sample first: a staging
         // copy cannot be made of it directly.
         ComPtr<ID3D11Texture2D> resolved;
@@ -582,8 +630,15 @@ namespace
             const uint8_t* row = static_cast<const uint8_t*>(mapped.pData) + size_t(y) * shrink * mapped.RowPitch;
             for (uint32_t x = 0; x < w; x++)
             {
-                const uint8_t* from = row + size_t(x) * shrink * 4;
                 uint8_t* to = pixels.data() + (size_t(y) * w + x) * 4;
+                if (half)
+                {
+                    uint16_t c[4];
+                    memcpy(c, row + size_t(x) * shrink * 8, 8);
+                    to[0] = HalfToByte(c[2], scRgbWhite); to[1] = HalfToByte(c[1], scRgbWhite); to[2] = HalfToByte(c[0], scRgbWhite); to[3] = 255;
+                    continue;
+                }
+                const uint8_t* from = row + size_t(x) * shrink * 4;
                 to[0] = rgba ? from[2] : from[0]; to[1] = from[1]; to[2] = rgba ? from[0] : from[2]; to[3] = 255;
             }
         }
@@ -673,7 +728,7 @@ namespace
         // COD3_FRAMEDUMP_SHRINK=N: each side divided by N, for long runs.
         static const uint32_t shrink = []() { const char* t = getenv("COD3_FRAMEDUMP_SHRINK"); const long v = t ? strtol(t, nullptr, 10) : 1; return uint32_t(v >= 1 && v <= 16 ? v : 1); }();
         uint32_t w = 0, h = 0;
-        const std::vector<uint8_t> pixels = ReadBack(back, w, h, shrink);
+        const std::vector<uint8_t> pixels = ReadBack(back, w, h, shrink, g_screenshotWhite.load(std::memory_order_relaxed));
         if (pixels.empty()) return;
         char name[512];
         snprintf(name, sizeof(name), "%s-%03d.bmp", path, (counter / every) % keep);
@@ -720,6 +775,8 @@ namespace
 
     // The command on the context: each thing it names compared with what
     // is bound and set only when it differs, then the one draw call.
+    void HdrScenePass(const RenderState::DrawCommand& command);   // the HDR section, below
+
     void ExecuteDraw(const RenderState::DrawCommand& command)
     {
         RenderStats::Enter(RenderStats::SectionBind);
@@ -901,6 +958,9 @@ namespace
             dumpThis = strncmp(name, dumpPixel, strlen(dumpPixel)) == 0;
         }
         if (dumpThis) DumpTargetAfterDraw(command.colorTexture, command.depthTexture);
+        // The HDR mode: right after the bloom's composite, the frame tone
+        // mapped where the HUD is about to be drawn over it.
+        if (command.hdrScene) HdrScenePass(command);
         PicturesAtDraw(command);
     }
 
@@ -935,7 +995,7 @@ namespace
         if (texture == nullptr || p.file == nullptr) return;
         D3D11_TEXTURE2D_DESC desc{};
         texture->GetDesc(&desc);
-        if (desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM && desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM) return;
+        if (desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM && desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM && desc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT) return;
         constexpr uint32_t Width = 160;
         if (!p.copy || p.copyWidth != desc.Width || p.copyHeight != desc.Height || p.copyFormat != desc.Format)
         {
@@ -949,6 +1009,9 @@ namespace
             p.thumbHeight = std::max(1u, uint32_t(uint64_t(Width) * desc.Height / desc.Width));
             D3D11_TEXTURE2D_DESC s = c;
             s.Width = Width; s.Height = p.thumbHeight; s.MipLevels = 1; s.MiscFlags = 0; s.BindFlags = D3D11_BIND_RENDER_TARGET;
+            // The picture 8 bit whatever the target (the HDR mode's are
+            // 16 bit float): the copy program's output clips it at one.
+            if (desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) s.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
             if (FAILED(g_device->CreateTexture2D(&s, nullptr, &p.thumb))) return;
             g_device->CreateRenderTargetView(p.thumb.Get(), nullptr, &p.thumbView);
             s.Usage = D3D11_USAGE_STAGING; s.BindFlags = 0; s.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
@@ -1430,13 +1493,389 @@ namespace
         }
     }
 
+    // --- HDR -------------------------------------------------------------------------------------------
+    //
+    // The HDR mode (F11's HDR tab), on RenoDX (thirdparty/renodx, MIT,
+    // Carlos Lopez Jr. and contributors) and the Prism tone mapper
+    // (thirdparty/prism, MIT, Musa Haji and OopyDoopy / KickFister / Jon):
+    //
+    //   - the swap chain scRGB: 16 bit float, linear, one being 80 nits
+    //   - the title's 8 bit colour targets 16 bit float (render_resources.cpp),
+    //     its pixel programs' output kept from nought up (xenos_hlsl.cpp)
+    //   - right after the bloom's composite the frame is tone mapped where it
+    //     lies, before the HUD is drawn over it (HdrScenePass)
+    //   - the present is RenoDX's swap chain pass, and Dear ImGui draws into a
+    //     layer of its own, laid over at the UI's brightness
+    //
+    // The programs are hdr/cod3_hdr.hlsl on RenoDX's library, built into the
+    // executable (hdr_shaders.h), compiled the first time each is needed on
+    // a thread of their own; until one is ready the pass waits a frame.
+
+    std::atomic<bool> g_hdrWanted{ false };       // the setting, at the frame's edge
+    std::atomic<bool> g_hdrSwapChain{ false };     // the swap chain is scRGB now
+    DXGI_FORMAT g_swapChainFormat = DXGI_FORMAT_UNKNOWN;
+    int g_hdrToneMapper = 3;
+    float g_hdrValues[20] = {};                    // hdr/cod3_hdr.hlsl's HdrSettings
+    std::atomic<float> g_displayPeak{ 0.0f };      // what Windows says of the display, for the menu
+    std::atomic<bool> g_displayHdr{ false };
+    std::atomic<int> g_hdrCompiling{ 0 };
+
+    // This frame's scene passes (one a view: a split screen has two), and
+    // whether the frame being shown had one.
+    std::vector<D3D11_RECT> g_hdrGraded;
+    bool g_hdrPresentGraded = false;
+
+    ComPtr<ID3D11Texture2D> g_hdrSceneCopy;
+    ComPtr<ID3D11ShaderResourceView> g_hdrSceneCopyView;
+    D3D11_TEXTURE2D_DESC g_hdrSceneCopyDesc{};
+
+    ComPtr<ID3D11Texture2D> g_uiTexture;           // Dear ImGui's layer
+    ComPtr<ID3D11RenderTargetView> g_uiView;
+    ComPtr<ID3D11ShaderResourceView> g_uiResource;
+    int g_uiWidth = 0, g_uiHeight = 0;
+    ComPtr<ID3D11BlendState> g_premultipliedBlend;
+
+    ID3D11ShaderResourceView* GammaTable();         // the present's, below
+
+    // The embedded files by path, any case: RenoDX's own includes name
+    // tonemap/dice.hlsl for DICE.hlsl, which only Windows' file system
+    // forgives.
+    std::string HdrNormalise(const std::string& path)
+    {
+        std::vector<std::string> parts;
+        std::string part;
+        auto flush = [&]() {
+            if (part.empty() || part == ".") { part.clear(); return; }
+            if (part == "..") { if (!parts.empty()) parts.pop_back(); part.clear(); return; }
+            parts.push_back(part);
+            part.clear();
+        };
+        for (char c : path)
+        {
+            if (c == '/' || c == '\\') flush();
+            else part += char(tolower(static_cast<unsigned char>(c)));
+        }
+        flush();
+        std::string out;
+        for (const std::string& p : parts) { if (!out.empty()) out += '/'; out += p; }
+        return out;
+    }
+
+    const HdrShaders::File* HdrFile(const std::string& normalised)
+    {
+        static const std::map<std::string, const HdrShaders::File*> files = []() {
+            std::map<std::string, const HdrShaders::File*> made;
+            for (size_t i = 0; i < HdrShaders::FileCount; i++) made[HdrNormalise(HdrShaders::Files[i].name)] = &HdrShaders::Files[i];
+            return made;
+        }();
+        const auto found = files.find(normalised);
+        return found != files.end() ? found->second : nullptr;
+    }
+
+    // An #include by the file that names it: relative to that file's
+    // folder, then from the top. The data handed out is the embedded text,
+    // which lives as long as the program, so nothing is freed.
+    class HdrInclude : public ID3DInclude
+    {
+    public:
+        HRESULT STDMETHODCALLTYPE Open(D3D_INCLUDE_TYPE, LPCSTR name, LPCVOID parent, LPCVOID* data, UINT* bytes) override
+        {
+            std::string folder;
+            if (const auto known = m_folders.find(parent); known != m_folders.end()) folder = known->second;
+            std::string path = HdrNormalise(folder + name);
+            const char* text = nullptr;
+            size_t size = 0;
+            if (path == "cod3_fxaa.hlsl") { text = FxaaSource; size = strlen(FxaaSource); }
+            else
+            {
+                const HdrShaders::File* file = HdrFile(path);
+                if (file == nullptr) { path = HdrNormalise(name); file = HdrFile(path); }
+                if (file != nullptr) { text = reinterpret_cast<const char*>(file->data); size = file->size; }
+            }
+            if (text == nullptr)
+            {
+                printf("render: the HDR programs include %s, which is not among them\n", name);
+                return E_FAIL;
+            }
+            const size_t slash = path.rfind('/');
+            m_folders[text] = slash == std::string::npos ? std::string() : path.substr(0, slash + 1);
+            *data = text;
+            *bytes = UINT(size);
+            return S_OK;
+        }
+        HRESULT STDMETHODCALLTYPE Close(LPCVOID) override { return S_OK; }
+
+    private:
+        std::map<const void*, std::string> m_folders;
+    };
+
+    struct HdrProgram
+    {
+        std::atomic<int> state{ 0 };   // 0 compiling, 1 ready, 2 failed
+        ComPtr<ID3D11PixelShader> shader;
+    };
+    std::mutex g_hdrProgramsMutex;
+    std::map<std::string, std::shared_ptr<HdrProgram>> g_hdrPrograms;
+
+    void CompileHdrProgram(std::shared_ptr<HdrProgram> program, std::string pass, int toneMapper, uint32_t samples, bool fxaa)
+    {
+        const HdrShaders::File* main = HdrFile("cod3_hdr.hlsl");
+        if (main == nullptr || g_compile == nullptr) { program->state.store(2, std::memory_order_release); return; }
+        char toneMapperText[8], samplesText[8];
+        snprintf(toneMapperText, sizeof(toneMapperText), "%d", toneMapper);
+        snprintf(samplesText, sizeof(samplesText), "%u", samples);
+        const char* passMacro = pass == "scene" ? "HDR_SCENE" : pass == "present" ? "HDR_PRESENT" : "HDR_UI";
+        const D3D_SHADER_MACRO defines[] = {
+            { passMacro, "1" }, { "HDR_TONEMAPPER", toneMapperText }, { "HDR_SAMPLES", samplesText },
+            { "HDR_FXAA", fxaa ? "1" : "0" }, { nullptr, nullptr } };
+        HdrInclude include;
+        ComPtr<ID3DBlob> code, errors;
+        const auto started = std::chrono::steady_clock::now();
+        const HRESULT hr = g_compile(main->data, main->size, "cod3_hdr.hlsl", defines, &include, pass.c_str(), "ps_5_0",
+                                     D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errors);
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+        if (FAILED(hr) || !code || FAILED(g_device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &program->shader)))
+        {
+            printf("render: the HDR %s program (tone mapper %d, %u samples) did not compile: %s\n", pass.c_str(), toneMapper, samples,
+                errors ? static_cast<const char*>(errors->GetBufferPointer()) : "no message");
+            fflush(stdout);
+            program->state.store(2, std::memory_order_release);
+            return;
+        }
+        printf("render: the HDR %s program (tone mapper %d, %u sample%s%s) compiled in %.0f ms\n", pass.c_str(), toneMapper, samples,
+            samples == 1 ? "" : "s", fxaa ? ", FXAA" : "", ms);
+        fflush(stdout);
+        program->state.store(1, std::memory_order_release);
+    }
+
+    // The program for a pass, or nothing while it is being compiled.
+    ID3D11PixelShader* HdrProgramFor(const char* pass, int toneMapper, uint32_t samples, bool fxaa)
+    {
+        char key[64];
+        snprintf(key, sizeof(key), "%s %d %u %d", pass, toneMapper, samples, fxaa ? 1 : 0);
+        std::shared_ptr<HdrProgram> program;
+        bool start = false;
+        {
+            std::lock_guard<std::mutex> lock(g_hdrProgramsMutex);
+            std::shared_ptr<HdrProgram>& slot = g_hdrPrograms[key];
+            if (!slot) { slot = std::make_shared<HdrProgram>(); start = true; }
+            program = slot;
+        }
+        if (start)
+        {
+            g_hdrCompiling.fetch_add(1);
+            std::thread([program, pass = std::string(pass), toneMapper, samples, fxaa]() {
+                CompileHdrProgram(program, pass, toneMapper, samples, fxaa);
+                g_hdrCompiling.fetch_sub(1);
+            }).detach();
+        }
+        return program->state.load(std::memory_order_acquire) == 1 ? program->shader.Get() : nullptr;
+    }
+
+    // The settings in hdr/cod3_hdr.hlsl's units (RenoDX's: the sliders'
+    // 50 is one). The peak left at nought is the display's own.
+    void HdrSettingsFrom(const Settings::Values& s)
+    {
+        const float reported = g_displayPeak.load(std::memory_order_relaxed);
+        float peak = s.hdrPeakNits > 0.0f ? s.hdrPeakNits : reported > 0.0f ? reported : 1000.0f;
+        const float game = std::max(s.hdrGameNits, 48.0f), ui = std::max(s.hdrUiNits, 48.0f);
+        peak = std::max(peak, game);
+        float* v = g_hdrValues;
+        v[0] = peak; v[1] = game; v[2] = ui; v[3] = float(std::clamp(s.hdrGammaCorrection, 0, 2));
+        v[4] = s.hdrExposure;
+        v[5] = s.hdrHighlights * 0.02f; v[6] = s.hdrShadows * 0.02f; v[7] = s.hdrContrast * 0.02f; v[8] = s.hdrSaturation * 0.02f;
+        v[9] = s.hdrHighlightSaturation * 0.02f; v[10] = s.hdrBlowout * 0.01f; v[11] = s.hdrFlare * 0.02f;
+        v[12] = s.hdrHueCorrection * 0.01f; v[13] = 0.5f + s.hdrConeResponse * 0.01f;
+        v[14] = s.hdrTvRamp ? 1.0f : 0.0f; v[15] = s.hdrFilmUpgrade ? 1.0f : 0.0f;
+        g_hdrToneMapper = std::clamp(s.hdrToneMapper, 0, 7);
+        g_screenshotWhite.store(g_hdrSwapChain ? game / 80.0f : 0.0f, std::memory_order_relaxed);
+    }
+
+    // The settings onto the GPU, with what this pass is about.
+    void HdrUpload(bool graded, bool film)
+    {
+        if (!g_hdrConstants)
+        {
+            D3D11_BUFFER_DESC desc{};
+            desc.ByteWidth = sizeof(g_hdrValues);
+            desc.Usage = D3D11_USAGE_DEFAULT;
+            desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+            if (FAILED(g_device->CreateBuffer(&desc, nullptr, &g_hdrConstants))) return;
+        }
+        g_hdrValues[16] = graded ? 1.0f : 0.0f;
+        g_hdrValues[17] = film ? 1.0f : 0.0f;
+        g_context->UpdateSubresource(g_hdrConstants.Get(), 0, nullptr, g_hdrValues, 0, 0);
+    }
+
+    // What Windows says of the display the window is on: HDR on or not, and
+    // its peak. Every few seconds: the window may have moved.
+    void QueryDisplay()
+    {
+        static uint32_t presents = 0;
+        if ((presents++ % 240) != 0 || !g_swapChain) return;
+        ComPtr<IDXGIOutput> output;
+        ComPtr<IDXGIOutput6> output6;
+        DXGI_OUTPUT_DESC1 desc{};
+        if (FAILED(g_swapChain->GetContainingOutput(&output)) || FAILED(output.As(&output6)) || FAILED(output6->GetDesc1(&desc))) return;
+        const bool hdr = desc.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+        if (hdr != g_displayHdr.load() || desc.MaxLuminance != g_displayPeak.load())
+        {
+            printf("render: the display is %s, its peak %.0f nits\n", hdr ? "in HDR" : "in SDR (HDR is off in Windows' display settings)", desc.MaxLuminance);
+            fflush(stdout);
+        }
+        g_displayHdr.store(hdr);
+        g_displayPeak.store(desc.MaxLuminance);
+    }
+
+    // The scene pass: the frame's target, as the bloom left it, tone mapped
+    // over the composite's rectangle, the programs' input a copy of it.
+    // With MSAA the copy is the target resolved, and each pixel's samples
+    // all get its tone mapped colour: the edges keep their blend, the HUD
+    // drawn next still has every sample to cover, and the copy is one
+    // sample's size rather than four or eight. Once a view a frame.
+    void HdrScenePass(const RenderState::DrawCommand& command)
+    {
+        ID3D11Texture2D* target = command.colorTexture;
+        if (!g_hdrWanted.load(std::memory_order_relaxed) || target == nullptr || command.targets[0] == nullptr) return;
+        D3D11_TEXTURE2D_DESC desc{};
+        target->GetDesc(&desc);
+        if (desc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT) return;
+        const D3D11_RECT rect{ command.scissor[0], command.scissor[1],
+                               std::min<LONG>(command.scissor[2], LONG(desc.Width)), std::min<LONG>(command.scissor[3], LONG(desc.Height)) };
+        if (rect.right <= rect.left || rect.bottom <= rect.top) return;
+        for (const D3D11_RECT& done : g_hdrGraded)
+            if (rect.left < done.right && done.left < rect.right && rect.top < done.bottom && done.top < rect.bottom) return;
+        const uint32_t samples = desc.SampleDesc.Count;
+        ID3D11PixelShader* program = HdrProgramFor("scene", g_hdrToneMapper, 1, false);
+        if (program == nullptr || !BuiltInPrograms()) return;
+
+        if (!g_hdrSceneCopy || g_hdrSceneCopyDesc.Width != desc.Width || g_hdrSceneCopyDesc.Height != desc.Height)
+        {
+            g_hdrSceneCopy.Reset();
+            g_hdrSceneCopyView.Reset();
+            D3D11_TEXTURE2D_DESC copy = desc;
+            copy.SampleDesc.Count = 1;
+            copy.SampleDesc.Quality = 0;
+            copy.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            copy.MiscFlags = 0;
+            copy.CPUAccessFlags = 0;
+            copy.Usage = D3D11_USAGE_DEFAULT;
+            if (FAILED(g_device->CreateTexture2D(&copy, nullptr, &g_hdrSceneCopy)) ||
+                FAILED(g_device->CreateShaderResourceView(g_hdrSceneCopy.Get(), nullptr, &g_hdrSceneCopyView)))
+            {
+                g_hdrSceneCopy.Reset();
+                g_hdrSceneCopyView.Reset();
+                return;
+            }
+            g_hdrSceneCopyDesc = desc;
+        }
+        // The copy: the rectangle alone, or a multisampled target resolved.
+        if (samples > 1) g_context->ResolveSubresource(g_hdrSceneCopy.Get(), 0, target, 0, DXGI_FORMAT_R16G16B16A16_FLOAT);
+        else
+        {
+            const D3D11_BOX box{ UINT(rect.left), UINT(rect.top), 0, UINT(rect.right), UINT(rect.bottom), 1 };
+            g_context->CopySubresourceRegion(g_hdrSceneCopy.Get(), 0, UINT(rect.left), UINT(rect.top), 0, target, 0, &box);
+        }
+
+        HdrUpload(false, false);
+        ID3D11ShaderResourceView* none[32] = {};
+        g_context->PSSetShaderResources(0, 32, none);
+        g_context->VSSetShaderResources(0, 32, none);
+        ID3D11RenderTargetView* targets[1] = { command.targets[0] };
+        g_context->OMSetRenderTargets(1, targets, nullptr);
+        const D3D11_VIEWPORT viewport{ 0.0f, 0.0f, float(desc.Width), float(desc.Height), 0.0f, 1.0f };
+        g_context->RSSetViewports(1, &viewport);
+        g_context->RSSetScissorRects(1, &rect);
+        { const float noOffset[4] = {}; g_context->RSSetState(RenderPipeline::RasterizerObject(RenderPipeline::Rasterizer(0, true, true, noOffset))); }
+        g_context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+        g_context->OMSetDepthStencilState(nullptr, 0);
+        g_context->VSSetShader(g_quadVertexShader.Get(), nullptr, 0);
+        g_context->GSSetShader(nullptr, nullptr, 0);
+        g_context->PSSetShader(program, nullptr, 0);
+        ID3D11Buffer* quad[1] = { g_quadConstants.Get() };
+        g_context->VSSetConstantBuffers(0, 1, quad);
+        ID3D11Buffer* hdr[1] = { g_hdrConstants.Get() };
+        g_context->PSSetConstantBuffers(1, 1, hdr);
+        ID3D11ShaderResourceView* sources[2] = { g_hdrSceneCopyView.Get(), GammaTable() };
+        g_context->PSSetShaderResources(0, 2, sources);
+        ID3D11SamplerState* samplers[1] = { g_linearSampler.Get() };
+        g_context->PSSetSamplers(0, 1, samplers);
+        g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        g_context->IASetInputLayout(nullptr);
+        g_context->Draw(3, 0);
+        g_context->PSSetShaderResources(0, 2, none);
+        // Everything the draws had bound is gone; the next draw binds its own.
+        ForgetBindings();
+        g_hdrGraded.push_back(rect);
+    }
+
+    // Dear ImGui's layer, the swap chain's size.
+    bool UiLayerReady(int width, int height)
+    {
+        if (g_uiTexture && g_uiWidth == width && g_uiHeight == height) return true;
+        g_uiTexture.Reset(); g_uiView.Reset(); g_uiResource.Reset();
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width = UINT(width);
+        desc.Height = UINT(height);
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(g_device->CreateTexture2D(&desc, nullptr, &g_uiTexture)) ||
+            FAILED(g_device->CreateRenderTargetView(g_uiTexture.Get(), nullptr, &g_uiView)) ||
+            FAILED(g_device->CreateShaderResourceView(g_uiTexture.Get(), nullptr, &g_uiResource)))
+        {
+            g_uiTexture.Reset(); g_uiView.Reset(); g_uiResource.Reset();
+            return false;
+        }
+        g_uiWidth = width;
+        g_uiHeight = height;
+        if (!g_premultipliedBlend)
+        {
+            D3D11_BLEND_DESC blend{};
+            blend.RenderTarget[0].BlendEnable = TRUE;
+            blend.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
+            blend.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+            blend.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+            blend.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+            blend.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+            blend.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+            blend.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+            g_device->CreateBlendState(&blend, &g_premultipliedBlend);
+        }
+        return true;
+    }
+
     // --- the present ------------------------------------------------------------------------------------
+
+    // The colour space the swap chain is shown in: scRGB for the HDR mode
+    // (16 bit float, linear, BT.709 primaries, one at 80 nits), sRGB else.
+    void SetSwapChainColourSpace(bool hdr)
+    {
+        ComPtr<IDXGISwapChain3> chain3;
+        if (FAILED(g_swapChain.As(&chain3))) return;
+        const DXGI_COLOR_SPACE_TYPE space = hdr ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+        UINT support = 0;
+        if (SUCCEEDED(chain3->CheckColorSpaceSupport(space, &support)) && (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) != 0)
+            chain3->SetColorSpace1(space);
+        else if (hdr)
+        {
+            static bool said = false;
+            if (!said) { said = true; printf("render: the swap chain cannot be shown as scRGB here; the HDR mode's picture goes out as it is\n"); fflush(stdout); }
+        }
+    }
 
     bool SwapChainReady()
     {
         const HWND hwnd = g_window.load();
         const int width = g_clientWidth.load(), height = g_clientHeight.load();
         if (hwnd == nullptr || width <= 0 || height <= 0) return false;
+        // The HDR mode's swap chain is 16 bit float (scRGB); changing it is a
+        // resize to the other format.
+        const bool hdr = g_hdrWanted.load(std::memory_order_relaxed);
+        const DXGI_FORMAT format = hdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_B8G8R8A8_UNORM;
         if (!g_swapChain || g_swapChainWindow != hwnd)
         {
             g_backView.Reset();
@@ -1450,7 +1889,7 @@ namespace
             DXGI_SWAP_CHAIN_DESC1 desc{};
             desc.Width = width;
             desc.Height = height;
-            desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            desc.Format = format;
             desc.SampleDesc.Count = 1;
             desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
             desc.BufferCount = 3;
@@ -1464,16 +1903,27 @@ namespace
             g_swapChainWindow = hwnd;
             g_swapChainWidth = width;
             g_swapChainHeight = height;
+            g_swapChainFormat = format;
+            SetSwapChainColourSpace(hdr);
+            g_hdrSwapChain = hdr;
         }
-        else if (g_swapChainWidth != width || g_swapChainHeight != height)
+        else if (g_swapChainWidth != width || g_swapChainHeight != height || g_swapChainFormat != format)
         {
             g_backView.Reset();
             g_backTexture.Reset();
             g_context->OMSetRenderTargets(0, nullptr, nullptr);
             ForgetBindings();
-            g_swapChain->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, g_tearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0);
+            const HRESULT hr = g_swapChain->ResizeBuffers(0, width, height, format, g_tearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0);
             g_swapChainWidth = width;
             g_swapChainHeight = height;
+            if (SUCCEEDED(hr) && g_swapChainFormat != format)
+            {
+                g_swapChainFormat = format;
+                SetSwapChainColourSpace(hdr);
+                g_hdrSwapChain = hdr;
+                printf("render: the swap chain is %s\n", hdr ? "scRGB, 16 bit float (HDR)" : "8 bit sRGB");
+                fflush(stdout);
+            }
         }
         if (!g_backView)
         {
@@ -1559,6 +2009,8 @@ namespace
         const int clientWidth = g_swapChainWidth, clientHeight = g_swapChainHeight;
         const float black[4] = { 0, 0, 0, 1 };
         g_context->ClearRenderTargetView(g_backView.Get(), black);
+        const bool hdr = g_hdrSwapChain;
+        QueryDisplay();
 
         const RenderResources::Resolved* frame = RenderResources::ResolvedAt(g_frontBuffer);
         const bool fxaa = (AntiAliasing(settings) == 1 || AntiAliasing(settings) == 5) && g_fxaaPixelShader;
@@ -1573,12 +2025,41 @@ namespace
             // and writes into the picture's rectangle: the frame is the
             // chosen resolution, so its rows are the window's, and it has
             // no black either side to bleed a dark rim into the edges.
-            DrawQuad(frame->resource, frame->width, frame->height, 0, 0, float(frame->width), float(frame->height),
-                     g_backView.Get(), viewport, fxaa ? g_fxaaPixelShader.Get() : g_presentPixelShader.Get(), g_linearSampler.Get(), GammaTable());
+            if (!hdr)
+                DrawQuad(frame->resource, frame->width, frame->height, 0, 0, float(frame->width), float(frame->height),
+                         g_backView.Get(), viewport, fxaa ? g_fxaaPixelShader.Get() : g_presentPixelShader.Get(), g_linearSampler.Get(), GammaTable());
+            // The HDR mode: RenoDX's swap chain pass (hdr/cod3_hdr.hlsl),
+            // the frame already tone mapped when its scene pass ran.
+            else if (ID3D11PixelShader* program = HdrProgramFor("present", 0, 1, fxaa))
+            {
+                HdrUpload(g_hdrPresentGraded, Kernel::FilmPlaying());
+                DrawQuad(frame->resource, frame->width, frame->height, 0, 0, float(frame->width), float(frame->height),
+                         g_backView.Get(), viewport, program, g_linearSampler.Get(), GammaTable());
+            }
         }
         // The menu, the counters and the screenshot key, over the picture.
         Overlay::Initialize(g_swapChainWindow, g_device.Get(), g_context.Get());
-        Overlay::Render(g_backView.Get(), g_backTexture.Get(), clientWidth, clientHeight);
+        if (!hdr) Overlay::Render(g_backView.Get(), g_backTexture.Get(), clientWidth, clientHeight);
+        else
+        {
+            // The screenshot of the picture alone, made 8 bit (the game's
+            // white at the top); then Dear ImGui into its layer, laid over
+            // at the UI's brightness.
+            if (Overlay::TakeScreenshotRequest()) Overlay::SaveScreenshot(g_backTexture.Get(), clientWidth, clientHeight, g_hdrValues[1] / 80.0f);
+            if (UiLayerReady(clientWidth, clientHeight))
+            {
+                const float clear[4] = { 0, 0, 0, 0 };
+                g_context->ClearRenderTargetView(g_uiView.Get(), clear);
+                if (Overlay::Render(g_uiView.Get(), nullptr, clientWidth, clientHeight))
+                    if (ID3D11PixelShader* program = HdrProgramFor("ui", 0, 1, false))
+                    {
+                        HdrUpload(false, false);
+                        const D3D11_VIEWPORT whole{ 0.0f, 0.0f, float(clientWidth), float(clientHeight), 0.0f, 1.0f };
+                        DrawQuad(g_uiResource.Get(), UINT(clientWidth), UINT(clientHeight), 0, 0, float(clientWidth), float(clientHeight),
+                                 g_backView.Get(), whole, program, g_pointSampler.Get(), nullptr, g_premultipliedBlend.Get());
+                    }
+            }
+        }
         ID3D11RenderTargetView* noTargets[1] = { nullptr };
         g_context->OMSetRenderTargets(1, noTargets, nullptr);
         ForgetBindings();
@@ -1661,6 +2142,20 @@ namespace
     void ApplySettings(const Settings::Values& settings)
     {
         g_filmVideoLevels.store(settings.filmVideoLevels, std::memory_order_relaxed);
+        // The HDR mode: the swap chain at the next present, the targets at
+        // the next frame's start, the scene pass and the bloom from the
+        // next draw; and the programs it will want, started now.
+        g_hdrWanted.store(settings.hdr, std::memory_order_relaxed);
+        RenderResources::RequestHdrTargets(settings.hdr);
+        RenderCommands::SetHdr(settings.hdr, std::clamp(settings.hdrBloom, 0.0f, 100.0f) * 0.02f);
+        HdrSettingsFrom(settings);
+        if (settings.hdr)
+        {
+            const int aa = AntiAliasing(settings);
+            HdrProgramFor("present", 0, 1, aa == 1 || aa == 5);
+            HdrProgramFor("ui", 0, 1, false);
+            HdrProgramFor("scene", g_hdrToneMapper, 1, false);
+        }
         // The optimizations' switches (tuning.h), for the next frame.
         Tuning::depthThread.store(settings.depthThread, std::memory_order_relaxed);
         Tuning::fastConstants.store(settings.fastConstants, std::memory_order_relaxed);
@@ -1839,6 +2334,10 @@ void Render::Swap(uint32_t frontBufferPhysical, uint32_t width, uint32_t height)
     PollDepthWritebacks();
     g_frontBuffer = Guest::GpuOffset(frontBufferPhysical);
     if (FrameLogged()) printf("frame: swap %llu of %08X\n", (unsigned long long)g_swaps.load(std::memory_order_relaxed), frontBufferPhysical);
+    // Whether this frame had the HDR mode's scene pass: it is shown so,
+    // and again by an idle present until the next swap.
+    g_hdrPresentGraded = !g_hdrGraded.empty();
+    g_hdrGraded.clear();
 
     // The frame's end: onto the window, the counters closed, the next
     // frame's settings taken.
@@ -1912,6 +2411,16 @@ void Render::Report()
     RenderCommands::ReportSkips();
     fflush(stdout);
 }
+
+void Render::DisplayHdr(bool& hdr, float& peakNits)
+{
+    hdr = g_displayHdr.load(std::memory_order_relaxed);
+    peakNits = g_displayPeak.load(std::memory_order_relaxed);
+}
+
+bool Render::HdrActive() { return g_hdrSwapChain; }
+
+int Render::HdrCompiling() { return g_hdrCompiling.load(std::memory_order_relaxed); }
 
 bool RenderInternal::FrameLogged() { return ::FrameLogged(); }
 uint64_t RenderInternal::Swaps() { return g_swaps.load(std::memory_order_relaxed); }
