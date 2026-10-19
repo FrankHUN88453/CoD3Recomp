@@ -1,4 +1,5 @@
 #include "render_resources.h"
+#include "parallel.h"
 #include "render_table.h"
 #include "render_stats.h"
 #include "kernel.h"
@@ -343,6 +344,7 @@ namespace
         uint32_t key[4] = {};
         uint64_t fingerprint = 0;
         uint64_t auditDense = 0;        // COD3_MISSAUDIT: every byte's fingerprint when the sampling began
+        uint64_t denseFingerprint = 0;  // every byte's fingerprint when the sampling began, for a watched write
         uint64_t checkedFrame = 0;      // the frame the fingerprint was last compared in
         uint64_t usedFrame = 0;
         uint32_t stable = StableLooks;  // checks in a row that found no change; a texture starts as still
@@ -435,6 +437,27 @@ namespace
         g_freeIndexEntries.push_back(i + 1);
     }
 
+    // A level's rows, split across the cores when there are enough bytes
+    // in it to be worth waking them (a quarter of a megabyte: a 512 by 512
+    // DXT5 and up). A level is laid out on the command thread when the
+    // title first draws with it, and the textures a level streams in were
+    // the frame time's spikes: each a millisecond or more of untiling on
+    // that one thread, several in a frame as the player moved on.
+    template <class Rows>
+    void ForRows(uint32_t rows, size_t bytes, const Rows& rowsWork)
+    {
+        static const bool serial = getenv("COD3_SERIALUNTILE") != nullptr;
+        if (serial || bytes < (256u << 10) || rows < 16) { rowsWork(0u, rows); return; }
+        const int grain = std::max(4, int(rows) / (Parallel::Width() * 4));
+        Parallel::For(0, int(rows), grain, [&](int first, int last) { rowsWork(uint32_t(first), uint32_t(last)); });
+    }
+
+    // Eight bytes with each pair swapped: the console's sixteen bit order.
+    inline uint64_t SwapPairs(uint64_t v)
+    {
+        return ((v & 0x00FF00FF00FF00FFull) << 8) | ((v >> 8) & 0x00FF00FF00FF00FFull);
+    }
+
     // The bytes of a texture level as the host wants them: untiled, and
     // the console's byte order undone. `x0`, `y0` are where the level lies
     // in its tile when the levels are packed.
@@ -450,41 +473,63 @@ namespace
             const uint32_t blocksWide = (width + 3) / 4, blocksHigh = (height + 3) / 4;
             rowBytes = blocksWide * blockBytes;
             out.resize(size_t(rowBytes) * blocksHigh);
-            for (uint32_t by = 0; by < blocksHigh; by++)
-                for (uint32_t bx = 0; bx < blocksWide; bx++)
-                {
-                    const uint32_t sx = bx + x0 / 4, sy = by + y0 / 4;
-                    const uint32_t offset = tiled ? TiledOffset(sx, sy, blocksAcross, blockShift)
-                                                  : (sy * blocksAcross + sx) * blockBytes;
-                    uint8_t* to = out.data() + size_t(by) * rowBytes + size_t(bx) * blockBytes;
-                    // The blocks' sixteen bit fields are stored the console's
-                    // way round: each pair of bytes swapped.
-                    for (uint32_t i = 0; i < blockBytes; i++) to[i] = data[offset + (i ^ 1)];
-                }
+            uint8_t* const base = out.data();
+            const uint32_t stride = rowBytes;
+            ForRows(blocksHigh, out.size(), [&](uint32_t firstRow, uint32_t lastRow)
+            {
+                for (uint32_t by = firstRow; by < lastRow; by++)
+                    for (uint32_t bx = 0; bx < blocksWide; bx++)
+                    {
+                        const uint32_t sx = bx + x0 / 4, sy = by + y0 / 4;
+                        const uint32_t offset = tiled ? TiledOffset(sx, sy, blocksAcross, blockShift)
+                                                      : (sy * blocksAcross + sx) * blockBytes;
+                        uint8_t* to = base + size_t(by) * stride + size_t(bx) * blockBytes;
+                        // The blocks' sixteen bit fields are stored the console's
+                        // way round: each pair of bytes swapped, eight at a time.
+                        uint64_t word;
+                        memcpy(&word, data + offset, 8);
+                        word = SwapPairs(word);
+                        memcpy(to, &word, 8);
+                        if (blockBytes == 16)
+                        {
+                            memcpy(&word, data + offset + 8, 8);
+                            word = SwapPairs(word);
+                            memcpy(to + 8, &word, 8);
+                        }
+                    }
+            });
         }
         else if (format == 6)
         {
             rowBytes = width * 4;
             out.resize(size_t(rowBytes) * height);
-            for (uint32_t y = 0; y < height; y++)
-                for (uint32_t x = 0; x < width; x++)
+            uint8_t* const base = out.data();
+            const uint32_t stride = rowBytes;
+            ForRows(height, out.size(), [&](uint32_t firstRow, uint32_t lastRow)
+            {
+                for (uint32_t y = firstRow; y < lastRow; y++)
                 {
-                    const uint32_t offset = tiled ? TiledOffset(x + x0, y + y0, pitchTexels, 2)
-                                                  : ((y + y0) * pitchTexels + x + x0) * 4;
-                    uint32_t word;
-                    memcpy(&word, data + offset, 4);
-                    switch (endian)
+                    uint8_t* const row = base + size_t(y) * stride;
+                    for (uint32_t x = 0; x < width; x++)
                     {
-                    case 1: word = ((word & 0xFF00FF00u) >> 8) | ((word & 0x00FF00FFu) << 8); break;
-                    case 2: word = _byteswap_ulong(word); break;
-                    case 3: word = (word >> 16) | (word << 16); break;
-                    default: break;
+                        const uint32_t offset = tiled ? TiledOffset(x + x0, y + y0, pitchTexels, 2)
+                                                      : ((y + y0) * pitchTexels + x + x0) * 4;
+                        uint32_t word;
+                        memcpy(&word, data + offset, 4);
+                        switch (endian)
+                        {
+                        case 1: word = ((word & 0xFF00FF00u) >> 8) | ((word & 0x00FF00FFu) << 8); break;
+                        case 2: word = _byteswap_ulong(word); break;
+                        case 3: word = (word >> 16) | (word << 16); break;
+                        default: break;
+                        }
+                        // The word is A R G B from the top, and the console's
+                        // component x is its lowest byte: blue. The title's fetch
+                        // swizzle puts it right, so the bytes stay as they are.
+                        memcpy(row + size_t(x) * 4, &word, 4);
                     }
-                    // The word is A R G B from the top, and the console's
-                    // component x is its lowest byte: blue. The title's fetch
-                    // swizzle puts it right, so the bytes stay as they are.
-                    memcpy(out.data() + size_t(y) * rowBytes + size_t(x) * 4, &word, 4);
                 }
+            });
         }
         else if (format == 3 || format == 4 || format == 10 || format == 15)
         {
@@ -494,36 +539,46 @@ namespace
             // 6's are, the fetch swizzle putting them right.
             rowBytes = width * 4;
             out.resize(size_t(rowBytes) * height);
-            for (uint32_t y = 0; y < height; y++)
-                for (uint32_t x = 0; x < width; x++)
-                {
-                    const uint32_t offset = tiled ? TiledOffset(x + x0, y + y0, pitchTexels, 1)
-                                                  : ((y + y0) * pitchTexels + x + x0) * 2;
-                    uint16_t v;
-                    memcpy(&v, data + offset, 2);
-                    if (endian == 1 || endian == 2) v = uint16_t((v >> 8) | (v << 8));
-                    auto wide = [](uint32_t bits, uint32_t count) { return uint8_t(count >= 8 ? bits : (bits * 255 + ((1u << count) - 1) / 2) / ((1u << count) - 1)); };
-                    uint8_t* to = out.data() + size_t(y) * rowBytes + size_t(x) * 4;
-                    switch (format)
+            uint8_t* const base = out.data();
+            const uint32_t stride = rowBytes;
+            ForRows(height, out.size(), [&](uint32_t firstRow, uint32_t lastRow)
+            {
+                for (uint32_t y = firstRow; y < lastRow; y++)
+                    for (uint32_t x = 0; x < width; x++)
                     {
-                    case 3: to[0] = wide(v & 31, 5); to[1] = wide((v >> 5) & 31, 5); to[2] = wide((v >> 10) & 31, 5); to[3] = (v & 0x8000) ? 255 : 0; break;
-                    case 4: to[0] = wide(v & 31, 5); to[1] = wide((v >> 5) & 63, 6); to[2] = wide((v >> 11) & 31, 5); to[3] = 255; break;
-                    case 10: to[0] = uint8_t(v & 0xFF); to[1] = uint8_t(v >> 8); to[2] = 0; to[3] = 255; break;
-                    default: to[0] = wide(v & 15, 4); to[1] = wide((v >> 4) & 15, 4); to[2] = wide((v >> 8) & 15, 4); to[3] = wide((v >> 12) & 15, 4); break;
+                        const uint32_t offset = tiled ? TiledOffset(x + x0, y + y0, pitchTexels, 1)
+                                                      : ((y + y0) * pitchTexels + x + x0) * 2;
+                        uint16_t v;
+                        memcpy(&v, data + offset, 2);
+                        if (endian == 1 || endian == 2) v = uint16_t((v >> 8) | (v << 8));
+                        auto wide = [](uint32_t bits, uint32_t count) { return uint8_t(count >= 8 ? bits : (bits * 255 + ((1u << count) - 1) / 2) / ((1u << count) - 1)); };
+                        uint8_t* to = base + size_t(y) * stride + size_t(x) * 4;
+                        switch (format)
+                        {
+                        case 3: to[0] = wide(v & 31, 5); to[1] = wide((v >> 5) & 31, 5); to[2] = wide((v >> 10) & 31, 5); to[3] = (v & 0x8000) ? 255 : 0; break;
+                        case 4: to[0] = wide(v & 31, 5); to[1] = wide((v >> 5) & 63, 6); to[2] = wide((v >> 11) & 31, 5); to[3] = 255; break;
+                        case 10: to[0] = uint8_t(v & 0xFF); to[1] = uint8_t(v >> 8); to[2] = 0; to[3] = 255; break;
+                        default: to[0] = wide(v & 15, 4); to[1] = wide((v >> 4) & 15, 4); to[2] = wide((v >> 8) & 15, 4); to[3] = wide((v >> 12) & 15, 4); break;
+                        }
                     }
-                }
+            });
         }
         else   // 2: one byte a texel
         {
             rowBytes = width;
             out.resize(size_t(rowBytes) * height);
-            for (uint32_t y = 0; y < height; y++)
-                for (uint32_t x = 0; x < width; x++)
-                {
-                    const uint32_t offset = tiled ? TiledOffset(x + x0, y + y0, pitchTexels, 0)
-                                                  : ((y + y0) * pitchTexels + x + x0);
-                    out[size_t(y) * rowBytes + x] = data[offset];
-                }
+            uint8_t* const base = out.data();
+            const uint32_t stride = rowBytes;
+            ForRows(height, out.size(), [&](uint32_t firstRow, uint32_t lastRow)
+            {
+                for (uint32_t y = firstRow; y < lastRow; y++)
+                    for (uint32_t x = 0; x < width; x++)
+                    {
+                        const uint32_t offset = tiled ? TiledOffset(x + x0, y + y0, pitchTexels, 0)
+                                                      : ((y + y0) * pitchTexels + x + x0);
+                        base[size_t(y) * stride + x] = data[offset];
+                    }
+            });
         }
     }
 
@@ -1337,6 +1392,7 @@ RenderState::Handle RenderResources::TextureFor(const uint32_t fetch[6], uint32_
         // long enough has its pages watched, and none written since is the
         // same texture without a byte of it read. The small ones (the HUD's,
         // hashed whole every frame) are most of what the looks cost.
+        bool written = false;
         if (entry.watchedSince != 0)
         {
             if (WriteWatch::Clean(base, uint32_t(span), entry.watchedSince))
@@ -1346,17 +1402,23 @@ RenderState::Handle RenderResources::TextureFor(const uint32_t fetch[6], uint32_
                 return handle;
             }
             entry.watchedSince = 0;
+            written = true;
         }
         // Compared in the kind the stored fingerprint is; the kind changes
         // only once the memory is known to be the same, so no change is
-        // lost in the switch.
-        const uint64_t fingerprint = Fingerprint(data, span, entry.dense);
-        if (fingerprint == entry.fingerprint)
+        // lost in the switch. But a big still texture whose pages were
+        // written is compared whole: sixty four samples of it are what a
+        // streamed texture put in the same place passes unseen, the old
+        // picture staying on screen, or coming and going as the samples
+        // catch it and miss it again.
+        const bool wholeLook = written && !entry.dense && entry.denseFingerprint != 0;
+        const uint64_t fingerprint = Fingerprint(data, span, entry.dense || wholeLook);
+        if (wholeLook ? fingerprint == entry.denseFingerprint : fingerprint == entry.fingerprint)
         {
             MissAudit("texture", fetch[1] & 0xFFFFF000u, data, span, entry.dense, entry.auditDense);
             if (entry.stable < StableLooks) entry.stable++;
             const bool wantDense = WantDense(entry.stable, span);
-            if (wantDense != entry.dense) { if (!wantDense) entry.auditDense = entry.fingerprint; entry.dense = wantDense; entry.fingerprint = Fingerprint(data, span, wantDense); }
+            if (wantDense != entry.dense) { if (!wantDense) { entry.auditDense = entry.fingerprint; entry.denseFingerprint = entry.fingerprint; } entry.dense = wantDense; entry.fingerprint = Fingerprint(data, span, wantDense); }
             if (WriteWatch::Enabled() && entry.stable >= StableLooks)
             {
                 const uint64_t since = WriteWatch::Sequence();
@@ -1366,8 +1428,9 @@ RenderState::Handle RenderResources::TextureFor(const uint32_t fetch[6], uint32_
             return handle;
         }
         entry.stable = 0;
-        entry.fingerprint = entry.dense ? fingerprint : Fingerprint(data, span, true);
+        entry.fingerprint = (entry.dense || wholeLook) ? fingerprint : Fingerprint(data, span, true);
         entry.dense = true;
+        entry.denseFingerprint = 0;
         g_resourceBytes -= entry.bytes;
         if (!UploadTexture(entry, fetch, data)) { g_textureKeys.Erase(entry.key); entry.live = false; g_freeTextures.push_back(handle); g_whiteReason = "upload failed"; return 1; }
         g_resourceBytes += entry.bytes;
@@ -1499,7 +1562,20 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
             }
             else
             {
-                if (Fingerprint(data, entry.seen, false) == entry.sampled) return handle;
+                // A buffer that changed in the last few looks (a decal or
+                // bullet mark pool gaining a mark, a model rebuilt) is looked
+                // at whole by the frame's later draws, not by sixty four
+                // samples: a mark is a few vertices among thousands, which
+                // the samples pass over, and the draw then took the pool as
+                // it was before the mark, the mark coming and going from one
+                // frame to the next. One still for a while keeps the sampled
+                // look. COD3_SAMPLEDMIDFRAME=1: sampled for every buffer.
+                static const bool sampledOnly = getenv("COD3_SAMPLEDMIDFRAME") != nullptr;
+                if (!sampledOnly && entry.stable < StableLooks)
+                {
+                    if (Fingerprint(data, entry.seen, true) == entry.fingerprint) return handle;
+                }
+                else if (Fingerprint(data, entry.seen, false) == entry.sampled) return handle;
                 entry.midFrame = true;
                 static int announced = 0;
                 if (announced++ < 16)

@@ -1008,7 +1008,14 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
         static const bool shadowCutForced = getenv("COD3_SHADOWDEPTHCUT") != nullptr;
         const bool shadowCut = shadowCutForced || !g_fastShadowMaps;
         out.ps = nullptr;
-        out.pixelShader = (!shadowCut && state.colorMask == 0) ? NoPixelProgramFast : NoPixelProgram;
+        // Only a shadow map's caster goes without the depth cut: its
+        // viewport is square (512 or 1024 a side). A depth only draw into
+        // the frame's own surface (a depth pass ahead of the colour pass)
+        // keeps the cut, or its depth and the colour pass's would not
+        // agree and the surfaces drawn over it would flicker.
+        const float vx = std::fabs(state.viewport[0]), vy = std::fabs(state.viewport[2]);
+        const bool squareViewport = vx >= 64.0f && std::fabs(vx - vy) < 1.0f;
+        out.pixelShader = (!shadowCut && state.colorMask == 0 && squareViewport) ? NoPixelProgramFast : NoPixelProgram;
     }
     if (state.pitch == 0) { Skip(SkipPitch); return false; }
 

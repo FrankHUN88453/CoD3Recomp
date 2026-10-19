@@ -109,6 +109,7 @@ namespace Settings
         int controllerVertical = 100;
         bool rumble = true;           // the title's vibration sent to the pad
         int stickDeadzone = 15;       // per cent of a stick's travel ignored around its centre, 0 .. 50
+        int audioChannels = 0;        // the speakers: 0 automatic (5.1 when Windows' speakers have six or more channels), 1 stereo, 2 5.1 (audio_out.cpp)
         int stickVerticalScale = 200; // the pad's up and down look, per cent of the title's own (which halves it): 200 matches the turn, 50 .. 300 (mouse_look.cpp)
         float mouseSensitivity = 1.0f;   // both axes, 0.1 .. 3
         bool rawMouse = true;            // the mouse's own counts, not the pointer's travel

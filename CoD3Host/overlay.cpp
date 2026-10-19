@@ -362,6 +362,13 @@ namespace
                 if (ImGui::BeginTabItem("Controls"))
                 {
                     ImGui::SliderInt("Master volume", &g_edit.masterVolume, 0, 100, "%d%%");
+                    {
+                        static const char* const outputs[] = { "Automatic", "Stereo", "5.1 surround" };
+                        ImGui::SetNextItemWidth(160);
+                        ImGui::Combo("Speakers", &g_edit.audioChannels, outputs, 3);
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("(the console's own six channel mix; Automatic picks 5.1 when Windows' speakers are set up for it)");
+                    }
                     ImGui::SliderFloat("Mouse sensitivity", &g_edit.mouseSensitivity, 0.1f, 3.0f, "%.2f");
                     ImGui::TextDisabled("Both axes alike.");
                     ImGui::Checkbox("Raw mouse input", &g_edit.rawMouse);

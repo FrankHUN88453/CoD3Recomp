@@ -1073,7 +1073,12 @@ namespace
         uint32_t guestBase = 0, guestPitch = 0, guestWidth = 0, guestHeight = 0, guestEndian = 0;
         bool guestFloatDepth = false;
     };
-    constexpr int DepthWritebackSlots = 6;
+    // Enough slots for two frames' depth copies (the frame's, and its
+    // shadow maps', three to five a frame) to be in flight: the device
+    // runs up to two frames behind when the GPU is the limit, and with six
+    // a new copy found its slot still on the GPU and waited for it there,
+    // the command thread stopped until the GPU caught up.
+    constexpr int DepthWritebackSlots = 12;
     DepthWriteback g_depthWritebacks[DepthWritebackSlots];
     uint64_t g_depthWritebackOrder = 0;
 
