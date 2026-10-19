@@ -268,7 +268,29 @@ void RenderStats::EndFrame()
     g_secondFrames++;
     g_secondFrameMilliseconds += std::chrono::duration<double, std::milli>(now - g_frameStarted).count();
     if (g_lastFrameEnded.time_since_epoch().count() != 0)
-        g_secondWorstMilliseconds = std::max(g_secondWorstMilliseconds, std::chrono::duration<double, std::milli>(now - g_lastFrameEnded).count());
+    {
+        const double gap = std::chrono::duration<double, std::milli>(now - g_lastFrameEnded).count();
+        g_secondWorstMilliseconds = std::max(g_secondWorstMilliseconds, gap);
+        // A hitch, taken apart (COD3_RENDER_STATS): how long the command
+        // thread waited for the title to start the frame, how long it then
+        // took over it, and of that how much was the draws, the resolves and
+        // the present (which waits when the GPU is behind). A long wait
+        // before is the title's own threads; a long present is the GPU.
+        if (gap > 12.0 && Wanted())
+        {
+            static uint32_t told = 0;
+            static uint64_t toldSecond = ~0ull;
+            const uint64_t second = uint64_t(std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count());
+            if (second != toldSecond) { toldSecond = second; told = 0; }
+            if (told++ < 8)
+                printf("hitch: %.2f ms between swaps: %.2f ms waiting for the title, %.2f ms on the frame "
+                       "(draws %.2f, resolves %.2f, present %.2f), %u draws, %u texture and %u buffer uploads\n",
+                    gap, std::chrono::duration<double, std::milli>(g_frameStarted - g_lastFrameEnded).count(),
+                    std::chrono::duration<double, std::milli>(now - g_frameStarted).count(),
+                    g_frame.drawNanoseconds / 1e6, g_frame.resolveNanoseconds / 1e6, g_frame.presentNanoseconds / 1e6,
+                    uint32_t(g_frame.draws), uint32_t(g_frame.textureUploads), uint32_t(g_frame.bufferUploads));
+        }
+    }
     g_lastFrameEnded = now;
     g_second.draws += g_frame.draws; g_second.skipped += g_frame.skipped; g_second.triangles += g_frame.triangles; g_second.resolves += g_frame.resolves;
     g_second.shaderSwitches += g_frame.shaderSwitches; g_second.textureSwitches += g_frame.textureSwitches;

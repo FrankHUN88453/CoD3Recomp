@@ -48,6 +48,7 @@ namespace
     // mixes nothing but its XMA voices, and that decoder is not here, every
     // sample leaving this file is a zero and the speakers are correctly silent.
     std::atomic<int> g_peak{ 0 };
+    std::atomic<int> g_recentPeak{ 0 };            // the loudest since the last report: whether there is sound now
     std::atomic<uint32_t> g_nonzeroBytes{ 0 };   // the most of a frame's bytes ever seen nonzero
 
     // COD3_AUDIODUMP=path: everything that goes to the device, as a stereo
@@ -219,6 +220,8 @@ bool Audio::SubmitFrame(uint32_t guestAddress)
         const int loudest = (left > right) ? left : right;
         if (loudest > g_peak.load(std::memory_order_relaxed))
             g_peak.store(loudest, std::memory_order_relaxed);
+        if (loudest > g_recentPeak.load(std::memory_order_relaxed))
+            g_recentPeak.store(loudest, std::memory_order_relaxed);
     }
 
     Dump(block.samples, sizeof(block.samples));
@@ -242,8 +245,8 @@ void Audio::Report()
 
     printf("audio: at most %u of %u frame bytes nonzero; ", g_nonzeroBytes.load(), SamplesPerChannel * Channels * 4);
     printf("%llu frames played, %llu dropped, loudest sample %.1f%% of "
-           "full scale\n",
+           "full scale (%.1f%% since the last report)\n",
         (unsigned long long)played, (unsigned long long)g_dropped.load(),
-        g_peak.load() * 100.0 / 32767.0);
+        g_peak.load() * 100.0 / 32767.0, g_recentPeak.exchange(0) * 100.0 / 32767.0);
     fflush(stdout);
 }
