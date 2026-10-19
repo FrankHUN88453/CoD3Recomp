@@ -284,11 +284,31 @@ void RenderStats::EndFrame()
             if (second != toldSecond) { toldSecond = second; told = 0; }
             if (told++ < 8)
                 printf("hitch: %.2f ms between swaps: %.2f ms waiting for the title, %.2f ms on the frame "
-                       "(draws %.2f, resolves %.2f, present %.2f), %u draws, %u texture and %u buffer uploads\n",
+                       "(draws %.2f, resolves %.2f, present %.2f), %u draws, %u texture and %u buffer uploads "
+                       "(texture layout %.2f ms, texture creation %.2f ms)\n",
                     gap, std::chrono::duration<double, std::milli>(g_frameStarted - g_lastFrameEnded).count(),
                     std::chrono::duration<double, std::milli>(now - g_frameStarted).count(),
                     g_frame.drawNanoseconds / 1e6, g_frame.resolveNanoseconds / 1e6, g_frame.presentNanoseconds / 1e6,
-                    uint32_t(g_frame.draws), uint32_t(g_frame.textureUploads), uint32_t(g_frame.bufferUploads));
+                    uint32_t(g_frame.draws), uint32_t(g_frame.textureUploads), uint32_t(g_frame.bufferUploads),
+                    g_frame.uploadLayoutNanoseconds / 1e6, g_frame.uploadCreateNanoseconds / 1e6);
+            // With COD3_RENDER_PROFILE, where the draws' time went in that
+            // frame, by the profile's sections, the biggest first.
+            if (told <= 8 && Profiled())
+            {
+                uint64_t cycles = 0;
+                for (uint32_t i = 0; i < SectionCount; i++) cycles += g_frame.sectionCycles[i];
+                if (cycles != 0)
+                {
+                    const double perCycle = double(g_frame.drawNanoseconds) / double(cycles) / 1e6;
+                    uint32_t order[SectionCount];
+                    for (uint32_t i = 0; i < SectionCount; i++) order[i] = i;
+                    std::sort(order, order + SectionCount, [](uint32_t x, uint32_t y) { return g_frame.sectionCycles[x] > g_frame.sectionCycles[y]; });
+                    printf("hitch:   draws by section:");
+                    for (uint32_t i = 0; i < 5; i++)
+                        printf(" %s %.2f ms", SectionName(Section(order[i])), g_frame.sectionCycles[order[i]] * perCycle);
+                    printf("\n");
+                }
+            }
         }
     }
     g_lastFrameEnded = now;

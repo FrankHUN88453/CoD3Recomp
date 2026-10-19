@@ -609,6 +609,9 @@ namespace
     // to a texel on the screen for nobody to see the difference.
     bool UploadTexture(TextureEntry& entry, const uint32_t fetch[6], const uint8_t* data)
     {
+        // The upload's two parts, timed for the hitch lines: laying the
+        // texels out, then making the texture on the device.
+        const auto uploadStarted = std::chrono::steady_clock::now();
         const uint32_t format = fetch[1] & 0x3F;
         const uint32_t endian = (fetch[1] >> 6) & 3;
         const uint32_t pitch = ((fetch[0] >> 22) & 0x1FF) * 32;
@@ -728,6 +731,10 @@ namespace
         desc.MiscFlags = cube ? D3D11_RESOURCE_MISC_TEXTURECUBE : 0;
         entry.texture.Reset();
         entry.resource.Reset();
+        const auto createStarted = std::chrono::steady_clock::now();
+        RenderStats::Frame().uploadLayoutNanoseconds += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(createStarted - uploadStarted).count());
+        struct CreateTimed { std::chrono::steady_clock::time_point started; ~CreateTimed() {
+            RenderStats::Frame().uploadCreateNanoseconds += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count()); } } createTimed{ createStarted };
         if (FAILED(g_device->CreateTexture2D(&desc, initial.data(), &entry.texture))) return false;
         if (FAILED(g_device->CreateShaderResourceView(entry.texture.Get(), nullptr, &entry.resource))) return false;
         entry.cube = cube;

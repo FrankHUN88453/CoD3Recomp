@@ -49,6 +49,8 @@ namespace RenderStats
         uint64_t uploadBytes = 0;          // textures and vertex buffers
         uint64_t streamBytes = 0;          // indices and constants through the rings
         uint64_t drawNanoseconds = 0;      // CPU time inside the draw path
+        uint64_t uploadLayoutNanoseconds = 0;   // of it, laying out new textures' texels (untiling)
+        uint64_t uploadCreateNanoseconds = 0;   // and making them on the device
         uint64_t resolveNanoseconds = 0;
         uint64_t presentNanoseconds = 0;
         uint64_t sectionCycles[SectionCount] = {};
