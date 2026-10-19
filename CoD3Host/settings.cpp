@@ -170,6 +170,14 @@ void Settings::Load(const std::filesystem::path& exeDirectory)
             else if (key == "fast_shadow_maps") v.fastShadowMaps = atoi(value.c_str()) != 0;
             else if (key == "native_commands") v.nativeCommands = atoi(value.c_str()) != 0;
             else if (key == "watch_writes") v.watchWrites = atoi(value.c_str()) != 0;
+            else if (key == "opt_depth_thread") v.depthThread = atoi(value.c_str()) != 0;
+            else if (key == "opt_fast_constants") v.fastConstants = atoi(value.c_str()) != 0;
+            else if (key == "opt_shader_load_cache") v.shaderLoadCache = atoi(value.c_str()) != 0;
+            else if (key == "opt_strong_change_check") v.strongChangeCheck = atoi(value.c_str()) != 0;
+            else if (key == "opt_range_looks") v.rangeLooks = atoi(value.c_str()) != 0;
+            else if (key == "opt_opaque_shaders") v.opaqueShaders = atoi(value.c_str()) != 0;
+            else if (key == "opt_staging_uploads") v.stagingUploads = atoi(value.c_str()) != 0;
+            else if (key == "opt_texture_pool") v.texturePool = atoi(value.c_str()) != 0;
             else if (key == "window_mode") v.windowMode = atoi(value.c_str());
             else if (key == "fps_overlay") v.fpsOverlay = atoi(value.c_str()) != 0;
             else if (key == "stats_overlay") v.statsOverlay = atoi(value.c_str()) != 0;
@@ -305,6 +313,9 @@ void Settings::Save()
                 v.dynamicLights ? 1 : 0);
         fprintf(file, "sharp_shadows = %d\neffects_resolution = %d\nfoliage_coverage = %d\nfast_shadow_maps = %d\n", v.sharpShadows ? 1 : 0,
                 v.effectsResolution, v.foliageCoverage ? 1 : 0, v.fastShadowMaps ? 1 : 0);
+        fprintf(file, "opt_depth_thread = %d\nopt_fast_constants = %d\nopt_shader_load_cache = %d\nopt_strong_change_check = %d\nopt_range_looks = %d\nopt_opaque_shaders = %d\nopt_staging_uploads = %d\nopt_texture_pool = %d\n",
+                v.depthThread ? 1 : 0, v.fastConstants ? 1 : 0, v.shaderLoadCache ? 1 : 0, v.strongChangeCheck ? 1 : 0,
+                v.rangeLooks ? 1 : 0, v.opaqueShaders ? 1 : 0, v.stagingUploads ? 1 : 0, v.texturePool ? 1 : 0);
         fprintf(file, "[game]\nplayer_name = %s\nlan_address = %s\nsystem_link_peers = %s\nmaster_volume = %d\naudio_channels = %d\naim_assist = %d\nbounces = %d\ncontroller = %d\nrumble = %d\nstick_deadzone = %d\nmouse_sensitivity = %.2f\nstick_vertical_scale = %d\nraw_mouse = %d\ndirect_mouse = %d\ntoggle_sprint = %d\nshell_shock_blur = %d\nmelee_lunge = %d\n", v.playerName, v.lanAddress, v.systemLinkPeers, v.masterVolume, v.audioChannels, v.aimAssist ? 1 : 0, v.bounces ? 1 : 0, v.controller ? 1 : 0, v.rumble ? 1 : 0, v.stickDeadzone, v.mouseSensitivity, v.stickVerticalScale, v.rawMouse ? 1 : 0, v.directMouse ? 1 : 0, v.toggleSprint ? 1 : 0, v.shellShockBlur ? 1 : 0, v.meleeLunge ? 1 : 0);
         fprintf(file, "quick_landing = %d\nquick_sprint = %d\ncustom_primary = %d\n", v.quickLanding ? 1 : 0, v.quickSprint ? 1 : 0,
                 v.customPrimary);

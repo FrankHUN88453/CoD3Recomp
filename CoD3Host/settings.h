@@ -54,6 +54,16 @@ namespace Settings
         bool fastShadowMaps = true;   // the shadow maps' casters drawn with no pixel program, the GPU's depth only path (render_commands.cpp)
         bool nativeCommands = false;  // the draws' state taken from the game's own D3D calls, the command stream run only for what the GPU still does (docs/native-d3d11-plan.md, N3; experimental, after a restart)
         bool watchWrites = false;     // still textures and vertex buffers known unchanged by their pages, not hashed every frame (write_watch.h; experimental, after a restart)
+        // The optimizations, each of which can be turned off to find one
+        // behind something that looks wrong (tuning.h).
+        bool depthThread = true;        // depth copies for the title converted on a thread of their own
+        bool fastConstants = true;      // the constant packets stored as runs
+        bool shaderLoadCache = true;    // programs loaded again matched without hashing them byte by byte
+        bool strongChangeCheck = true;  // the eight lane fingerprint for telling whether memory changed
+        bool rangeLooks = true;         // with "Watch memory writes" off, the vertices each draw reads of a changing big buffer looked at again
+        bool opaqueShaders = true;      // pixel programs without the alpha test for the draws that do not test
+        bool stagingUploads = true;     // textures sent to the GPU through staging copies
+        bool texturePool = true;        // textures of a shape kept and used again
         int windowMode = 0;           // 0 windowed, 1 borderless full screen
         bool fpsOverlay = false;
         bool statsOverlay = false;    // the renderer's counters over the picture

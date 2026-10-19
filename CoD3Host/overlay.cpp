@@ -339,6 +339,48 @@ namespace
                     ImGui::Checkbox("Watch memory writes (experimental)", &g_edit.watchWrites);
                     ImGui::SameLine();
                     ImGui::TextDisabled("(still textures and buffers not looked at again until written: faster; after a restart)");
+                    // Each of the renderer's speed ups on its own switch, for
+                    // finding the one behind something that looks wrong.
+                    // They take effect at the next frame (tuning.h).
+                    if (ImGui::CollapsingHeader("Optimizations (turn one off if something looks wrong)"))
+                    {
+                        ImGui::TextDisabled("All on is fastest. A change takes effect at Apply, no restart needed.");
+                        ImGui::Checkbox("Depth copy on its own thread", &g_edit.depthThread);
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("(the depth the game reads back for light glows, prepared off the render thread)");
+                        ImGui::Checkbox("Fast constant writes", &g_edit.fastConstants);
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("(the game's shader constants stored in blocks rather than one at a time)");
+                        ImGui::Checkbox("Shader load cache", &g_edit.shaderLoadCache);
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("(shaders the game loads again recognised without hashing them again)");
+                        ImGui::Checkbox("Thorough change detection", &g_edit.strongChangeCheck);
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("(off: the older check for whether a buffer or texture changed)");
+                        ImGui::Checkbox("Recheck effect geometry each draw", &g_edit.rangeLooks);
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("(with Watch memory writes off: the vertices of effects written mid frame looked at again)");
+                        ImGui::Checkbox("Opaque shader variants", &g_edit.opaqueShaders);
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("(shaders without the alpha test for surfaces that do not use it)");
+                        ImGui::Checkbox("Staged texture uploads", &g_edit.stagingUploads);
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("(new textures sent to the GPU through a copy, fewer hitches)");
+                        ImGui::Checkbox("Texture pool", &g_edit.texturePool);
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("(textures of the same size kept and used again, fewer hitches)");
+                        if (ImGui::Button("All on"))
+                        {
+                            g_edit.depthThread = g_edit.fastConstants = g_edit.shaderLoadCache = g_edit.strongChangeCheck = true;
+                            g_edit.rangeLooks = g_edit.opaqueShaders = g_edit.stagingUploads = g_edit.texturePool = true;
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::Button("All off"))
+                        {
+                            g_edit.depthThread = g_edit.fastConstants = g_edit.shaderLoadCache = g_edit.strongChangeCheck = false;
+                            g_edit.rangeLooks = g_edit.opaqueShaders = g_edit.stagingUploads = g_edit.texturePool = false;
+                        }
+                    }
                     ImGui::Checkbox("Vertical sync (VSync)", &g_edit.vsync);
                     ImGui::Checkbox("Unlimited frame rate in levels", &g_edit.unlockFrameRate);
                     ImGui::SameLine();

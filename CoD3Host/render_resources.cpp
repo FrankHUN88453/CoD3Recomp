@@ -4,6 +4,7 @@
 #include "render_stats.h"
 #include "kernel.h"
 #include "write_watch.h"
+#include "tuning.h"
 #include "texture_pack.h"
 
 #include <algorithm>
@@ -150,6 +151,33 @@ namespace
         RenderStats::Frame().fingerprintBytes += dense ? bytes : std::min<size_t>(bytes, 65 * 64);
         constexpr uint64_t K = 1099511628211ull;
         uint64_t hash = 1469598103934665603ull ^ bytes;
+        if (dense && !Tuning::On(Tuning::strongChangeCheck))
+        {
+            // The four lane fingerprint of 0.5.13 and before, for comparing
+            // (F11, Graphics, Optimizations): a change of only the top bit
+            // of two words in a lane cancels in it.
+            uint64_t b = 0x9E3779B97F4A7C15ull, c = 0xBF58476D1CE4E5B9ull, d = 0x94D049BB133111EBull;
+            size_t at = 0;
+            for (; at + 32 <= bytes; at += 32)
+            {
+                uint64_t w[4];
+                memcpy(w, data + at, 32);
+                hash = (hash ^ w[0]) * K; b = (b ^ w[1]) * K; c = (c ^ w[2]) * K; d = (d ^ w[3]) * K;
+            }
+            for (; at + 8 <= bytes; at += 8)
+            {
+                uint64_t word;
+                memcpy(&word, data + at, 8);
+                hash = (hash ^ word) * K;
+            }
+            if (at < bytes)
+            {
+                uint64_t word = 0;
+                memcpy(&word, data + at, bytes - at);
+                hash = (hash ^ word) * K;
+            }
+            return ((hash ^ b) * K) ^ ((c ^ d) * K);
+        }
         if (dense)
         {
             // Eight lanes, each a multiply and a turn of the word: the turn
@@ -414,7 +442,7 @@ namespace
     bool TexturePoolOn()
     {
         static const bool off = getenv("COD3_NOTEXPOOL") != nullptr;
-        return !off;
+        return !off && Tuning::On(Tuning::texturePool);
     }
 
     uint64_t PoolKey(const D3D11_TEXTURE2D_DESC& desc)
@@ -487,7 +515,7 @@ namespace
 
     void StartTexturePool()
     {
-        if (!TexturePoolOn() || getenv("COD3_NOTEXAHEAD") != nullptr) return;
+        if (getenv("COD3_NOTEXPOOL") != nullptr || getenv("COD3_NOTEXAHEAD") != nullptr) return;
         // Only where the driver makes things concurrently with the drawing
         // (every current one does); else the worker would take the lock the
         // command thread's own calls wait on.
@@ -836,7 +864,7 @@ namespace
     bool StagingOn()
     {
         static const bool off = getenv("COD3_NOSTAGING") != nullptr;
-        return !off;
+        return !off && Tuning::On(Tuning::stagingUploads);
     }
 
     bool UploadByStaging(ID3D11Texture2D* target, const D3D11_TEXTURE2D_DESC& desc,
@@ -2196,7 +2224,7 @@ bool RenderResources::NeedsRangeLook(Handle handle)
 {
     // COD3_NORANGELOOKS=1: once a frame, as before.
     static const bool off = getenv("COD3_NORANGELOOKS") != nullptr;
-    if (off || handle == 0 || handle > g_buffers.size()) return false;
+    if (off || !Tuning::On(Tuning::rangeLooks) || handle == 0 || handle > g_buffers.size()) return false;
     const BufferEntry& entry = g_buffers[handle - 1];
     // Watched (the pages say what was written within the frame): left to
     // the watch, unless its pages could not be watched.
