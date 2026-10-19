@@ -55,6 +55,12 @@ namespace
     std::atomic<int> g_peak{ 0 };
     std::atomic<int> g_recentPeak{ 0 };            // the loudest since the last report: whether there is sound now
     std::atomic<uint32_t> g_nonzeroBytes{ 0 };   // the most of a frame's bytes ever seen nonzero
+    // The limiter (SubmitFrame): its gain now, the frames it brought down,
+    // and the loudest the mix would have been without it since the last
+    // report (past full scale is what it is for).
+    float g_limiterGain = 1.0f;
+    std::atomic<uint64_t> g_limited{ 0 };
+    std::atomic<int> g_recentPreLimit{ 0 };
 
     // COD3_AUDIODUMP=path: everything that goes to the device, as a stereo
     // 48 kHz WAV, for listening to a run after it or looking at the wave.
@@ -305,19 +311,16 @@ bool Audio::SubmitFrame(uint32_t guestAddress)
     const float percent = float(Settings::Get().masterVolume) / 100.0f;
     const float volume = percent * percent;
     const uint32_t out = g_outChannels;
+    // The frame as it will go out, before the limiter: each channel to its
+    // own speaker in the order they came, or folded into two.
+    float mixed[SamplesPerChannel * Channels];
+    float framePeak = 0.0f;
     for (uint32_t i = 0; i < SamplesPerChannel; i++)
     {
         const uint32_t offset = guestAddress + i * 4;
-        int loudest = 0;
         if (out == 6)
         {
-            // Each channel to its own speaker, in the order they came.
-            for (uint32_t c = 0; c < 6; c++)
-            {
-                const int16_t sample = ToPcm(GuestFloat(offset + c * channelBytes), volume);
-                block.samples[i * 6 + c] = sample;
-                loudest = std::max(loudest, std::abs(int(sample)));
-            }
+            for (uint32_t c = 0; c < 6; c++) mixed[i * 6 + c] = GuestFloat(offset + c * channelBytes);
         }
         else
         {
@@ -326,10 +329,49 @@ bool Audio::SubmitFrame(uint32_t guestAddress)
             const float c  = GuestFloat(offset + 2 * channelBytes);
             const float ls = GuestFloat(offset + 4 * channelBytes);
             const float rs = GuestFloat(offset + 5 * channelBytes);
+            mixed[i * 2 + 0] = l + 0.707f * c + 0.707f * ls;
+            mixed[i * 2 + 1] = r + 0.707f * c + 0.707f * rs;
+        }
+        for (uint32_t c = 0; c < out; c++)
+        {
+            float& v = mixed[i * out + c];
+            if (!(v == v)) v = 0.0f;   // not a number: silence, not a click
+            framePeak = std::max(framePeak, std::fabs(v));
+        }
+    }
 
-            block.samples[i * 2 + 0] = ToPcm(l + 0.707f * c + 0.707f * ls, volume);
-            block.samples[i * 2 + 1] = ToPcm(r + 0.707f * c + 0.707f * rs, volume);
-            loudest = std::max(std::abs(int(block.samples[i * 2 + 0])), std::abs(int(block.samples[i * 2 + 1])));
+    // A limiter ahead of the sixteen bits. The title's float mix goes past
+    // full scale in the heaviest fighting (a campaign level's log had the
+    // loudest sample at 100% one second in thirty), and samples clipped
+    // there crackle. A frame whose loudest sample would pass the ceiling
+    // has the gain brought down at once to what it needs, all the channels
+    // together so nothing moves between the speakers; afterwards the gain
+    // comes back up over about a fifth of a second. Below the ceiling
+    // nothing is touched. COD3_NOLIMITER=1 clips as before.
+    static const bool noLimiter = getenv("COD3_NOLIMITER") != nullptr;
+    constexpr float Ceiling = 0.97f;
+    constexpr float Release = 0.026f;   // a 256 sample frame's share of a 200 ms recovery
+    const float scale = 0.8f * volume;
+    const float loudestIn = framePeak * scale;
+    const float before = g_limiterGain;
+    float after = before + (1.0f - before) * Release;
+    if (!noLimiter && loudestIn * after > Ceiling) after = Ceiling / loudestIn;
+    if (noLimiter) after = 1.0f;
+    if (after < before) g_limited.fetch_add(1, std::memory_order_relaxed);
+    g_limiterGain = after;
+    const int loudestPre = int(std::min(loudestIn, 100.0f) * 32767.0f);
+    if (loudestPre > g_recentPreLimit.load(std::memory_order_relaxed)) g_recentPreLimit.store(loudestPre, std::memory_order_relaxed);
+    for (uint32_t i = 0; i < SamplesPerChannel; i++)
+    {
+        // Going down: the whole frame at the new gain, so its loudest
+        // sample is under the ceiling. Coming back up: a ramp across it.
+        const float gain = after < before ? after : before + (after - before) * (float(i + 1) / float(SamplesPerChannel));
+        int loudest = 0;
+        for (uint32_t c = 0; c < out; c++)
+        {
+            const int16_t sample = ToPcm(mixed[i * out + c] * gain, volume);
+            block.samples[i * out + c] = sample;
+            loudest = std::max(loudest, std::abs(int(sample)));
         }
         if (loudest > g_peak.load(std::memory_order_relaxed))
             g_peak.store(loudest, std::memory_order_relaxed);
@@ -359,8 +401,9 @@ void Audio::Report()
 
     printf("audio: at most %u of %u frame bytes nonzero; ", g_nonzeroBytes.load(), SamplesPerChannel * Channels * 4);
     printf("%llu frames played, %llu dropped, loudest sample %.1f%% of "
-           "full scale (%.1f%% since the last report)\n",
+           "full scale (%.1f%% since the last report, %.1f%% before the limiter, %llu frames limited)\n",
         (unsigned long long)played, (unsigned long long)g_dropped.load(),
-        g_peak.load() * 100.0 / 32767.0, g_recentPeak.exchange(0) * 100.0 / 32767.0);
+        g_peak.load() * 100.0 / 32767.0, g_recentPeak.exchange(0) * 100.0 / 32767.0,
+        g_recentPreLimit.exchange(0) * 100.0 / 32767.0, (unsigned long long)g_limited.load());
     fflush(stdout);
 }

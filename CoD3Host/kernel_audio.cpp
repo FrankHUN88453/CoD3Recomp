@@ -56,6 +56,11 @@ namespace
     uint32_t g_registeredClients = 0;
     uint64_t g_submittedFrames = 0;
 
+    // For the sound cutting out: how many XMA contexts the title has going
+    // in one audio frame at most, counted between the pump's ticks (a title
+    // out of voices stops sounds to make room for new ones).
+    std::atomic<uint32_t> g_enablesThisFrame{ 0 }, g_mostEnablesInAFrame{ 0 };
+
     // The audio pump.
     //
     // Registering a render driver client hands the console a callback, and the
@@ -103,6 +108,8 @@ namespace
                     ctx.r3.u32 = g_callbackContext.load();
                     routine(ctx, Guest::Base);
                     g_callbacks.fetch_add(1, std::memory_order_relaxed);
+                    const uint32_t enabled = g_enablesThisFrame.exchange(0, std::memory_order_relaxed);
+                    if (enabled > g_mostEnablesInAFrame.load(std::memory_order_relaxed)) g_mostEnablesInAFrame.store(enabled, std::memory_order_relaxed);
                 }
                 else
                 {
@@ -197,6 +204,7 @@ namespace
         uint32_t packetInBuffer = 0;     // the next packet of the current input buffer
         uint32_t blocksThisEnable = 0;   // written since the last enable
         uint32_t output = 0;             // the output ring the last initialize gave
+        bool starved = false;            // ran out of input part way through an enable
     };
     std::map<uint32_t, Context> g_xma;   // by context address
 
@@ -209,6 +217,10 @@ namespace
     }
 
     std::atomic<uint64_t> g_packetsDecoded{ 0 }, g_blocksWritten{ 0 }, g_packetsRefused{ 0 }, g_enables{ 0 };
+    // For the sound cutting out: how many sounds the title starts, and how
+    // often a context ran dry with the title then giving it more: a gap in
+    // a sound still playing.
+    std::atomic<uint64_t> g_initializes{ 0 }, g_underruns{ 0 };
 
     // The decoder, moved along as far as the buffers let it.
     void Work(uint8_t* base, uint32_t context)
@@ -292,7 +304,12 @@ namespace
             // More samples: the next packet of the current input buffer.
             const uint32_t which = CurrentBuffer(base, context);
             const uint32_t valid = which == 0 ? Input0Valid(base, context) : Input1Valid(base, context);
-            if (valid == 0) return;   // starved: the title has not filled it yet
+            if (valid == 0)
+            {
+                // Starved: the title has not filled it yet.
+                if (state.blocksThisEnable < (subframes != 0 ? subframes : 1)) state.starved = true;
+                return;
+            }
             const uint32_t packets = which == 0 ? Input0Packets(base, context) : Input1Packets(base, context);
             if (state.packetInBuffer >= packets)
             {
@@ -337,6 +354,8 @@ void Kernel::ReportXma()
     printf("xma: %zu contexts, %llu enables, %llu packets decoded, %llu refused, %llu blocks written%s", g_xma.size(),
         (unsigned long long)g_enables.load(), (unsigned long long)g_packetsDecoded.load(), (unsigned long long)g_packetsRefused.load(),
         (unsigned long long)g_blocksWritten.load(), "\n");
+    printf("xma: %llu sounds started, at most %u contexts going in one audio frame (since the last report), %llu run dry and then fed%s",
+        (unsigned long long)g_initializes.load(), g_mostEnablesInAFrame.exchange(0), (unsigned long long)g_underruns.load(), "\n");
 }
 
 // X_RESULT XMACreateContext(ULONG* contextOut, ...)
@@ -397,9 +416,11 @@ PPC_FUNC(__imp__XMAInitializeContext)
     if (context == 0) { ctx.r3.u32 = X_ERROR_SUCCESS; return; }
 
     std::lock_guard<std::mutex> lock(g_audioMutex);
+    g_initializes.fetch_add(1, std::memory_order_relaxed);
     memset(Guest::Ptr(context), 0, ContextSize);
     Context& state = g_xma[context];
     state.enabled = false;
+    state.starved = false;
     state.fifo.clear();
     state.fifoRead = 0;
     state.packetInBuffer = 0;
@@ -470,6 +491,7 @@ PPC_FUNC(__imp__XMAEnableContext)
         found->second.blocksThisEnable = 0;
         Work(base, ctx.r3.u32);
         g_enables.fetch_add(1, std::memory_order_relaxed);
+        g_enablesThisFrame.fetch_add(1, std::memory_order_relaxed);
         if (XmaTrace())
         {
             static auto first = std::chrono::steady_clock::now();
@@ -515,6 +537,17 @@ namespace
     {
         std::lock_guard<std::mutex> lock(g_audioMutex);
         SetField(base, context, word, shift, bits, value);
+        // An input buffer given to a context that ran dry part way through
+        // an enable: the sound had a gap.
+        if (word == 0 && (shift == 20 || shift == 21))
+        {
+            auto found = g_xma.find(context);
+            if (found != g_xma.end() && found->second.starved)
+            {
+                found->second.starved = false;
+                g_underruns.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
         Work(base, context);
     }
 }
