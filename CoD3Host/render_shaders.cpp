@@ -14,6 +14,7 @@
 #include <vector>
 #include <string>
 #include <thread>
+#include <unordered_map>
 
 #include <Windows.h>
 #include <d3d11_1.h>
@@ -59,6 +60,56 @@ namespace
     {
         uint64_t hash = 1469598103934665603ull;
         for (size_t i = 0; i < count; i++) { hash ^= bytes[i]; hash *= 1099511628211ull; }
+        return hash;
+    }
+
+    // The title loads its programs from the stream before nearly every
+    // draw, the same few hundred again and again, and each load was hashed
+    // with HashBytes: a byte at a time, each waiting on the multiply before
+    // it, a few cycles a byte over kilobytes of microcode, a thirteenth of
+    // the command processor's time with the native command lists off. A
+    // program seen before is found by a quicker hash, eight bytes a step in
+    // four lanes, and compared whole against the copy kept of it; only one
+    // not seen before is hashed the old way, so the names and the disk cache
+    // are as they were. COD3_SLOWSHADERHASH=1 hashes every load.
+    struct KnownLoad { uint64_t hash = 0; std::vector<uint8_t> bytes; };
+    std::mutex g_knownMutex;
+    std::unordered_map<uint64_t, KnownLoad> g_knownLoads;   // by the quick hash and the size
+
+    uint64_t QuickHash(const uint8_t* bytes, size_t count)
+    {
+        constexpr uint64_t K = 0x9E3779B97F4A7C15ull;
+        uint64_t a = count * K, b = 0xBF58476D1CE4E5B9ull, c = 0x94D049BB133111EBull, d = 0xD6E8FEB86659FD93ull;
+        size_t at = 0;
+        for (; at + 32 <= count; at += 32)
+        {
+            uint64_t w[4];
+            memcpy(w, bytes + at, 32);
+            a = (a ^ w[0]) * K; b = (b ^ w[1]) * K; c = (c ^ w[2]) * K; d = (d ^ w[3]) * K;
+        }
+        for (; at + 8 <= count; at += 8) { uint64_t w; memcpy(&w, bytes + at, 8); a = (a ^ w) * K; }
+        if (at < count) { uint64_t w = 0; memcpy(&w, bytes + at, count - at); b = (b ^ w) * K; }
+        uint64_t h = a ^ (b >> 7) ^ (c << 11) ^ (d >> 19) ^ ((b ^ c ^ d) * K);
+        h ^= h >> 31; h *= 0xBF58476D1CE4E5B9ull; h ^= h >> 29;
+        return h;
+    }
+
+    uint64_t LoadHash(const uint8_t* words, size_t count)
+    {
+        static const bool slow = getenv("COD3_SLOWSHADERHASH") != nullptr;
+        if (slow) return HashBytes(words, count);
+        const uint64_t quick = QuickHash(words, count);
+        std::lock_guard<std::mutex> lock(g_knownMutex);
+        auto found = g_knownLoads.find(quick);
+        if (found != g_knownLoads.end() && found->second.bytes.size() == count && memcmp(found->second.bytes.data(), words, count) == 0)
+            return found->second.hash;
+        const uint64_t hash = HashBytes(words, count);
+        if (g_knownLoads.size() < 8192)
+        {
+            KnownLoad& known = g_knownLoads[quick];
+            known.hash = hash;
+            known.bytes.assign(words, words + count);
+        }
         return hash;
     }
 
@@ -487,7 +538,7 @@ RenderState::Handle RenderShaders::Loaded(bool pixel, const uint8_t* words, uint
     if (sizeDwords == 0 || sizeDwords > 64 * 1024 || words == nullptr) return g_current[pixel ? 1 : 0];
     // The same program again, which the title does between most of its
     // draws: one hash and one compare.
-    return Loaded(pixel, words, sizeDwords, HashBytes(words, size_t(sizeDwords) * 4));
+    return Loaded(pixel, words, sizeDwords, LoadHash(words, size_t(sizeDwords) * 4));
 }
 
 RenderState::Handle RenderShaders::Loaded(bool pixel, const uint8_t* words, uint32_t sizeDwords, uint64_t hash)

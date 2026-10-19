@@ -310,7 +310,40 @@ int Run(int argc, char** argv)
 
     Scheduler::Attach(Guest::CurrentProcessor(ctx));
     Kernel::RegisterEntryThread();
-    Sampler::Start(10);
+    // The report of every guest thread every ten seconds, for telling a
+    // hang from progress while the port was brought up: forty samples of
+    // each thread, each taken by stopping the thread (SuspendThread) to read
+    // where it is. On a normal run that stopped every game thread forty
+    // times over a second or two, every ten seconds: the main thread held
+    // mid-frame, and a hitch about every ten seconds. The watchdog still
+    // takes the report when the game stops swapping, and a fault still names
+    // its function. COD3_SAMPLER=N: every N seconds, as before.
+    {
+        const char* every = getenv("COD3_SAMPLER");
+        Sampler::Start(every != nullptr ? atoi(every) : 0);
+    }
+
+    // Windows 11 may run a process it deems in the background at reduced
+    // speed (EcoQoS: the efficient cores, a lower clock) and ignore its
+    // timer resolution when its window is covered. A game's command
+    // processor on an efficient core runs at a fraction of its speed, so
+    // the process asks to be left at full speed and its timer kept. A
+    // system without the call (before Windows 10 1709) simply does not.
+    {
+        struct PowerThrottling { ULONG Version, ControlMask, StateMask; };
+        using SetInformation = BOOL(WINAPI*)(HANDLE, int, LPVOID, DWORD);
+        if (const auto set = reinterpret_cast<SetInformation>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetProcessInformation")))
+        {
+            constexpr int ProcessPowerThrottlingClass = 4;              // PROCESS_INFORMATION_CLASS::ProcessPowerThrottling
+            constexpr ULONG ExecutionSpeed = 0x1, IgnoreTimerResolution = 0x4;
+            PowerThrottling state{ 1, ExecutionSpeed | IgnoreTimerResolution, 0 };
+            if (!set(GetCurrentProcess(), ProcessPowerThrottlingClass, &state, sizeof(state)))
+            {
+                state.ControlMask = ExecutionSpeed;                     // older Windows 10 knows only this one
+                set(GetCurrentProcess(), ProcessPowerThrottlingClass, &state, sizeof(state));
+            }
+        }
+    }
     Kernel::StartWatchdog();
 
     // A millisecond timer, for the vertical blank and every wait with a

@@ -152,27 +152,38 @@ namespace
         uint64_t hash = 1469598103934665603ull ^ bytes;
         if (dense)
         {
+            // Eight lanes, each a multiply and a turn of the word: the turn
+            // brings a word's top bits down into the next step's low ones.
+            // Without it a lane's top bit never reached any other, and two
+            // changes of it cancelled: a vertex buffer whose only change was
+            // the sign of the same coordinate in two vertices a stride apart
+            // (a model mirrored, a normal turned over) looked the same and
+            // kept the old vertices. Eight lanes rather than four keep the
+            // multiplier busy through the turn's extra step: as fast as before.
+            auto turn = [](uint64_t x) { return (x << 31) | (x >> 33); };
             uint64_t b = 0x9E3779B97F4A7C15ull, c = 0xBF58476D1CE4E5B9ull, d = 0x94D049BB133111EBull;
+            uint64_t e = 0xD6E8FEB86659FD93ull, f = 0xA0761D6478BD642Full, g = 0xE7037ED1A0B428DBull, h = 0x8EBC6AF09C88C6E3ull;
             size_t at = 0;
-            for (; at + 32 <= bytes; at += 32)
+            for (; at + 64 <= bytes; at += 64)
             {
-                uint64_t w[4];
-                memcpy(w, data + at, 32);
-                hash = (hash ^ w[0]) * K; b = (b ^ w[1]) * K; c = (c ^ w[2]) * K; d = (d ^ w[3]) * K;
+                uint64_t w[8];
+                memcpy(w, data + at, 64);
+                hash = turn((hash ^ w[0]) * K); b = turn((b ^ w[1]) * K); c = turn((c ^ w[2]) * K); d = turn((d ^ w[3]) * K);
+                e = turn((e ^ w[4]) * K); f = turn((f ^ w[5]) * K); g = turn((g ^ w[6]) * K); h = turn((h ^ w[7]) * K);
             }
             for (; at + 8 <= bytes; at += 8)
             {
                 uint64_t word;
                 memcpy(&word, data + at, 8);
-                hash = (hash ^ word) * K;
+                hash = turn((hash ^ word) * K);
             }
             if (at < bytes)
             {
                 uint64_t word = 0;
                 memcpy(&word, data + at, bytes - at);
-                hash = (hash ^ word) * K;
+                hash = turn((hash ^ word) * K);
             }
-            return ((hash ^ b) * K) ^ ((c ^ d) * K);
+            return ((hash ^ b) * K) ^ ((c ^ d) * K) ^ turn(((e ^ f) * K) ^ ((g ^ h) * K));
         }
         const size_t step = std::max<size_t>(bytes / 64, 64);
         for (size_t at = 0; at + 8 <= bytes; at += step)
@@ -1798,22 +1809,27 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
     if (bytes == 0 || bytes > (128u << 20)) return 0;
     // A look that takes long, named (with COD3_RENDER_STATS): the frames of
     // 0.5.12 that spent 30 to 40 ms in the buffers were few and unexplained.
+    // Timed only when the stats are on: two clock reads a look, a few
+    // thousand looks a frame, are not free.
     const char* path = "look";
+    const bool lookTimed = RenderStats::Wanted();
     struct SlowLook
     {
-        std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
+        bool timed;
+        std::chrono::steady_clock::time_point started;
         const char*& path; uint32_t physical; uint32_t& bytes;
         ~SlowLook()
         {
+            if (!timed) return;
             const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
             static int told = 0;
-            if (ms > 4.0 && told < 40 && RenderStats::Wanted())
+            if (ms > 4.0 && told < 40)
             {
                 told++;
                 printf("render: a vertex buffer look took %.2f ms: %08X, %u bytes, %s\n", ms, physical, bytes, path);
             }
         }
-    } slowLook{ std::chrono::steady_clock::now(), path, physical, bytes };
+    } slowLook{ lookTimed, lookTimed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}, path, physical, bytes };
     const uint32_t key[2] = { Guest::GpuOffset(physical), endian };
     Handle handle = g_bufferKeys.Find(key);
     const uint8_t* data = Guest::Base + Guest::PhysicalAlias(physical);
