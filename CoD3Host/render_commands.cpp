@@ -461,7 +461,7 @@ namespace
         }
         const bool drawChanged = memcmp(&g_lastConstants, &constants, sizeof(constants)) != 0;
         const RenderShaders::Program* programs[2] = { vs, ps };
-        const Handle handles[2] = { out.vertexShader, out.pixelShader };
+        const Handle handles[2] = { out.vertexShader, out.pixelShader & ~RenderShaders::OpaqueVariantBit };
         out.ring = RenderResources::ConstantOffsetsAvailable();
         if (!out.ring)
         {
@@ -1106,6 +1106,17 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
         const uint32_t samples = RenderResources::TargetSamples(state.pitch);
         constants.coverage[0] = (!noCoverage && samples > 1 && out.targetCount > 0 && constants.flags[1] != 7) ? samples : 0u;
         constants.coverage[1] = constants.coverage[2] = constants.coverage[3] = 0;
+    }
+    // A draw with the alpha test off takes its pixel program's variant
+    // without it (render_shaders.cpp), once built: the same picture, and
+    // the GPU's early depth test whole for it.
+    if (constants.flags[1] == 7 && out.ps != nullptr && ps != nullptr && out.pixelShader < RenderShaders::OpaqueVariantBit)
+    {
+        if (ID3D11DeviceChild* opaque = ps->opaque.load(std::memory_order_acquire))
+        {
+            out.ps = static_cast<ID3D11PixelShader*>(opaque);
+            out.pixelShader |= RenderShaders::OpaqueVariantBit;
+        }
     }
     // The pixel's own position, which the console writes into a register
     // of the pixel program when the program control asks (bit 18), the

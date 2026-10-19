@@ -796,6 +796,88 @@ namespace
 
     bool IsPowerOfTwo(uint32_t v) { return v != 0 && (v & (v - 1)) == 0; }
 
+    // --- texels sent through a staging texture ------------------------------------------
+    //
+    // With the pool, making textures stopped costing, and the 0.5.12 hitch
+    // lines showed what was left: the texels' own trip. A frame that met
+    // one big texture (a few megabytes of levels) spent about nine
+    // milliseconds in UpdateSubresource, the same as the immutable texture
+    // made with its texels before: under a gigabyte a second, the driver
+    // rearranging the texels into the GPU's own layout on the command
+    // thread. So the texels go into a staging texture instead (plain
+    // memory, a memcpy) and the GPU's copy engine moves them into the
+    // texture and lays them out (CopyResource), off the CPU. The staging
+    // textures are kept by shape and used again three frames on, when the
+    // GPU is done with them. COD3_NOSTAGING=1: UpdateSubresource as before.
+    struct StagingTexture
+    {
+        ComPtr<ID3D11Texture2D> texture;
+        uint64_t freeFrame = 0;
+    };
+    std::unordered_map<uint64_t, std::vector<StagingTexture>> g_staging;   // command thread only
+    uint64_t g_stagingBytes = 0;
+    constexpr uint64_t StagingBytesLimit = 192ull << 20;
+    std::atomic<uint64_t> g_stagedUploads{ 0 }, g_directUploads{ 0 };
+
+    bool StagingOn()
+    {
+        static const bool off = getenv("COD3_NOSTAGING") != nullptr;
+        return !off;
+    }
+
+    bool UploadByStaging(ID3D11Texture2D* target, const D3D11_TEXTURE2D_DESC& desc,
+                         const std::vector<D3D11_SUBRESOURCE_DATA>& initial, const std::vector<std::vector<uint8_t>>& pixels, uint32_t levels)
+    {
+        if (!StagingOn() || target == nullptr) return false;
+        std::vector<StagingTexture>& list = g_staging[PoolKey(desc)];
+        StagingTexture* slot = nullptr;
+        for (StagingTexture& candidate : list)
+            if (candidate.freeFrame <= g_frame) { slot = &candidate; break; }
+        if (slot == nullptr)
+        {
+            const uint64_t bytes = PoolBytes(desc);
+            if (g_stagingBytes + bytes > StagingBytesLimit) return false;
+            D3D11_TEXTURE2D_DESC staging = desc;
+            staging.Usage = D3D11_USAGE_STAGING;
+            staging.BindFlags = 0;
+            staging.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            staging.MiscFlags = 0;
+            StagingTexture made;
+            if (FAILED(g_device->CreateTexture2D(&staging, nullptr, &made.texture))) return false;
+            list.push_back(std::move(made));
+            slot = &list.back();
+            g_stagingBytes += bytes;
+        }
+        for (uint32_t level = 0; level < levels; level++)
+        {
+            D3D11_MAPPED_SUBRESOURCE mapped{};
+            if (FAILED(g_context->Map(slot->texture.Get(), level, D3D11_MAP_WRITE, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped)))
+            {
+                // Still the GPU's (it ran more than three frames behind):
+                // tried again later; sent the old way now.
+                slot->freeFrame = g_frame + 1;
+                return false;
+            }
+            const uint32_t pitch = initial[level].SysMemPitch;
+            const uint32_t rows = pitch != 0 ? uint32_t(pixels[level].size() / pitch) : 0;
+            uint8_t* const to = static_cast<uint8_t*>(mapped.pData);
+            const uint8_t* const from = pixels[level].data();
+            const uint32_t toPitch = mapped.RowPitch;
+            ForRows(rows, pixels[level].size(), [&](uint32_t first, uint32_t last)
+            {
+                if (toPitch == pitch) memcpy(to + size_t(first) * pitch, from + size_t(first) * pitch, size_t(last - first) * pitch);
+                else for (uint32_t row = first; row < last; row++) memcpy(to + size_t(row) * toPitch, from + size_t(row) * pitch, pitch);
+            });
+            g_context->Unmap(slot->texture.Get(), level);
+        }
+        g_context->CopyResource(target, slot->texture.Get());
+        slot->freeFrame = g_frame + 3;
+        g_stagedUploads.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+
+
+
     // The texture's levels from guest memory into a new texture. The
     // levels past the first lie one after another from the mip address,
     // each with its pitch and height rounded up to whole 32 block tiles;
@@ -951,8 +1033,12 @@ namespace
                 entry.texture = std::move(got.texture);
                 entry.resource = std::move(got.view);
             }
-            for (uint32_t level = 0; level < kept; level++)
-                g_context->UpdateSubresource(entry.texture.Get(), level, nullptr, initial[level].pSysMem, initial[level].SysMemPitch, 0);
+            if (!UploadByStaging(entry.texture.Get(), desc, initial, pixels, kept))
+            {
+                g_directUploads.fetch_add(1, std::memory_order_relaxed);
+                for (uint32_t level = 0; level < kept; level++)
+                    g_context->UpdateSubresource(entry.texture.Get(), level, nullptr, initial[level].pSysMem, initial[level].SysMemPitch, 0);
+            }
         }
         else
         {
@@ -1234,9 +1320,11 @@ bool RenderResources::BeginFrame(uint64_t frame)
             std::lock_guard<std::mutex> lock(g_poolMutex);
             spare = g_poolBytes;
         }
-        printf("render: texture pool: %llu new textures from the pool, %llu made on the spot, %llu written in place, %llu made ahead; %.1f MB kept\n",
+        printf("render: texture pool: %llu new textures from the pool, %llu made on the spot, %llu written in place, %llu made ahead; %.1f MB kept; "
+               "%llu sent by staging (%.1f MB of staging textures), %llu directly\n",
             (unsigned long long)g_poolHits.load(), (unsigned long long)g_poolMisses.load(), (unsigned long long)g_poolInPlace.load(),
-            (unsigned long long)g_poolMadeAhead.load(), spare / 1048576.0);
+            (unsigned long long)g_poolMadeAhead.load(), spare / 1048576.0,
+            (unsigned long long)g_stagedUploads.load(), g_stagingBytes / 1048576.0, (unsigned long long)g_directUploads.load());
     }
     return remade;
 }
@@ -1708,6 +1796,24 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
 {
     t_fingerprintKind = "vertex";
     if (bytes == 0 || bytes > (128u << 20)) return 0;
+    // A look that takes long, named (with COD3_RENDER_STATS): the frames of
+    // 0.5.12 that spent 30 to 40 ms in the buffers were few and unexplained.
+    const char* path = "look";
+    struct SlowLook
+    {
+        std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
+        const char*& path; uint32_t physical; uint32_t& bytes;
+        ~SlowLook()
+        {
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+            static int told = 0;
+            if (ms > 4.0 && told < 40 && RenderStats::Wanted())
+            {
+                told++;
+                printf("render: a vertex buffer look took %.2f ms: %08X, %u bytes, %s\n", ms, physical, bytes, path);
+            }
+        }
+    } slowLook{ std::chrono::steady_clock::now(), path, physical, bytes };
     const uint32_t key[2] = { Guest::GpuOffset(physical), endian };
     Handle handle = g_bufferKeys.Find(key);
     const uint8_t* data = Guest::Base + Guest::PhysicalAlias(physical);
@@ -1754,6 +1860,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
             const uint64_t since = entry.liveSince != 0 ? entry.liveSince : entry.watchedSince;
             if (!once && !noLive && since != 0 && entry.seen > AlwaysDenseBytes && entry.buffer)
             {
+                path = "written within the frame (pieces)";
                 const uint32_t span = std::min(entry.seen, entry.bytes);
                 if (WriteWatch::Clean(physical, span, since)) return handle;
                 const uint64_t now = WriteWatch::Sequence();
@@ -1878,9 +1985,11 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
                 return handle;
             }
             entry.watchedSince = 0;
+            path = "big, compared by pieces";
             uint64_t sent = 0;
             if (entry.shadow.size() < wanted)
             {
+                path = "big, first sent whole";
                 entry.shadow.assign(data, data + wanted);
                 D3D11_BOX box{ 0, 0, 0, wanted, 1, 1 };
                 g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data, 0, 0);
@@ -1978,8 +2087,10 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
         entry.fingerprint = entry.dense ? fingerprint : Fingerprint(data, wanted, true);
         entry.dense = true;
         entry.seen = wanted;
+        path = "changed, sent whole";
         if (entry.bytes < wanted)
         {
+            path = "grown, made again";
             // Grown: made again below.
             g_resourceBytes -= entry.bytes;
             g_bufferKeys.Erase(entry.key);
@@ -2002,6 +2113,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
         }
     }
 
+    if (path[0] != 'g') path = "new";
     if (!g_freeBuffers.empty()) { handle = g_freeBuffers.back(); g_freeBuffers.pop_back(); }
     else { g_buffers.emplace_back(); handle = Handle(g_buffers.size()); }
     BufferEntry& entry = g_buffers[handle - 1];

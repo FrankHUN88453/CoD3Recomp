@@ -118,18 +118,18 @@ namespace
     constexpr uint32_t CacheMagic = 0x48533343u;
     constexpr uint32_t CacheVersion = 3;
 
-    std::string CachePath(uint64_t hash, bool pixel)
+    std::string CachePath(uint64_t hash, bool pixel, const char* variant = "")
     {
         char name[96];
-        snprintf(name, sizeof(name), "\\%016llx.%s.%08llx.bin", (unsigned long long)hash, pixel ? "ps" : "vs",
+        snprintf(name, sizeof(name), "\\%016llx.%s%s.%08llx.bin", (unsigned long long)hash, pixel ? "ps" : "vs", variant,
             (unsigned long long)(g_translatorVersion & 0xFFFFFFFFull));
         return g_cacheDirectory + name;
     }
 
-    bool ReadCache(Program& program)
+    bool ReadCache(Program& program, const char* variant = "")
     {
         if (g_cacheDirectory.empty()) return false;
-        const std::string path = CachePath(program.hash, program.pixel);
+        const std::string path = CachePath(program.hash, program.pixel, variant);
         FILE* in = fopen(path.c_str(), "rb");
         if (in == nullptr) return false;
         CacheHeader header{};
@@ -156,10 +156,10 @@ namespace
         return true;
     }
 
-    void WriteCache(const Program& program)
+    void WriteCache(const Program& program, const char* variant = "")
     {
         if (g_cacheDirectory.empty()) return;
-        const std::string path = CachePath(program.hash, program.pixel);
+        const std::string path = CachePath(program.hash, program.pixel, variant);
         // Written whole under another name, then renamed, so a run cut
         // short leaves no half file.
         const std::string partial = path + ".part";
@@ -235,7 +235,66 @@ namespace
         return SUCCEEDED(hr) && program.shader != nullptr;
     }
 
+    // Shader specialisation, as UnleashedRecomp does it: every translated
+    // pixel program carries the alpha test (a discard, the alpha's change
+    // across the pixel, a coverage output), whether or not the draw has the
+    // test on, and a program that can discard or writes coverage keeps the
+    // GPU from writing depth before it runs: the early depth test then
+    // does less for the frame's overdraw. Most of the frame's draws (the
+    // level's solid geometry) have the test off. So each pixel program
+    // also gets a variant without it, built here after the program, kept
+    // in the disk cache beside it (.pso), and the draws with the test off
+    // take it. COD3_NOOPAQUEPS=1: neither built nor used.
+    bool OpaqueVariants()
+    {
+        static const bool off = getenv("COD3_NOOPAQUEPS") != nullptr;
+        return !off;
+    }
+
+    void BuildOpaque(const Job& job)
+    {
+        Program& program = *job.program;
+        if (!program.pixel || !OpaqueVariants() || program.state.load(std::memory_order_acquire) != State::Ready) return;
+        Program variant;
+        variant.hash = program.hash;
+        variant.pixel = true;
+        if (!ReadCache(variant, "o"))
+        {
+            const XenosHlsl::Translation translation = XenosHlsl::Translate(*job.words, true, false);
+            if (!translation.ok) return;
+            ID3DBlob* code = nullptr;
+            ID3DBlob* errors = nullptr;
+            const HRESULT hr = g_compile(translation.hlsl.data(), translation.hlsl.size(), "pixel program (opaque)", nullptr, nullptr, "main",
+                "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errors);
+            if (errors) errors->Release();
+            if (FAILED(hr) || code == nullptr) { if (code) code->Release(); return; }
+            variant.bytecode.assign(static_cast<const uint8_t*>(code->GetBufferPointer()),
+                static_cast<const uint8_t*>(code->GetBufferPointer()) + code->GetBufferSize());
+            code->Release();
+            variant.vertexFetches = translation.vertexFetches;
+            variant.textureFetches = translation.textureFetches;
+            variant.colourTargets = translation.colourTargets;
+            variant.writesDepth = translation.writesDepth;
+            variant.hlslBytes = uint32_t(translation.hlsl.size());
+            variant.constantMap = translation.constantMap;
+            // Only a variant that reads the same constants and textures the
+            // same way stands in for the program.
+            if (variant.constantMap != program.constantMap || variant.textureFetches.size() != program.textureFetches.size()) return;
+            WriteCache(variant, "o");
+        }
+        ID3D11PixelShader* shader = nullptr;
+        if (SUCCEEDED(g_device->CreatePixelShader(variant.bytecode.data(), variant.bytecode.size(), nullptr, &shader)) && shader != nullptr)
+            program.opaque.store(shader, std::memory_order_release);
+    }
+
+    void BuildProgram(const Job& job);
     void Build(const Job& job)
+    {
+        BuildProgram(job);
+        BuildOpaque(job);
+    }
+
+    void BuildProgram(const Job& job)
     {
         Program& program = *job.program;
         const char* what = program.pixel ? "pixel program" : "vertex program";
@@ -448,6 +507,7 @@ RenderState::Handle RenderShaders::Current(bool pixel) { return g_current[pixel 
 
 const RenderShaders::Program* RenderShaders::Get(Handle handle)
 {
+    handle &= ~OpaqueVariantBit;   // the opaque variant of a program is still that program
     return handle != 0 && handle <= g_programs.size() ? &g_programs[handle - 1] : nullptr;
 }
 

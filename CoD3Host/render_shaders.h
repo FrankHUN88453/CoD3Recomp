@@ -60,9 +60,16 @@ namespace RenderShaders
         std::vector<uint16_t> constantMap; // the file's constants the program reads, packed; empty means all of them
         bool writesDepth = false;
         std::vector<uint8_t> bytecode;     // kept for the stream out probe
+        // A pixel program's variant without the alpha test, for the draws
+        // with the test off; null until built (in the background, after
+        // the program itself). render_commands.cpp picks it.
+        std::atomic<ID3D11DeviceChild*> opaque{ nullptr };
         uint32_t hlslBytes = 0;
     };
 
+    // A pixel program's handle with this bit is its opaque variant (bound
+    // as a program of its own); Get and HashOf take either.
+    constexpr Handle OpaqueVariantBit = 0x40000000u;
     const Program* Get(Handle handle);
     uint64_t HashOf(Handle handle);
     // The hash a program of that microcode is known by.

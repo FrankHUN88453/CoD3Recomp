@@ -43,6 +43,7 @@
 #include <map>
 #include <vector>
 #include <mutex>
+#include <condition_variable>
 
 #include <Windows.h>
 
@@ -616,6 +617,14 @@ namespace
         else g_pendingInterrupts.fetch_add(1, std::memory_order_relaxed);
     }
 
+    // The title's wait at VdSwap for the GPU to reach the swap before:
+    // woken by the swap packet. It polled every 200 microseconds, which on
+    // Windows is a sleep of a whole timer tick, a millisecond or more: the
+    // title's next frame started up to that long after the GPU let it, at
+    // two hundred frames a second a fifth of the frame.
+    std::mutex g_swapMutex;
+    std::condition_variable g_swapReached;
+
     // The swap packet VdSwap writes into the driver's reservation: the
     // picture changes here, when the GPU reaches it, so a frame is shown
     // once its draws are done and never before.
@@ -652,6 +661,12 @@ namespace
             }
             lastAhead = ahead;
             Kernel::Stats().swapsReached.store(reached, std::memory_order_release);
+            // The title waiting at VdSwap for this swap (WaitForSwapsReached)
+            // goes on at once.
+            {
+                std::lock_guard<std::mutex> lock(g_swapMutex);
+            }
+            g_swapReached.notify_all();
         }
         Window::SetFrontBuffer(Guest::PhysicalAlias(surface), width, height);
         Render::Swap(surface, width, height);
@@ -2297,4 +2312,13 @@ void Gpu::ReportFences()
 void Gpu::SetInterruptRaiser(void (*raiser)(uint32_t cpuMask))
 {
     g_raiseInterrupt = raiser;
+}
+
+bool Gpu::WaitForSwapsReached(uint64_t needed, std::chrono::milliseconds limit)
+{
+    if (Kernel::Stats().swapsReached.load(std::memory_order_acquire) >= needed) return true;
+    std::unique_lock<std::mutex> lock(g_swapMutex);
+    return g_swapReached.wait_for(lock, limit, [needed]() {
+        return Kernel::Stats().swapsReached.load(std::memory_order_acquire) >= needed;
+    });
 }

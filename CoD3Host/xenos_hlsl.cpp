@@ -1046,7 +1046,7 @@ uint64_t XenosHlsl::Version()
     return hash;
 }
 
-XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, bool pixel)
+XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, bool pixel, bool alphaTest)
 {
     Translator translator(words, pixel);
     const bool ran = translator.Run();
@@ -1160,7 +1160,7 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
         hlsl += "struct Output { float4 c0 : SV_Target0; float4 c1 : SV_Target1; float4 c2 : SV_Target2; float4 c3 : SV_Target3;";
         if (out.writesDepth) hlsl += " float depth : SV_Depth;";
         else if (cutDepth) hlsl += " float depth : SV_DepthLessEqual;";
-        hlsl += " uint coverage : SV_Coverage;";
+        if (alphaTest) hlsl += " uint coverage : SV_Coverage;";
         hlsl += " };\n";
         hlsl += "Output main(Input input) {\n";
         hlsl += "    float4 r[32];\n";
@@ -1220,6 +1220,7 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
         // across one pixel: alpha to coverage, sharpened, so the cut-outs
         // are antialiased like geometry rather than one sample's yes or no.
         // The colour and its alpha are left as the title computed them.
+        if (alphaTest)
         hlsl += "    uint coverageMask = 0xFFFFFFFFu;\n"
                 "    { uint fn = flags.y; float ref = asfloat(flags.z); float a = oC0.w; bool passes = true;\n"
                 "      float across = max(fwidth(a), 1.0 / 255.0);\n"
@@ -1259,7 +1260,7 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
         static const bool nanShow = getenv("COD3_NANSHOW") != nullptr;
         if (nanShow) hlsl += "    if (any(isnan(oC0)) || any(isinf(oC0))) oC0 = float4(1.0, 0.0, 1.0, 1.0);\n";
         hlsl += "    output.c0 = oC0; output.c1 = oC1; output.c2 = oC2; output.c3 = oC3;\n";
-        hlsl += "    output.coverage = coverageMask;\n";
+        if (alphaTest) hlsl += "    output.coverage = coverageMask;\n";
         if (out.writesDepth) hlsl += "    output.depth = oDepth4.x;\n";
         else if (depth24) hlsl += "    output.depth = Depth20e4(input.position.z);\n";
         hlsl += "    return output;\n}\n";

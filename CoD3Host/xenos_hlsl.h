@@ -50,8 +50,12 @@ namespace XenosHlsl
         bool usesKill = false;
     };
 
-    // A vertex or pixel program from its microcode words.
-    Translation Translate(const std::vector<uint32_t>& words, bool pixel);
+    // A vertex or pixel program from its microcode words. `alphaTest`
+    // false: a pixel program without the alpha test and its coverage, for
+    // the draws that have the test off (render_shaders.cpp's opaque
+    // variant): no discard and no coverage output of its own making, so
+    // the GPU keeps its early depth test and writes for them.
+    Translation Translate(const std::vector<uint32_t>& words, bool pixel, bool alphaTest = true);
 
     // A number that changes whenever the translation would: the disk cache
     // of compiled programs is keyed by it.
