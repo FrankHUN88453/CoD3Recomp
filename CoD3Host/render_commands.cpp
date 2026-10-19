@@ -53,7 +53,7 @@ namespace
     // sharp. The two before it still run, so the surface they make is
     // there for anything else that reads it.
     bool g_aimBlur = true;
-    bool g_hdrScene = false;    // the HDR mode: the frame tone mapped after the bloom's composite
+    bool g_hdrScene = false;    // the HDR mode: the frame tone mapped at the bloom's composite
     bool g_steadyDecals = true; // the layers over a surface put a little nearer
     float g_bloom = 1.0f;       // the bloom's strength, the game's at one
     // The shell shock pass (below): taken from the settings once a frame.
@@ -1196,8 +1196,9 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
     // frame by the constant colour, right before the HUD (seen with the
     // RenoDX devkit: draw 2148 of 2180, then the HUD's from 2149). Its
     // strength is the HDR tab's bloom slider, in SDR too; and in the HDR
-    // mode the frame is tone mapped right after it (render_d3d11.cpp's
-    // HdrScenePass), so the HUD is drawn over the finished picture.
+    // mode the frame is tone mapped right before it (render_d3d11.cpp's
+    // HdrScenePass) and the bloom added over the tone mapped picture, so the
+    // halos stay the game's and the HUD is drawn over the finished picture.
     // COD3_HDRSCENEPS=hash names another program for the place.
     {
         static const uint64_t composite = []() { const char* t = getenv("COD3_HDRSCENEPS"); return t ? uint64_t(strtoull(t, nullptr, 16)) : 0xfe6578445de135eaull; }();

@@ -260,7 +260,7 @@ bit targets that clip at one. In the HDR mode:
   one of them clamps what it writes to nought upward, finite, with the
   alpha from nought to one (`xenos_hlsl.cpp`'s `hdrClamp`, by
   `DrawConstants.coverage.y`, a bit a target);
-- right after the bloom's composite (pixel program `fe6578445de135ea`, an
+- right before the bloom's composite (pixel program `fe6578445de135ea`, an
   additive full screen draw, found with the RenoDX devkit: the last draw
   before the HUD's), the frame is tone mapped where it lies
   (`HdrScenePass`): a copy of the target (resolved, with MSAA) through
@@ -268,6 +268,13 @@ bit targets that clip at one. In the HDR mode:
   RenoDX's `ToneMapPass` (Vanilla, None, ACES, RenoDRT), PsychoV 17, 22 or
   30, or Prism (`thirdparty/prism`), and RenoDX's `RenderIntermediatePass`,
   which leaves the UI's white at one so the HUD blends over it as before;
+- the composite then adds the bloom over the tone mapped picture with the
+  bloom program in the game's program's place, as the author's RenoDX World
+  at War mod adds its bloom after the tone map: halos as the game's, and
+  where they add up past white they carry on into the highlights instead of
+  clipping. The glow is scaled by the game's white over the UI's (the
+  intermediate's one is the UI's), so it stands to the picture as in SDR,
+  and rolled off past that white towards twice it;
 - the present is RenoDX's `SwapChainPass` into an scRGB swap chain
   (`R16G16B16A16_FLOAT`, `DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709`). A
   frame the scene pass did not run on (the menus, a loading screen, a film)

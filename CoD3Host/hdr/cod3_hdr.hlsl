@@ -13,11 +13,12 @@
 // those targets are 16 bit float (render_resources.cpp), so the sky, the
 // fire and the muzzle flashes keep what they had beyond one. Three passes:
 //
-//   scene    right after the bloom is added to the frame and before the
-//            HUD is drawn over it (render_commands.cpp finds that draw): the
-//            frame tone mapped to the display's peak, and encoded as
-//            RenoDX's intermediate, where one is the UI's white, so the HUD
-//            blends over it as it always did.
+//   scene    right before the bloom is added to the frame, the HUD's turn
+//            just after (render_commands.cpp finds that draw): the frame
+//            tone mapped to the display's peak, and encoded as RenoDX's
+//            intermediate, where one is the UI's white, so the HUD blends
+//            over it as it always did.
+//   bloom    the game's bloom composite, added over the tone mapped frame.
 //   present  the finished frame to the swap chain, scRGB: RenoDX's swap
 //            chain pass. A frame without the scene pass (the menus, a
 //            loading screen, a film) is all UI, or a film at the game's
@@ -25,8 +26,8 @@
 //   ui       the settings menu and the counters, drawn by Dear ImGui into a
 //            layer of their own, laid over at the UI's brightness.
 //
-// Compiled by render_d3d11.cpp with one of HDR_SCENE, HDR_PRESENT or HDR_UI
-// defined, HDR_TONEMAPPER (the scene's tone mapper) and HDR_FXAA (the
+// Compiled by render_d3d11.cpp with one of HDR_SCENE, HDR_BLOOM, HDR_PRESENT
+// or HDR_UI defined, HDR_TONEMAPPER (the scene's tone mapper) and HDR_FXAA (the
 // present's), each variant in the background when it is first needed.
 
 #ifndef HDR_TONEMAPPER
@@ -234,6 +235,40 @@ float4 present(float4 position : SV_Position, float2 uv : TEXCOORD0) : SV_Target
   float3 frame = source.Sample(smp, uv).rgb;
 #endif
   return float4(PresentColor(frame), 1.f);
+}
+#endif
+
+#if defined(HDR_BLOOM)
+// The bloom's composite in the HDR mode, in the game's program's place
+// (pixel program fe6578445de135ea): the blurred sky (the game's bloom is
+// the sky's, the chain masks the rest out by the depth) times twice the
+// game's strength (c1.x), added by the blend (the constant colour, which
+// the bloom slider scales) onto the frame the scene pass has already tone
+// mapped. Added after the tone map, as the user's RenoDX World at War mod
+// does it: the halos keep the game's shape and colour, and where they add
+// up past white over the sky they go on into the highlights instead of
+// clipping there, which is what makes them brighter than the SDR ones.
+//
+// The intermediate's one is the UI's white, the scene's is the game's: the
+// glow is scaled by the same step, so it stands to the picture as it does
+// in SDR whatever the two are set to. Past the game's white it is rolled
+// off towards twice that, so a raised slider cannot swamp the frame.
+cbuffer FloatConstants : register(b0) { float4 c[256]; };
+Texture2D<float4> bloomTexture : register(t0);
+float4 bloom(float4 position : SV_Position, float4 o0 : TEXCOORD0) : SV_Target {
+  float4 t = bloomTexture.Sample(smp, o0.xy);
+  float strength = 2.f * c[1].x;
+  // As the game's: red the strength alone, the rest with c2.x added.
+  float4 glow = t * strength + float4(0.f, c[2].x, c[2].x, c[2].x);
+  glow = glow == glow ? glow : 0;   // not a number: none
+  float3 light = max(0, glow.rgb);
+  float white = max(renodx::draw::RenderIntermediatePass(float3(1.f, 1.f, 1.f)).g, 1e-3f);
+  light *= white;
+  float peak = max(light.r, max(light.g, light.b));
+  float over = max(peak - white, 0.f);
+  float mapped = white + over / (1.f + over / white);
+  light *= peak > white ? mapped / peak : 1.f;
+  return float4(light, saturate(glow.a));
 }
 #endif
 

@@ -775,10 +775,17 @@ namespace
 
     // The command on the context: each thing it names compared with what
     // is bound and set only when it differs, then the one draw call.
-    void HdrScenePass(const RenderState::DrawCommand& command);   // the HDR section, below
+    bool HdrScenePass(const RenderState::DrawCommand& command);   // the HDR section, below
+    ID3D11PixelShader* HdrProgramFor(const char* pass, int toneMapper, uint32_t samples, bool fxaa);
 
     void ExecuteDraw(const RenderState::DrawCommand& command)
     {
+        // The HDR mode: before the bloom's composite, the frame tone mapped
+        // (its passes leave nothing bound); the composite then adds the
+        // bloom over the tone mapped picture through hdr/cod3_hdr.hlsl's
+        // bloom program, once the scene pass ran and the program is ready.
+        ID3D11PixelShader* bloomProgram = nullptr;
+        if (command.hdrScene && HdrScenePass(command)) bloomProgram = HdrProgramFor("bloom", 0, 1, false);
         RenderStats::Enter(RenderStats::SectionBind);
         if (command.bindingsLost) ForgetBindings();
 
@@ -867,6 +874,15 @@ namespace
                 g_bound.constantsBound = true;
             }
         }
+        // The HDR bloom program reads the HDR settings at b1, where the
+        // game's programs have their booleans: bound for it, and the
+        // booleans bound again by the next draw.
+        if (bloomProgram != nullptr && g_hdrConstants)
+        {
+            ID3D11Buffer* hdr[1] = { g_hdrConstants.Get() };
+            g_context->PSSetConstantBuffers(1, 1, hdr);
+            g_bound.constantsBound = false;
+        }
 
         // The programs and the states, when they changed.
         if (g_bound.vertexShader != command.vertexShader)
@@ -877,14 +893,17 @@ namespace
         }
         {
             const bool flat = g_flatPixelShader && command.opaque;
-            if (g_bound.pixelShader != command.pixelShader || g_bound.flat != flat)
+            // The HDR bloom program has a handle of its own, so the binding
+            // is made again on either side of it.
+            const Handle pixelShader = bloomProgram != nullptr ? Handle(0xFFFFFFF0u) : command.pixelShader;
+            if (g_bound.pixelShader != pixelShader || g_bound.flat != flat)
             {
-                ID3D11PixelShader* program = flat ? g_flatPixelShader.Get() : command.ps;
+                ID3D11PixelShader* program = flat ? g_flatPixelShader.Get() : bloomProgram != nullptr ? bloomProgram : command.ps;
                 // No pixel program: the depth cutting one, except for a shadow
                 // map's casters (render_commands.cpp's NoPixelProgramFast).
                 if (program == nullptr && command.pixelShader != 0xFFFFFFFEu) program = g_depthOnlyPixelShader.Get();
                 g_context->PSSetShader(program, nullptr, 0);
-                g_bound.pixelShader = command.pixelShader;
+                g_bound.pixelShader = pixelShader;
                 g_bound.flat = flat;
                 RenderStats::Frame().shaderSwitches++;
             }
@@ -958,9 +977,6 @@ namespace
             dumpThis = strncmp(name, dumpPixel, strlen(dumpPixel)) == 0;
         }
         if (dumpThis) DumpTargetAfterDraw(command.colorTexture, command.depthTexture);
-        // The HDR mode: right after the bloom's composite, the frame tone
-        // mapped where the HUD is about to be drawn over it.
-        if (command.hdrScene) HdrScenePass(command);
         PicturesAtDraw(command);
     }
 
@@ -1502,8 +1518,10 @@ namespace
     //   - the swap chain scRGB: 16 bit float, linear, one being 80 nits
     //   - the title's 8 bit colour targets 16 bit float (render_resources.cpp),
     //     its pixel programs' output kept from nought up (xenos_hlsl.cpp)
-    //   - right after the bloom's composite the frame is tone mapped where it
-    //     lies, before the HUD is drawn over it (HdrScenePass)
+    //   - right before the bloom's composite the frame is tone mapped where
+    //     it lies (HdrScenePass), and the composite then adds the bloom over
+    //     the tone mapped picture, past white where it adds up so (the bloom
+    //     program), before the HUD is drawn over it
     //   - the present is RenoDX's swap chain pass, and Dear ImGui draws into a
     //     layer of its own, laid over at the UI's brightness
     //
@@ -1624,7 +1642,7 @@ namespace
         char toneMapperText[8], samplesText[8];
         snprintf(toneMapperText, sizeof(toneMapperText), "%d", toneMapper);
         snprintf(samplesText, sizeof(samplesText), "%u", samples);
-        const char* passMacro = pass == "scene" ? "HDR_SCENE" : pass == "present" ? "HDR_PRESENT" : "HDR_UI";
+        const char* passMacro = pass == "scene" ? "HDR_SCENE" : pass == "bloom" ? "HDR_BLOOM" : pass == "present" ? "HDR_PRESENT" : "HDR_UI";
         const D3D_SHADER_MACRO defines[] = {
             { passMacro, "1" }, { "HDR_TONEMAPPER", toneMapperText }, { "HDR_SAMPLES", samplesText },
             { "HDR_FXAA", fxaa ? "1" : "0" }, { nullptr, nullptr } };
@@ -1733,21 +1751,21 @@ namespace
     // all get its tone mapped colour: the edges keep their blend, the HUD
     // drawn next still has every sample to cover, and the copy is one
     // sample's size rather than four or eight. Once a view a frame.
-    void HdrScenePass(const RenderState::DrawCommand& command)
+    bool HdrScenePass(const RenderState::DrawCommand& command)
     {
         ID3D11Texture2D* target = command.colorTexture;
-        if (!g_hdrWanted.load(std::memory_order_relaxed) || target == nullptr || command.targets[0] == nullptr) return;
+        if (!g_hdrWanted.load(std::memory_order_relaxed) || target == nullptr || command.targets[0] == nullptr) return false;
         D3D11_TEXTURE2D_DESC desc{};
         target->GetDesc(&desc);
-        if (desc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT) return;
+        if (desc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT) return false;
         const D3D11_RECT rect{ command.scissor[0], command.scissor[1],
                                std::min<LONG>(command.scissor[2], LONG(desc.Width)), std::min<LONG>(command.scissor[3], LONG(desc.Height)) };
-        if (rect.right <= rect.left || rect.bottom <= rect.top) return;
+        if (rect.right <= rect.left || rect.bottom <= rect.top) return false;
         for (const D3D11_RECT& done : g_hdrGraded)
-            if (rect.left < done.right && done.left < rect.right && rect.top < done.bottom && done.top < rect.bottom) return;
+            if (rect.left < done.right && done.left < rect.right && rect.top < done.bottom && done.top < rect.bottom) return false;
         const uint32_t samples = desc.SampleDesc.Count;
         ID3D11PixelShader* program = HdrProgramFor("scene", g_hdrToneMapper, 1, false);
-        if (program == nullptr || !BuiltInPrograms()) return;
+        if (program == nullptr || !BuiltInPrograms()) return false;
 
         if (!g_hdrSceneCopy || g_hdrSceneCopyDesc.Width != desc.Width || g_hdrSceneCopyDesc.Height != desc.Height)
         {
@@ -1765,7 +1783,7 @@ namespace
             {
                 g_hdrSceneCopy.Reset();
                 g_hdrSceneCopyView.Reset();
-                return;
+                return false;
             }
             g_hdrSceneCopyDesc = desc;
         }
@@ -1807,6 +1825,7 @@ namespace
         // Everything the draws had bound is gone; the next draw binds its own.
         ForgetBindings();
         g_hdrGraded.push_back(rect);
+        return true;
     }
 
     // Dear ImGui's layer, the swap chain's size.
@@ -2155,6 +2174,7 @@ namespace
             HdrProgramFor("present", 0, 1, aa == 1 || aa == 5);
             HdrProgramFor("ui", 0, 1, false);
             HdrProgramFor("scene", g_hdrToneMapper, 1, false);
+            HdrProgramFor("bloom", 0, 1, false);
         }
         // The optimizations' switches (tuning.h), for the next frame.
         Tuning::depthThread.store(settings.depthThread, std::memory_order_relaxed);
