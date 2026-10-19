@@ -1409,9 +1409,23 @@ namespace
             auto now = clock::now();
             const auto waitStarted = now;
             if (now - due > period * 2) due = now;   // behind by more than a frame: start the clock again
+            // A high resolution waitable timer for all but the last 0.3 ms,
+            // then a spin: Sleep(1) came back up to two milliseconds late,
+            // which at a cap of 144 or more is a third of a frame of jitter.
+            static const HANDLE timer = []() {
+                HANDLE made = CreateWaitableTimerExW(nullptr, nullptr, 0x00000002 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
+                return made;
+            }();
+            if (timer != nullptr && due - now > std::chrono::microseconds(600))
+            {
+                LARGE_INTEGER wait;
+                wait.QuadPart = -int64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(due - now - std::chrono::microseconds(300)).count() / 100);
+                if (SetWaitableTimerEx(timer, &wait, 0, nullptr, nullptr, nullptr, 0)) WaitForSingleObject(timer, INFINITE);
+                now = clock::now();
+            }
             while (now < due)
             {
-                if (due - now > std::chrono::microseconds(1500)) Sleep(1);
+                if (timer == nullptr && due - now > std::chrono::microseconds(1500)) Sleep(1);
                 else YieldProcessor();
                 now = clock::now();
             }

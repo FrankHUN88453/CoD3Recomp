@@ -346,12 +346,12 @@ namespace
                     {
                         // A cap holds the frames to an even pace: a steady 60
                         // feels smoother than a rate swinging between 50 and 140.
-                        static const int caps[] = { 0, 60, 90, 120, 144 };
-                        static const char* const names[] = { "Off", "60", "90", "120", "144" };
+                        static const int caps[] = { 0, 60, 90, 120, 144, 165, 240 };
+                        static const char* const names[] = { "Off", "60", "90", "120", "144", "165", "240" };
                         int current = 0;
-                        for (int i = 0; i < 5; i++) if (caps[i] == g_edit.frameCap) current = i;
+                        for (int i = 0; i < 7; i++) if (caps[i] == g_edit.frameCap) current = i;
                         ImGui::SetNextItemWidth(120);
-                        if (ImGui::Combo("Frame rate cap", &current, names, 5)) g_edit.frameCap = caps[current];
+                        if (ImGui::Combo("Frame rate cap", &current, names, 7)) g_edit.frameCap = caps[current];
                         ImGui::SameLine();
                         ImGui::TextDisabled("(an even pace; 60 for the steadiest picture)");
                     }

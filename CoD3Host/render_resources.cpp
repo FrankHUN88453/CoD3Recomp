@@ -14,7 +14,10 @@
 #include <cstring>
 #include <deque>
 #include <chrono>
+#include <condition_variable>
 #include <map>
+#include <mutex>
+#include <thread>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -356,6 +359,198 @@ namespace
     };
     std::deque<TextureEntry> g_textures;   // by handle less one; handle 1 is the white texture
 
+    // --- the texture pool ------------------------------------------------------------------
+    //
+    // Making a texture was the frame time's spikes: a hitch line of 0.5.11
+    // took apart the slow frames, and nearly all were frames that met new
+    // textures (the level streaming them in as the player moves), each
+    // CreateTexture2D with its texels about a millisecond on the command
+    // thread at a high frame rate, eight or ten of them in one frame. The
+    // texels' layout was a tenth of that. What costs is the driver finding
+    // and initialising memory for each new texture.
+    //
+    // So textures are kept for reuse rather than made each time, as
+    // UnleashedRecomp keeps its streaming off the drawing thread: a texture
+    // let go (unused for a while, its memory freed by the title, replaced)
+    // goes into a pool by its size, levels and format; a texture changed in
+    // place is written in place; and a worker thread keeps two spare
+    // textures of each shape lately asked for made ahead, the device being
+    // free threaded for making things. Only the texels are then sent, with
+    // UpdateSubresource, on the command thread. A shape never seen before
+    // is still made there, once. COD3_NOTEXPOOL=1: made each time, as before.
+    struct PooledTexture
+    {
+        ComPtr<ID3D11Texture2D> texture;
+        ComPtr<ID3D11ShaderResourceView> view;
+    };
+    struct PoolWant
+    {
+        D3D11_TEXTURE2D_DESC desc{};
+        uint64_t lastUse = 0;
+    };
+    std::mutex g_poolMutex;
+    std::condition_variable g_poolWake;
+    std::unordered_map<uint64_t, std::vector<PooledTexture>> g_pool;
+    std::unordered_map<uint64_t, PoolWant> g_poolWants;   // shapes to keep spares of
+    uint64_t g_poolBytes = 0;
+    bool g_poolAhead = false;                             // the worker runs
+    std::atomic<uint64_t> g_poolHits{ 0 }, g_poolMisses{ 0 }, g_poolInPlace{ 0 }, g_poolMadeAhead{ 0 };
+    constexpr uint64_t PoolBytesLimit = 256ull << 20;     // spares and textures let go, together
+    constexpr size_t PoolSpares = 2;
+    constexpr uint64_t PoolSpareBytesLimit = 24ull << 20; // nothing bigger is made ahead
+    constexpr size_t PoolWantsLimit = 64;
+
+    bool TexturePoolOn()
+    {
+        static const bool off = getenv("COD3_NOTEXPOOL") != nullptr;
+        return !off;
+    }
+
+    uint64_t PoolKey(const D3D11_TEXTURE2D_DESC& desc)
+    {
+        return uint64_t(desc.Width) | (uint64_t(desc.Height) << 16) | (uint64_t(desc.MipLevels) << 32) | (uint64_t(desc.Format) << 40);
+    }
+
+    // What a texture of the shape takes, its levels together.
+    uint64_t PoolBytes(const D3D11_TEXTURE2D_DESC& desc)
+    {
+        const bool bc1 = desc.Format == DXGI_FORMAT_BC1_UNORM;
+        const bool bc = bc1 || desc.Format == DXGI_FORMAT_BC2_UNORM || desc.Format == DXGI_FORMAT_BC3_UNORM;
+        const uint32_t texel = desc.Format == DXGI_FORMAT_R8_UNORM ? 1 : 4;
+        uint64_t bytes = 0;
+        for (uint32_t level = 0; level < std::max(desc.MipLevels, 1u); level++)
+        {
+            const uint32_t w = std::max(desc.Width >> level, 1u), h = std::max(desc.Height >> level, 1u);
+            bytes += bc ? uint64_t((w + 3) / 4) * ((h + 3) / 4) * (bc1 ? 8 : 16) : uint64_t(w) * h * texel;
+        }
+        return bytes;
+    }
+
+    // A pooled texture's shape: flat, one array slice, sampled only, and
+    // written with UpdateSubresource (not immutable).
+    bool Poolable(const D3D11_TEXTURE2D_DESC& desc)
+    {
+        return desc.Usage == D3D11_USAGE_DEFAULT && desc.ArraySize == 1 && desc.MiscFlags == 0 &&
+               desc.BindFlags == D3D11_BIND_SHADER_RESOURCE && desc.SampleDesc.Count == 1;
+    }
+
+    bool MakePooled(const D3D11_TEXTURE2D_DESC& desc, PooledTexture& made)
+    {
+        if (FAILED(g_device->CreateTexture2D(&desc, nullptr, &made.texture))) return false;
+        if (FAILED(g_device->CreateShaderResourceView(made.texture.Get(), nullptr, &made.view))) { made.texture.Reset(); return false; }
+        return true;
+    }
+
+    // The worker: makes the spares of the shapes asked for lately, one at a
+    // time, and sleeps when every shape has its two.
+    void PoolWorker()
+    {
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+        std::unique_lock<std::mutex> lock(g_poolMutex);
+        for (;;)
+        {
+            uint64_t key = 0;
+            D3D11_TEXTURE2D_DESC desc{};
+            bool short_ = false;
+            for (const auto& [wantKey, want] : g_poolWants)
+            {
+                auto found = g_pool.find(wantKey);
+                const size_t have = found == g_pool.end() ? 0 : found->second.size();
+                if (have < PoolSpares && g_poolBytes + PoolBytes(want.desc) <= PoolBytesLimit)
+                {
+                    key = wantKey; desc = want.desc; short_ = true;
+                    break;
+                }
+            }
+            if (!short_) { g_poolWake.wait(lock); continue; }
+            lock.unlock();
+            PooledTexture made;
+            const bool ok = MakePooled(desc, made);
+            lock.lock();
+            if (!ok) { g_poolWants.erase(key); continue; }
+            g_poolBytes += PoolBytes(desc);
+            g_pool[key].push_back(std::move(made));
+            g_poolMadeAhead.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
+    void StartTexturePool()
+    {
+        if (!TexturePoolOn() || getenv("COD3_NOTEXAHEAD") != nullptr) return;
+        // Only where the driver makes things concurrently with the drawing
+        // (every current one does); else the worker would take the lock the
+        // command thread's own calls wait on.
+        D3D11_FEATURE_DATA_THREADING threading{};
+        if (FAILED(g_device->CheckFeatureSupport(D3D11_FEATURE_THREADING, &threading, sizeof(threading))) || !threading.DriverConcurrentCreates)
+        {
+            printf("render: the driver does not make resources concurrently; textures are not made ahead\n");
+            return;
+        }
+        g_poolAhead = true;
+        std::thread(PoolWorker).detach();
+    }
+
+    // A texture of the shape: a spare, or made now. Asking for a shape also
+    // has the worker keep spares of it.
+    bool AcquirePooled(const D3D11_TEXTURE2D_DESC& desc, PooledTexture& out)
+    {
+        const uint64_t key = PoolKey(desc), bytes = PoolBytes(desc);
+        bool hit = false;
+        {
+            std::lock_guard<std::mutex> lock(g_poolMutex);
+            auto found = g_pool.find(key);
+            if (found != g_pool.end() && !found->second.empty())
+            {
+                out = std::move(found->second.back());
+                found->second.pop_back();
+                g_poolBytes -= bytes;
+                hit = true;
+            }
+            if (g_poolAhead && bytes <= PoolSpareBytesLimit)
+            {
+                PoolWant& want = g_poolWants[key];
+                want.desc = desc;
+                want.lastUse = g_frame;
+                if (g_poolWants.size() > PoolWantsLimit)
+                {
+                    // The shape used longest ago is no longer kept spares of.
+                    auto oldest = g_poolWants.begin();
+                    for (auto it = g_poolWants.begin(); it != g_poolWants.end(); ++it)
+                        if (it->second.lastUse < oldest->second.lastUse) oldest = it;
+                    g_poolWants.erase(oldest);
+                }
+            }
+        }
+        if (g_poolAhead) g_poolWake.notify_one();
+        if (hit) { g_poolHits.fetch_add(1, std::memory_order_relaxed); return true; }
+        g_poolMisses.fetch_add(1, std::memory_order_relaxed);
+        return MakePooled(desc, out);
+    }
+
+    // A texture let go: into the pool when it is of a pooled shape and
+    // there is room, else released.
+    void ReleasePooled(ComPtr<ID3D11Texture2D>& texture, ComPtr<ID3D11ShaderResourceView>& view)
+    {
+        if (TexturePoolOn() && texture && view)
+        {
+            D3D11_TEXTURE2D_DESC desc{};
+            texture->GetDesc(&desc);
+            if (Poolable(desc))
+            {
+                const uint64_t bytes = PoolBytes(desc);
+                std::lock_guard<std::mutex> lock(g_poolMutex);
+                if (g_poolBytes + bytes <= PoolBytesLimit)
+                {
+                    g_pool[PoolKey(desc)].push_back(PooledTexture{ std::move(texture), std::move(view) });
+                    g_poolBytes += bytes;
+                }
+            }
+        }
+        texture.Reset();
+        view.Reset();
+    }
+
+
     // Every resource is looked at once a frame, as it always was: a look
     // put off is a texture that changes late on screen, which is a flicker
     // in the menu and the HUD. What the look costs is what changes: every
@@ -391,6 +586,7 @@ namespace
         uint32_t seen = 0;              // the largest size a fetch asked for
         uint64_t watchedSince = 0;      // COD3_WRITEWATCH: its pages watched from this write sequence on, 0 not
         uint64_t liveSince = 0;         // 0.5.99: a big buffer's pages watched within the frame from this sequence on
+        uint8_t falseWrites = 0;        // looks its pages said written that found it the same: past a few, not watched
         bool live = false;
         std::vector<uint8_t> shadow;    // a big buffer: what went up, to send only what changed
     };
@@ -726,17 +922,45 @@ namespace
         desc.ArraySize = faces;
         desc.Format = hostFormat;
         desc.SampleDesc.Count = 1;
-        desc.Usage = D3D11_USAGE_IMMUTABLE;
+        const bool pooled = !cube && TexturePoolOn();
+        desc.Usage = pooled ? D3D11_USAGE_DEFAULT : D3D11_USAGE_IMMUTABLE;
         desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
         desc.MiscFlags = cube ? D3D11_RESOURCE_MISC_TEXTURECUBE : 0;
-        entry.texture.Reset();
-        entry.resource.Reset();
         const auto createStarted = std::chrono::steady_clock::now();
         RenderStats::Frame().uploadLayoutNanoseconds += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(createStarted - uploadStarted).count());
         struct CreateTimed { std::chrono::steady_clock::time_point started; ~CreateTimed() {
             RenderStats::Frame().uploadCreateNanoseconds += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count()); } } createTimed{ createStarted };
-        if (FAILED(g_device->CreateTexture2D(&desc, initial.data(), &entry.texture))) return false;
-        if (FAILED(g_device->CreateShaderResourceView(entry.texture.Get(), nullptr, &entry.resource))) return false;
+        if (pooled)
+        {
+            // The texture it has, written in place when it is the same
+            // shape (a texture the title changed); else one from the pool,
+            // the old one going back to it.
+            bool inPlace = false;
+            if (entry.texture && entry.resource && !entry.cube)
+            {
+                D3D11_TEXTURE2D_DESC had{};
+                entry.texture->GetDesc(&had);
+                inPlace = Poolable(had) && PoolKey(had) == PoolKey(desc);
+            }
+            if (inPlace) g_poolInPlace.fetch_add(1, std::memory_order_relaxed);
+            else
+            {
+                ReleasePooled(entry.texture, entry.resource);
+                PooledTexture got;
+                if (!AcquirePooled(desc, got)) return false;
+                entry.texture = std::move(got.texture);
+                entry.resource = std::move(got.view);
+            }
+            for (uint32_t level = 0; level < kept; level++)
+                g_context->UpdateSubresource(entry.texture.Get(), level, nullptr, initial[level].pSysMem, initial[level].SysMemPitch, 0);
+        }
+        else
+        {
+            entry.texture.Reset();
+            entry.resource.Reset();
+            if (FAILED(g_device->CreateTexture2D(&desc, initial.data(), &entry.texture))) return false;
+            if (FAILED(g_device->CreateShaderResourceView(entry.texture.Get(), nullptr, &entry.resource))) return false;
+        }
         entry.cube = cube;
         entry.face.Reset();
         if (cube)
@@ -873,6 +1097,7 @@ void RenderResources::Initialize(ID3D11Device* device, ID3D11DeviceContext* cont
 {
     g_device = device;
     g_context = context;
+    StartTexturePool();
     g_indexRing.Make(IndexRingBytes, D3D11_BIND_INDEX_BUFFER);
     D3D11_FEATURE_DATA_D3D11_OPTIONS options{};
     if (SUCCEEDED(device->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS, &options, sizeof(options))) && options.ConstantBufferOffsetting)
@@ -931,8 +1156,7 @@ bool RenderResources::BeginFrame(uint64_t frame)
             if (!entry.live) continue;
             g_textureKeys.Erase(entry.key);
             g_resourceBytes -= entry.bytes;
-            entry.texture.Reset();
-            entry.resource.Reset();
+            ReleasePooled(entry.texture, entry.resource);
             entry.face.Reset();
             entry.live = false;
             g_freeTextures.push_back(i + 1);
@@ -978,8 +1202,8 @@ bool RenderResources::BeginFrame(uint64_t frame)
         if (!entry.live || frame - entry.usedFrame < UnusedFrames) continue;
         g_textureKeys.Erase(entry.key);
         g_resourceBytes -= entry.bytes;
-        entry.texture.Reset();
-        entry.resource.Reset();
+        ReleasePooled(entry.texture, entry.resource);
+        entry.face.Reset();
         entry.live = false;
         g_freeTextures.push_back(i + 1);
         g_released++;
@@ -1003,6 +1227,17 @@ bool RenderResources::BeginFrame(uint64_t frame)
         if (entry.buffer) g_released++;
         DropIndexEntry(i);
     }
+    if (RenderStats::Wanted() && TexturePoolOn())
+    {
+        uint64_t spare = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_poolMutex);
+            spare = g_poolBytes;
+        }
+        printf("render: texture pool: %llu new textures from the pool, %llu made on the spot, %llu written in place, %llu made ahead; %.1f MB kept\n",
+            (unsigned long long)g_poolHits.load(), (unsigned long long)g_poolMisses.load(), (unsigned long long)g_poolInPlace.load(),
+            (unsigned long long)g_poolMadeAhead.load(), spare / 1048576.0);
+    }
     return remade;
 }
 
@@ -1017,7 +1252,8 @@ bool RenderResources::Forget(uint32_t address, uint32_t size)
         if (!entry.live || !inside(entry.key[0])) continue;
         g_textureKeys.Erase(entry.key);
         g_resourceBytes -= entry.bytes;
-        entry.texture.Reset(); entry.resource.Reset(); entry.face.Reset();
+        ReleasePooled(entry.texture, entry.resource);
+        entry.face.Reset();
         entry.live = false;
         g_freeTextures.push_back(i + 1);
         g_released++;
@@ -1557,6 +1793,11 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
                 return handle;
             }
             if (once || (entry.seen > AlwaysDenseBytes && !audit) || !entry.dense) return handle;
+            // Watched since the frame's first look (a still buffer of 32 KB
+            // up, below): none of its pages written since, the same; one
+            // written is looked at whole.
+            const bool liveWritten = entry.liveSince != 0 && entry.seen <= AlwaysDenseBytes;
+            if (liveWritten && WriteWatch::Clean(physical, entry.seen, entry.liveSince)) return handle;
             if (audit && entry.seen > AlwaysDenseBytes && !entry.midFrame)
             {
                 if (Fingerprint(data, entry.seen, true) == entry.fingerprint) return handle;
@@ -1578,7 +1819,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
                 // frame to the next. One still for a while keeps the sampled
                 // look. COD3_SAMPLEDMIDFRAME=1: sampled for every buffer.
                 static const bool sampledOnly = getenv("COD3_SAMPLEDMIDFRAME") != nullptr;
-                if (!sampledOnly && entry.stable < StableLooks)
+                if (!sampledOnly && (entry.stable < StableLooks || liveWritten))
                 {
                     if (Fingerprint(data, entry.seen, true) == entry.fingerprint) return handle;
                 }
@@ -1596,10 +1837,28 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
         if (!look) return handle;
         entry.checkedFrame = g_frame;
         wanted = std::max(bytes, entry.seen);
+        // Its pages watched from its last look and none written since: the
+        // same as it was sent, without a byte of it hashed. Most of what
+        // the command thread hashed was this: a few hundred buffers of the
+        // level's models, every byte every frame, ten megabytes a frame,
+        // unchanged since they were loaded. COD3_HASHLIVE=1: hashed again.
+        static const bool noLiveLooks = getenv("COD3_HASHLIVE") != nullptr || getenv("COD3_NOLIVEBUFFERS") != nullptr;
+        const bool wasWatched = entry.liveSince != 0;
+        if (!noLiveLooks && wasWatched && wanted <= entry.seen && entry.bytes >= wanted && entry.buffer
+            && WriteWatch::Clean(physical, wanted, entry.liveSince))
+        {
+            RenderStats::Frame().watchedLooks++;
+            if (entry.stable < StableLooks) entry.stable++;
+            return handle;
+        }
         // 0.5.99: a big buffer's pages watched from before this look, so a
         // write later in the frame is seen by the draws after it (above).
+        // And a still one of 32 KB up, so its next look can go by its pages
+        // (unless its pages keep saying written when it is not: memory it
+        // shares with something the title writes every frame).
         entry.liveSince = 0;
-        if (WriteWatch::Enabled() && wanted > AlwaysDenseBytes && entry.bytes >= wanted && getenv("COD3_NOLIVEBUFFERS") == nullptr)
+        const bool watchStill = !noLiveLooks && wanted >= (32u << 10) && entry.stable >= StableLooks && !entry.midFrame && entry.falseWrites < 4;
+        if (WriteWatch::Enabled() && (wanted > AlwaysDenseBytes || watchStill) && entry.bytes >= wanted && getenv("COD3_NOLIVEBUFFERS") == nullptr)
         {
             const uint64_t since = WriteWatch::Sequence();
             if (WriteWatch::Arm(physical, wanted)) entry.liveSince = since;
@@ -1691,6 +1950,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
         const uint64_t fingerprint = Fingerprint(data, wanted, entry.dense);
         if (fingerprint == entry.fingerprint && entry.bytes >= wanted)
         {
+            if (wasWatched && entry.falseWrites < 255) entry.falseWrites++;
             MissAudit("vertex buffer", physical, data, wanted, entry.dense, entry.auditDense);
             if (entry.stable < StableLooks) entry.stable++;
             // 0.5.94: a vertex or index buffer under the big-buffer size is
