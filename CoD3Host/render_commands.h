@@ -34,6 +34,8 @@ namespace RenderCommands
     // The HDR mode's scene pass after the bloom's composite, and the bloom's
     // strength (one the game's own), from the settings at each frame's edge.
     void SetHdr(bool scenePass, float bloom);
+    // F11's "Steady decals": the layers over a surface a little nearer.
+    void SetSteadyDecals(bool on);
 
     // Whether the shell shock's full screen pass is drawn (F11's "Shell
     // shock screen blur"), set once a frame with the other settings.

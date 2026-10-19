@@ -397,6 +397,9 @@ namespace
                     ImGui::Checkbox("Fast shadow maps", &g_edit.fastShadowMaps);
                     ImGui::SameLine();
                     ImGui::TextDisabled("(shadow maps drawn on the GPU's fast depth only path; turn off if shadows flicker)");
+                    ImGui::Checkbox("Steady decals", &g_edit.steadyDecals);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(bullet holes, blood and scorch marks held a hair in front of their wall: no flicker)");
                     ImGui::Checkbox("Films as video", &g_edit.filmVideoLevels);
                     ImGui::SameLine();
                     ImGui::TextDisabled("(the cutscene films without the console's TV gamma curve: no crushed blacks)");

@@ -2190,6 +2190,7 @@ namespace
         RenderCommands::SetAimBlur(aimBlurOverride >= 0 ? aimBlurOverride != 0 : settings.aimBlur);
         RenderCommands::SetShellShockBlur(settings.shellShockBlur);
         RenderCommands::SetRendering(settings.sharpShadows, settings.fastShadowMaps, settings.foliageCoverage);
+        RenderCommands::SetSteadyDecals(settings.steadyDecals);
         RenderResources::RequestEffectsScale(settings.effectsResolution >= 2 ? 2.0 : settings.effectsResolution == 1 ? 1.5 : 1.0);
         // The texture quality: COD3_TEXQUALITY=0|1|2 over the settings.
         static const int qualityOverride = []() { const char* t = getenv("COD3_TEXQUALITY"); return t ? int(strtol(t, nullptr, 10)) : -1; }();

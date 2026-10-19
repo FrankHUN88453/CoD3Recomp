@@ -54,6 +54,7 @@ namespace
     // there for anything else that reads it.
     bool g_aimBlur = true;
     bool g_hdrScene = false;    // the HDR mode: the frame tone mapped after the bloom's composite
+    bool g_steadyDecals = true; // the layers over a surface put a little nearer
     float g_bloom = 1.0f;       // the bloom's strength, the game's at one
     // The shell shock pass (below): taken from the settings once a frame.
     // It was a Settings::Get() on every draw, a lock and a copy of the
@@ -1168,7 +1169,17 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
     // surface. COD3_ZPASSBEHIND=0 leaves it where it is.
     static const bool behindOff = []() { const char* t = getenv("COD3_ZPASSBEHIND"); return t != nullptr && t[0] == '0'; }();
     const bool behind = !behindOff && DepthOnlyMode(state) && state.colorMask != 0;
-    out.rasterizer = RenderPipeline::Rasterizer(state.suScModeControl, true, out.rectangles, oldOffset ? state.polyOffset : slopeOnly, behind);
+    // The layers laid over a surface (the decals: pixel program
+    // d6d768427524ea61 and the like): tested greater or equal, writing no
+    // depth, blended. Put a little nearer (render_pipeline.cpp), so they no
+    // longer flicker against the surface under them. F11's "Steady decals";
+    // COD3_NODECALNUDGE=1 leaves them, to compare.
+    static const bool nudgeOff = getenv("COD3_NODECALNUDGE") != nullptr;
+    const uint32_t depthFunction = (state.depthControl >> 4) & 7;
+    const bool forward = !nudgeOff && g_steadyDecals && out.depthView != nullptr && !DepthOnlyMode(state) &&
+                         ((state.depthControl >> 1) & 1) != 0 && ((state.depthControl >> 2) & 1) == 0 && depthFunction == 6 &&
+                         state.blendControl[0] != 0x00010001;
+    out.rasterizer = RenderPipeline::Rasterizer(state.suScModeControl, true, out.rectangles, oldOffset ? state.polyOffset : slopeOnly, behind, forward);
     out.blend = RenderPipeline::Blend(state.blendControl, state.colorMask);
     out.depth = RenderPipeline::Depth(out.depthView ? state.depthControl : 0, state.stencilRefMask);
     memcpy(out.blendFactor, state.blendFactor, sizeof(out.blendFactor));
@@ -1451,6 +1462,8 @@ bool RenderCommands::PrepareResolve(ResolveCommand& out)
 }
 
 void RenderCommands::SetAimBlur(bool drawn) { g_aimBlur = drawn; }
+void RenderCommands::SetSteadyDecals(bool on) { g_steadyDecals = on; }
+
 void RenderCommands::SetHdr(bool scenePass, float bloom)
 {
     g_hdrScene = scenePass;

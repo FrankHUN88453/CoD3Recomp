@@ -174,6 +174,7 @@ void Settings::Load(const std::filesystem::path& exeDirectory)
             else if (key == "effects_resolution") v.effectsResolution = atoi(value.c_str());
             else if (key == "foliage_coverage") v.foliageCoverage = atoi(value.c_str()) != 0;
             else if (key == "fast_shadow_maps") v.fastShadowMaps = atoi(value.c_str()) != 0;
+            else if (key == "steady_decals") v.steadyDecals = atoi(value.c_str()) != 0;
             else if (key == "native_commands") v.nativeCommands = atoi(value.c_str()) != 0;
             else if (key == "watch_writes") v.watchWrites = atoi(value.c_str()) != 0;
             else if (key == "film_video_levels") v.filmVideoLevels = atoi(value.c_str()) != 0;
@@ -339,7 +340,7 @@ void Settings::Save()
                 v.dynamicLights ? 1 : 0);
         fprintf(file, "sharp_shadows = %d\neffects_resolution = %d\nfoliage_coverage = %d\nfast_shadow_maps = %d\n", v.sharpShadows ? 1 : 0,
                 v.effectsResolution, v.foliageCoverage ? 1 : 0, v.fastShadowMaps ? 1 : 0);
-        fprintf(file, "film_video_levels = %d\n", v.filmVideoLevels ? 1 : 0);
+        fprintf(file, "film_video_levels = %d\nsteady_decals = %d\n", v.filmVideoLevels ? 1 : 0, v.steadyDecals ? 1 : 0);
         fprintf(file, "opt_depth_thread = %d\nopt_fast_constants = %d\nopt_shader_load_cache = %d\nopt_strong_change_check = %d\nopt_range_looks = %d\nopt_opaque_shaders = %d\nopt_staging_uploads = %d\nopt_texture_pool = %d\n",
                 v.depthThread ? 1 : 0, v.fastConstants ? 1 : 0, v.shaderLoadCache ? 1 : 0, v.strongChangeCheck ? 1 : 0,
                 v.rangeLooks ? 1 : 0, v.opaqueShaders ? 1 : 0, v.stagingUploads ? 1 : 0, v.texturePool ? 1 : 0);

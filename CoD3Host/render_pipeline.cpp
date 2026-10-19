@@ -206,6 +206,22 @@ namespace
             desc.DepthBias -= 16;
             desc.SlopeScaledDepthBias -= 2.0f;
         }
+        // Forward (a layer over a surface: the decals, bullet holes, blood,
+        // scorch marks): nearer (towards one, this title's near) by four of
+        // the console's 24 bit depth steps (32 of the float's) at the
+        // triangle's nearest and by a pixel of its slope. The layer and its
+        // surface come from different vertex programs, the layer's triangles
+        // cut from the surface's by the CPU, so the host's sums can leave the
+        // two a few bits apart either way, and the greater or equal test
+        // then lets the layer through only where its bits came out ahead:
+        // decals flickering in patches as the view moves. The depth cut to
+        // the console's precision (xenos_hlsl.cpp) rounds both down, which
+        // this survives: it is more than a step of it.
+        if (key & 64)
+        {
+            desc.DepthBias += 32;
+            desc.SlopeScaledDepthBias += 1.0f;
+        }
         ComPtr<ID3D11RasterizerState> state;
         g_device->CreateRasterizerState(&desc, &state);
         return state;
@@ -318,7 +334,7 @@ RenderState::Handle RenderPipeline::Depth(uint32_t depthControl, uint32_t stenci
     return g_depth.Insert(key, MakeDepth(depthControl, stencilRefMask));
 }
 
-RenderState::Handle RenderPipeline::Rasterizer(uint32_t suScModeControl, bool scissor, bool cullNone, const float polyOffset[4], bool behind)
+RenderState::Handle RenderPipeline::Rasterizer(uint32_t suScModeControl, bool scissor, bool cullNone, const float polyOffset[4], bool behind, bool forward)
 {
     float scale = 0.0f, offset = 0.0f;
     static const bool noOffset = getenv("COD3_NOPOLYOFFSET") != nullptr;   // for a comparison
@@ -327,7 +343,7 @@ RenderState::Handle RenderPipeline::Rasterizer(uint32_t suScModeControl, bool sc
     uint32_t scaleBits, offsetBits;
     memcpy(&scaleBits, &scale, 4);
     memcpy(&offsetBits, &offset, 4);
-    const uint32_t key[3] = { (suScModeControl & 7) | (scissor ? 8u : 0u) | (cullNone ? 16u : 0u) | (behind ? 32u : 0u), scaleBits, offsetBits };
+    const uint32_t key[3] = { (suScModeControl & 7) | (scissor ? 8u : 0u) | (cullNone ? 16u : 0u) | (behind ? 32u : 0u) | (forward ? 64u : 0u), scaleBits, offsetBits };
     if (const uint32_t handle = g_rasterizer.Find(key)) return handle;
     // Each new offset once, to see what the title asks for.
     static int announced = 0;
