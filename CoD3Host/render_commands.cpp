@@ -10,6 +10,7 @@
 
 #include "render_commands.h"
 #include "render_internal.h"
+#include "tuning.h"
 #include "render_pipeline.h"
 #include "render_shaders.h"
 #include "render_resources.h"
@@ -1183,7 +1184,7 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
     // A draw with the alpha test off takes its pixel program's variant
     // without it (render_shaders.cpp), once built: the same picture, and
     // the GPU's early depth test whole for it.
-    if (constants.flags[1] == 7 && out.ps != nullptr && ps != nullptr && out.pixelShader < RenderShaders::OpaqueVariantBit)
+    if (constants.flags[1] == 7 && out.ps != nullptr && ps != nullptr && out.pixelShader < RenderShaders::OpaqueVariantBit && Tuning::On(Tuning::opaqueShaders))
     {
         if (ID3D11DeviceChild* opaque = ps->opaque.load(std::memory_order_acquire))
         {

@@ -31,6 +31,7 @@
 #include "render_internal.h"
 #include "d3d_hooks.h"
 #include "native_state.h"
+#include "tuning.h"
 #include "render_state.h"
 #include "timeline.h"
 #include "window.h"
@@ -97,7 +98,7 @@ namespace
             return getenv("COD3_VSCONST") == nullptr && !wanted("COD3_TRACEREG") && !wanted("COD3_SLOWREGISTERS")
                 && ShaderLoadTraceLimit() <= 0 && !NativeState::Checking();
         }();
-        return plain;
+        return plain && Tuning::On(Tuning::fastConstants);
     }
     inline void NoteConstantSpan(uint32_t range, uint32_t first, uint32_t end)
     {

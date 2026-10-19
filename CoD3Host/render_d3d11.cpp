@@ -23,6 +23,7 @@
 #include "gpu.h"
 #include "debug_probe.h"
 #include "parallel.h"
+#include "tuning.h"
 
 #include <algorithm>
 #include <atomic>
@@ -1266,7 +1267,7 @@ namespace
             rows.column = slot.columns.data();
         }
         const ConvertRows convert = ConverterFor(w.guestFloatDepth, w.guestEndian);
-        if (DepthWorkerRunning())
+        if (Tuning::On(Tuning::depthThread) && DepthWorkerRunning())
         {
             slot.mapped = true;
             {
@@ -1627,6 +1628,15 @@ namespace
     // What the settings ask of the renderer, applied at the frame's edge.
     void ApplySettings(const Settings::Values& settings)
     {
+        // The optimizations' switches (tuning.h), for the next frame.
+        Tuning::depthThread.store(settings.depthThread, std::memory_order_relaxed);
+        Tuning::fastConstants.store(settings.fastConstants, std::memory_order_relaxed);
+        Tuning::shaderLoadCache.store(settings.shaderLoadCache, std::memory_order_relaxed);
+        Tuning::strongChangeCheck.store(settings.strongChangeCheck, std::memory_order_relaxed);
+        Tuning::rangeLooks.store(settings.rangeLooks, std::memory_order_relaxed);
+        Tuning::opaqueShaders.store(settings.opaqueShaders, std::memory_order_relaxed);
+        Tuning::stagingUploads.store(settings.stagingUploads, std::memory_order_relaxed);
+        Tuning::texturePool.store(settings.texturePool, std::memory_order_relaxed);
         const int antialiasing = AntiAliasing(settings);
         RenderResources::RequestMultisample(antialiasing == 2 ? 2 : antialiasing == 3 || antialiasing == 5 ? 4 : antialiasing == 4 ? 8 : 1);
         // The render scale: the chosen resolution's height, times the

@@ -1,5 +1,6 @@
 #include "render_shaders.h"
 #include "render_stats.h"
+#include "tuning.h"
 
 #include <chrono>
 #include <condition_variable>
@@ -97,7 +98,7 @@ namespace
     uint64_t LoadHash(const uint8_t* words, size_t count)
     {
         static const bool slow = getenv("COD3_SLOWSHADERHASH") != nullptr;
-        if (slow) return HashBytes(words, count);
+        if (slow || !Tuning::On(Tuning::shaderLoadCache)) return HashBytes(words, count);
         const uint64_t quick = QuickHash(words, count);
         std::lock_guard<std::mutex> lock(g_knownMutex);
         auto found = g_knownLoads.find(quick);
