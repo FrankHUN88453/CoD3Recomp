@@ -120,10 +120,32 @@ float3 TvRamp(float3 c) {
   return c > 1.f ? top + (c - 1.f) * slope : inside;
 }
 
+// The table held to the HDR settings' brightness. On its own it dims the
+// whole picture (its lower half goes out darker, nothing comes out
+// brighter), so the game's mid grey no longer lands where Game brightness
+// puts it, and the picture looks darker than the paper white says. Here the
+// table's light is raised by the one power that brings 18% grey back to
+// 18% (per channel, from the table itself): white stays at the game's
+// white, mid grey at 18% of it, and what is left of the table is its shape,
+// the deeper shadows (its lower half falls further than a power does).
+// Past one, the 16 bit targets' highlights carry on along the curve's slope
+// at one.
+float3 TvRampAnchored(float3 game) {
+  static const float grey = 0.18f;
+  static const float greySignal = 0.461356f;  // sRGB's encoding of 18%
+  float3 ramped = renodx::color::srgb::DecodeSafe(TvRamp(game));
+  float3 greyRamped = renodx::color::srgb::DecodeSafe(TvRamp(greySignal.xxx));
+  greyRamped = clamp(greyRamped, 1e-4f, 0.99f);
+  float3 power = clamp(log(grey) / log(greyRamped), 0.25f, 4.f);
+  float3 below = pow(max(ramped, 0.f), power);
+  float3 above = 1.f + (ramped - 1.f) * power;
+  return renodx::color::srgb::EncodeSafe(ramped > 1.f ? above : below);
+}
+
 float3 Signal(float3 game) {
   float3 signal = game;
   [branch]
-  if (hdrTvRamp > 0.f) signal = lerp(game, TvRamp(game), hdrTvRamp);
+  if (hdrTvRamp > 0.f) signal = lerp(game, TvRampAnchored(game), hdrTvRamp);
   return signal;
 }
 

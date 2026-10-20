@@ -87,7 +87,7 @@ namespace Settings
         float hdrHueCorrection = 100.0f;
         float hdrConeResponse = 50.0f;          // PsychoV
         float hdrBloom = 50.0f;         // the bloom's strength (in SDR too): 50 the game's
-        float hdrTvRamp = 100.0f;       // how much of the title's TV gamma ramp, 0 .. 100: 100 as the SDR picture has it, lower brightens the midtones and shadows
+        float hdrTvRamp = 100.0f;       // how much of the title's TV gamma ramp, 0 .. 100: 100 the table's full shape, held to Game brightness (mid grey and white kept: cod3_hdr.hlsl's TvRampAnchored), lower lightens the shadows
         bool hdrHudMatch = true;        // the HUD's white (the title draws it at about 86%) brought to the UI brightness
         bool hdrFilmUpgrade = false;    // films expanded to HDR (RenoDX's video upscale)
         int windowMode = 0;           // 0 windowed, 1 borderless full screen

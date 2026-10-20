@@ -556,7 +556,7 @@ namespace
                     ImGui::TextDisabled("(how the SDR picture is decoded; 2.2 as a PC monitor shows it)");
                     ImGui::SliderFloat("Console TV gamma ramp", &g_edit.hdrTvRamp, 0.0f, 100.0f, "%.0f%%");
                     ImGui::SameLine();
-                    ImGui::TextDisabled("(the game's own display curve, which darkens the lower half: 100%% as the console; lower, brighter midtones)");
+                    ImGui::TextDisabled("(the game's own display curve, held to Game brightness: white and mid grey stay put, the shadows go deeper as on the console; lower, lighter shadows)");
                     ImGui::Checkbox("Upgrade films to HDR", &g_edit.hdrFilmUpgrade);
                     ImGui::SameLine();
                     ImGui::TextDisabled("(RenoDX's video upscale for the cutscene films)");

@@ -264,7 +264,10 @@ bit targets that clip at one. In the HDR mode:
   additive full screen draw, found with the RenoDX devkit: the last draw
   before the HUD's), the frame is tone mapped where it lies
   (`HdrScenePass`): a copy of the target (resolved, with MSAA) through
-  `hdr/cod3_hdr.hlsl`'s scene pass, the title's TV gamma ramp first, then
+  `hdr/cod3_hdr.hlsl`'s scene pass, the title's TV gamma ramp first (held
+  to Game brightness: raised by the power that keeps 18% grey at 18%, so
+  white and mid grey stay where the paper white puts them and only the
+  table's deeper shadows are kept; the slider sets how much), then
   RenoDX's `ToneMapPass` (Vanilla, None, ACES, RenoDRT), PsychoV 17, 22 or
   30, or Prism (`thirdparty/prism`), and RenoDX's `RenderIntermediatePass`,
   which leaves the UI's white at one so the HUD blends over it as before;
