@@ -1274,6 +1274,17 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
         constants.coverage[1] = out.upgradedTargets;
         constants.coverage[2] = constants.coverage[3] = 0;
     }
+    // The index offset (VGT_INDX_OFFSET), added to each index by the
+    // vertex program itself (xenos_hlsl.cpp: coverage.z), not by the draw
+    // call's base vertex. Whether Direct3D 11's SV_VertexID carries the base
+    // vertex is not something every driver agrees on, and where it did not
+    // the vertices were fetched from the start of the buffer. The title's
+    // dynamic pools (the bullet holes, the tracers) are drawn at a growing
+    // offset into two pools taken in turn, and each frame drew whatever
+    // stale geometry lay at the pool's start: the holes blinked (one pool's
+    // start covered 29 pixels of the screen, the other's 3526, for the same
+    // draw), and old tracers stayed hanging where they had been.
+    constants.coverage[2] = uint32_t(state.indexOffset);
     // A draw with the alpha test off takes its pixel program's variant
     // without it (render_shaders.cpp), once built: the same picture, and
     // the GPU's early depth test whole for it.
@@ -1332,7 +1343,7 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
 
     RenderStats::Enter(RenderStats::SectionIndices);
     if (!Indices(state, convertQuads, convertFan, out)) return false;
-    out.baseVertex = state.indexOffset;
+    out.baseVertex = 0;   // added by the vertex program (coverage.z, above)
     if (!g_rangeLooks.empty() || !g_verifyBuffers.empty())
     {
         RenderStats::Enter(RenderStats::SectionBuffers);

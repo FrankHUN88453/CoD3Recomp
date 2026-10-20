@@ -1030,7 +1030,7 @@ uint64_t XenosHlsl::Version()
     // A number that changes when the translation would, or when one of the
     // environment knobs that shape the HLSL is set: the disk cache keyed by
     // it then starts afresh rather than serving the other translation.
-    std::string text = "xenos_hlsl 2026-10-06 bswap packed flat3d fetch offsets alu pairs read first pixel params gradients dx dy depth offset pixel centre loop ids";
+    std::string text = "xenos_hlsl 2026-10-06 bswap packed flat3d fetch offsets alu pairs read first pixel params gradients dx dy depth offset pixel centre loop ids index offset in program";
     text += Depth24() ? " depth 20e4 centroid" : " depth 32";
     text += " shadow weights, coverage 2026-10-18, hdr clamp 2026-10-19";
     if (const char* lanes = getenv("COD3_SCALARLANES")) { text += " lanes="; text += lanes; }
@@ -1067,7 +1067,7 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
             "    float4 textureSize[32];  // width, height, 1/width, 1/height\n"
             "    uint4 textureAdjustment[32];   // swizzle, sign modes, unused, unused\n"
             "    float4 pixelGen;         // guest pixels per host pixel x and y, the register, on or off\n"
-            "    uint4 coverage;          // x: the target's samples when an alpha tested edge goes to coverage, else 0\n"
+            "    uint4 coverage;          // x: the target's samples when an alpha tested edge goes to coverage, else 0; y: the HDR targets; z: the index offset (signed)\n"
             "};\n";
     // The vertex buffers are bound as they lie in the console's memory, big
     // endian, and every word fetched is turned round here: a buffer upload
@@ -1196,7 +1196,9 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
         hlsl += " };\n";
         hlsl += "Output main(uint vertexId : SV_VertexID) {\n";
         hlsl += "    float4 r[32];\n";
-        hlsl += "    r[0] = float4((float)vertexId, 0.0, 0.0, 0.0);\n";
+        // The index offset (VGT_INDX_OFFSET) added here (render_commands.cpp,
+        // coverage.z), the draw's base vertex left at nought.
+        hlsl += "    r[0] = float4((float)((int)vertexId + asint(coverage.z)), 0.0, 0.0, 0.0);\n";
         for (uint32_t i = 1; i < 32; i++) hlsl += Format("    r[%u] = float4(0.0, 0.0, 0.0, 0.0);\n", i);
         hlsl += "    float4 oPos = float4(0.0, 0.0, 0.0, 1.0), oPointSize = oPos, oUnused = oPos;\n";
         for (uint32_t i = 0; i < 16; i++) hlsl += Format("    float4 o%u = float4(0.0, 0.0, 0.0, 0.0);\n", i);
