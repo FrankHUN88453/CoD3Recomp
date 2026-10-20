@@ -782,7 +782,7 @@ namespace
                     // is the loop over a switch.
                     const uint32_t loopEnd = uint32_t(instruction) & 0x1FFF;
                     const bool repeat = ((instruction >> 13) & 1) != 0;
-                    const uint32_t loopId = uint32_t(instruction >> 32) & 0x1F;
+                    const uint32_t loopId = uint32_t(instruction >> 16) & 0x1F;   // word 0, bits 16..20
                     if (loopEnd <= i || loopEnd >= end) return false;
                     const uint64_t last = flow[loopEnd];
                     if ((uint32_t(last >> 44) & 0xF) != 8 || (uint32_t(last) & 0x1FFF) != i) return false;
@@ -946,7 +946,7 @@ namespace
                 {
                     const uint32_t loopEnd = uint32_t(instruction) & 0x1FFF;
                     const bool repeat = ((instruction >> 13) & 1) != 0;
-                    const uint32_t loopId = uint32_t(instruction >> 32) & 0x1F;
+                    const uint32_t loopId = uint32_t(instruction >> 16) & 0x1F;   // word 0, bits 16..20
                     Line(Format("{ uint constant = loops[%u][%u]; uint count = constant & 0xFF;", loopId / 4, loopId & 3));
                     Line("  if (depth < 4) { loopAddress[depth] = aL; loopCount[depth] = count; depth++; }");
                     Line("  aL = (int)((constant >> 8) & 0xFF);");
@@ -959,7 +959,7 @@ namespace
                     const uint32_t loopStart = uint32_t(instruction) & 0x1FFF;
                     const bool predicated = ((instruction >> 13) & 1) != 0;   // predicate break
                     const bool condition = ((instruction >> 42) & 1) != 0;
-                    const uint32_t loopId = uint32_t(instruction >> 32) & 0x1F;
+                    const uint32_t loopId = uint32_t(instruction >> 16) & 0x1F;   // word 0, bits 16..20
                     Line(Format("{ uint constant = loops[%u][%u]; int step = (int)((constant >> 16) & 0xFF); if (step >= 128) step -= 256;",
                         loopId / 4, loopId & 3));
                     Line("  bool again = false;");
@@ -1026,7 +1026,7 @@ uint64_t XenosHlsl::Version()
     // A number that changes when the translation would, or when one of the
     // environment knobs that shape the HLSL is set: the disk cache keyed by
     // it then starts afresh rather than serving the other translation.
-    std::string text = "xenos_hlsl 2026-10-06 bswap packed flat3d fetch offsets alu pairs read first pixel params gradients dx dy depth offset pixel centre";
+    std::string text = "xenos_hlsl 2026-10-06 bswap packed flat3d fetch offsets alu pairs read first pixel params gradients dx dy depth offset pixel centre loop ids";
     text += Depth24() ? " depth 20e4 centroid" : " depth 32";
     if (const char* lanes = getenv("COD3_SCALARLANES")) { text += " lanes="; text += lanes; }
     if (const char* show = getenv("COD3_D3DSHOW")) { text += " show="; text += show; }
