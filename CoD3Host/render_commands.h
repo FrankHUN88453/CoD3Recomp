@@ -33,7 +33,7 @@ namespace RenderCommands
     void SetAimBlur(bool drawn);
     // The HDR mode's scene pass after the bloom's composite, and the bloom's
     // strength (one the game's own), from the settings at each frame's edge.
-    void SetHdr(bool scenePass, float bloom);
+    void SetHdr(bool scenePass, float bloom, float hudGain);
     // F11's "Steady decals": the layers over a surface a little nearer.
     void SetSteadyDecals(bool on);
     // Verify mode: the vertices and indices the frame's draws read, hashed

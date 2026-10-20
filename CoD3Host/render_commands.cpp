@@ -56,6 +56,8 @@ namespace
     bool g_hdrScene = false;    // the HDR mode: the frame tone mapped at the bloom's composite
     bool g_steadyDecals = true; // the layers over a surface put a little nearer
     float g_bloom = 1.0f;       // the bloom's strength, the game's at one
+    float g_hudGain = 0.0f;     // the HDR mode's HUD colour scale, nought for none
+    uint64_t g_sceneSwap = ~0ull;   // the frame the scene pass last ran on
     // The shell shock pass (below): taken from the settings once a frame.
     // It was a Settings::Get() on every draw, a lock and a copy of the
     // whole settings block a thousand times a frame.
@@ -1237,6 +1239,7 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
         {
             for (int i = 0; i < 3; i++) out.blendFactor[i] *= g_bloom;
             out.hdrScene = g_hdrScene && (out.upgradedTargets & 1) != 0;
+            if (out.hdrScene) g_sceneSwap = RenderInternal::Swaps();
         }
     }
     // Only the opaque draws may go flat: a blended one in a flat colour
@@ -1285,6 +1288,13 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
     // start covered 29 pixels of the screen, the other's 3526, for the same
     // draw), and old tracers stayed hanging where they had been.
     constants.coverage[2] = uint32_t(state.indexOffset);
+    // The HDR mode's HUD: what is drawn into the frame after the scene pass
+    // has tone mapped it (the HUD, the menus over a level) has its colour
+    // scaled (coverage.w, a float; nought for none), so the HUD's white,
+    // which the title draws at about 86%, comes out at the UI brightness.
+    constants.coverage[3] = 0;
+    if (g_hudGain > 0.0f && g_sceneSwap == RenderInternal::Swaps() && !out.hdrScene && (out.upgradedTargets & 1) != 0)
+        memcpy(&constants.coverage[3], &g_hudGain, 4);
     // A draw with the alpha test off takes its pixel program's variant
     // without it (render_shaders.cpp), once built: the same picture, and
     // the GPU's early depth test whole for it.
@@ -1554,10 +1564,11 @@ void RenderCommands::CheckLateWrites()
     g_lateChecks.clear();
 }
 
-void RenderCommands::SetHdr(bool scenePass, float bloom)
+void RenderCommands::SetHdr(bool scenePass, float bloom, float hudGain)
 {
     g_hdrScene = scenePass;
     g_bloom = bloom;
+    g_hudGain = scenePass ? hudGain : 0.0f;
 }
 void RenderCommands::SetShellShockBlur(bool drawn) { g_shellShockBlur = drawn; }
 void RenderCommands::SetRendering(bool sharpShadows, bool fastShadowMaps, bool foliageCoverage)

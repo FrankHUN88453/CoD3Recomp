@@ -1030,7 +1030,7 @@ uint64_t XenosHlsl::Version()
     // A number that changes when the translation would, or when one of the
     // environment knobs that shape the HLSL is set: the disk cache keyed by
     // it then starts afresh rather than serving the other translation.
-    std::string text = "xenos_hlsl 2026-10-06 bswap packed flat3d fetch offsets alu pairs read first pixel params gradients dx dy depth offset pixel centre loop ids index offset in program";
+    std::string text = "xenos_hlsl 2026-10-06 bswap packed flat3d fetch offsets alu pairs read first pixel params gradients dx dy depth offset pixel centre loop ids index offset in program hud scale";
     text += Depth24() ? " depth 20e4 centroid" : " depth 32";
     text += " shadow weights, coverage 2026-10-18, hdr clamp 2026-10-19";
     if (const char* lanes = getenv("COD3_SCALARLANES")) { text += " lanes="; text += lanes; }
@@ -1067,7 +1067,7 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
             "    float4 textureSize[32];  // width, height, 1/width, 1/height\n"
             "    uint4 textureAdjustment[32];   // swizzle, sign modes, unused, unused\n"
             "    float4 pixelGen;         // guest pixels per host pixel x and y, the register, on or off\n"
-            "    uint4 coverage;          // x: the target's samples when an alpha tested edge goes to coverage, else 0; y: the HDR targets; z: the index offset (signed)\n"
+            "    uint4 coverage;          // x: the target's samples when an alpha tested edge goes to coverage, else 0; y: the HDR targets; z: the index offset (signed); w: the HUD scale (float, 0 none)\n"
             "};\n";
     // The vertex buffers are bound as they lie in the console's memory, big
     // endian, and every word fetched is turned round here: a buffer upload
@@ -1268,7 +1268,10 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
         // alpha stays the 8 bit target's, from nought to one, for the
         // blending that reads it back. The draw says which targets
         // (coverage.y, a bit a slot); nothing changes without the mode.
-        hlsl += "    output.c0 = (coverage.y & 1u) != 0u ? hdrClamp(oC0) : oC0; output.c1 = (coverage.y & 2u) != 0u ? hdrClamp(oC1) : oC1;\n"
+        // coverage.w: the HDR mode's HUD scale for the first target, a float
+        // (nought for none: render_commands.cpp, after the scene pass).
+        hlsl += "    float hudScale = coverage.w != 0u ? asfloat(coverage.w) : 1.0;\n";
+        hlsl += "    output.c0 = (coverage.y & 1u) != 0u ? hdrClamp(float4(oC0.rgb * hudScale, oC0.a)) : oC0; output.c1 = (coverage.y & 2u) != 0u ? hdrClamp(oC1) : oC1;\n"
                 "    output.c2 = (coverage.y & 4u) != 0u ? hdrClamp(oC2) : oC2; output.c3 = (coverage.y & 8u) != 0u ? hdrClamp(oC3) : oC3;\n";
         if (alphaTest) hlsl += "    output.coverage = coverageMask;\n";
         if (out.writesDepth) hlsl += "    output.depth = oDepth4.x;\n";

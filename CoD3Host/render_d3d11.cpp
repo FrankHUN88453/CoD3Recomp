@@ -1818,7 +1818,7 @@ namespace
         v[5] = s.hdrHighlights * 0.02f; v[6] = s.hdrShadows * 0.02f; v[7] = s.hdrContrast * 0.02f; v[8] = s.hdrSaturation * 0.02f;
         v[9] = s.hdrHighlightSaturation * 0.02f; v[10] = s.hdrBlowout * 0.01f; v[11] = s.hdrFlare * 0.02f;
         v[12] = s.hdrHueCorrection * 0.01f; v[13] = 0.5f + s.hdrConeResponse * 0.01f;
-        v[14] = s.hdrTvRamp ? 1.0f : 0.0f; v[15] = s.hdrFilmUpgrade ? 1.0f : 0.0f;
+        v[14] = std::clamp(s.hdrTvRamp, 0.0f, 100.0f) * 0.01f; v[15] = s.hdrFilmUpgrade ? 1.0f : 0.0f;
         g_hdrToneMapper = std::clamp(s.hdrToneMapper, 0, 7);
         g_screenshotWhite.store(g_hdrSwapChain ? game / 80.0f : 0.0f, std::memory_order_relaxed);
     }
@@ -2280,7 +2280,9 @@ namespace
         // next draw; and the programs it will want, started now.
         g_hdrWanted.store(settings.hdr, std::memory_order_relaxed);
         RenderResources::RequestHdrTargets(settings.hdr);
-        RenderCommands::SetHdr(settings.hdr, std::clamp(settings.hdrBloom, 0.0f, 100.0f) * 0.02f);
+        // The HUD's white, measured with the RenoDX devkit in a level: about
+        // 0.86 of the intermediate's one (143 nits of 203 at gamma 2.2).
+        RenderCommands::SetHdr(settings.hdr, std::clamp(settings.hdrBloom, 0.0f, 100.0f) * 0.02f, settings.hdrHudMatch ? 1.0f / 0.86f : 0.0f);
         HdrSettingsFrom(settings);
         if (settings.hdr)
         {

@@ -283,6 +283,7 @@ namespace
         copy(to.hdrBloom, from.hdrBloom);
         copy(to.hdrTvRamp, from.hdrTvRamp);
         copy(to.hdrFilmUpgrade, from.hdrFilmUpgrade);
+        copy(to.hdrHudMatch, from.hdrHudMatch);
         return differed;
     }
 
@@ -546,13 +547,16 @@ namespace
                     }
                     ImGui::SliderFloat("Game brightness", &g_edit.hdrGameNits, 80.0f, 500.0f, "%.0f nits");
                     ImGui::SliderFloat("UI brightness", &g_edit.hdrUiNits, 80.0f, 500.0f, "%.0f nits");
+                    ImGui::Checkbox("HUD white at the UI brightness", &g_edit.hdrHudMatch);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(the game draws its HUD's white at about 86%%: off, it peaks at 70%% of the UI brightness)");
                     static const char* const gammas[] = { "sRGB", "2.2", "2.4" };
                     ImGui::Combo("Gamma correction", &g_edit.hdrGammaCorrection, gammas, 3);
                     ImGui::SameLine();
                     ImGui::TextDisabled("(how the SDR picture is decoded; 2.2 as a PC monitor shows it)");
-                    ImGui::Checkbox("Console TV gamma ramp", &g_edit.hdrTvRamp);
+                    ImGui::SliderFloat("Console TV gamma ramp", &g_edit.hdrTvRamp, 0.0f, 100.0f, "%.0f%%");
                     ImGui::SameLine();
-                    ImGui::TextDisabled("(the game's own display curve first, as the SDR picture has it; off: brighter shadows)");
+                    ImGui::TextDisabled("(the game's own display curve, which darkens the lower half: 100%% as the console; lower, brighter midtones)");
                     ImGui::Checkbox("Upgrade films to HDR", &g_edit.hdrFilmUpgrade);
                     ImGui::SameLine();
                     ImGui::TextDisabled("(RenoDX's video upscale for the cutscene films)");
@@ -570,6 +574,7 @@ namespace
                         g_edit.hdrGammaCorrection = defaults.hdrGammaCorrection;
                         g_edit.hdrTvRamp = defaults.hdrTvRamp;
                         g_edit.hdrFilmUpgrade = defaults.hdrFilmUpgrade;
+                        g_edit.hdrHudMatch = defaults.hdrHudMatch;
                         g_edit.hdrBloom = defaults.hdrBloom;
                     }
                     ImGui::Separator();

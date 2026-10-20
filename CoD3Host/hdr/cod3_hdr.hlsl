@@ -53,7 +53,7 @@ cbuffer HdrSettings : register(b1) {
   float hdrFlare;                // RenoDRT, 0 .. 2
   float hdrHueCorrection;        // 0 .. 1
   float hdrConeResponse;         // PsychoV, 1 its own
-  float hdrTvRamp;               // 1: the title's display table first, as the SDR picture has it
+  float hdrTvRamp;               // how much of the title's display table, 0 .. 1 (1 as the SDR picture has it)
   float hdrFilmUpgrade;          // 1: films expanded to HDR (RenoDX's video upscale)
   float hdrGraded;               // present: the scene pass ran on this frame
   float hdrFilm;                 // present: a film is playing
@@ -123,7 +123,7 @@ float3 TvRamp(float3 c) {
 float3 Signal(float3 game) {
   float3 signal = game;
   [branch]
-  if (hdrTvRamp > 0.5f) signal = TvRamp(game);
+  if (hdrTvRamp > 0.f) signal = lerp(game, TvRamp(game), hdrTvRamp);
   return signal;
 }
 
