@@ -1339,6 +1339,40 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
         if (!g_rangeLooks.empty()) LookRanges(state, out);
         if (!g_verifyBuffers.empty()) VerifyDrawBuffers(state, out, ps != nullptr ? ps->hash : 0);
         if (!g_verifyBuffers.empty()) out.layerVertices = g_verifyBuffers.front().physical;
+        // Verify mode: the bullet holes' draws (or COD3_LAYERPS's) written out
+        // whole, the first 120: what of their depth could differ from one
+        // frame to the next (their two pools give different sample counts).
+        static const uint64_t layerPs = []() { const char* t = getenv("COD3_LAYERPS"); return t ? uint64_t(strtoull(t, nullptr, 16)) : 0xd6d768427524ea61ull; }();
+        static int layerTold = 0;
+        if (out.layerQuery && ps != nullptr && ps->hash == layerPs && layerTold < 120 && !g_verifyBuffers.empty() && state.sourceSelect == 0)
+        {
+            layerTold++;
+            const RangeLook& look = g_verifyBuffers.front();
+            float vc[16];
+            for (int i = 0; i < 16; i++) { const uint32_t w = RenderState::Register(RenderState::VertexConstants + i); memcpy(&vc[i], &w, 4); }
+            printf("verify: layer draw, frame %llu, pool %08X, indices at %08X x%u (wide %d), offset %d, min %u max %u, sc %08X, poly %g %g %g %g, vte %03X, depth %08X, vp %g %g %g %g %g %g\n",
+                (unsigned long long)RenderInternal::Swaps(), look.physical, state.indexBase, state.indexCount, state.wideIndices ? 1 : 0, state.indexOffset,
+                state.minVertexIndex, state.maxVertexIndex, state.suScModeControl, state.polyOffset[0], state.polyOffset[1], state.polyOffset[2], state.polyOffset[3],
+                state.vteControl, state.depthControl, state.viewport[0], state.viewport[1], state.viewport[2], state.viewport[3], state.viewport[4], state.viewport[5]);
+            printf("   c0-3: %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g\n", vc[0], vc[1], vc[2], vc[3], vc[4], vc[5], vc[6], vc[7],
+                vc[8], vc[9], vc[10], vc[11], vc[12], vc[13], vc[14], vc[15]);
+            const uint8_t* indexData = Guest::Base + Guest::PhysicalAlias(state.indexBase);
+            printf("   vertices:");
+            for (uint32_t i = 0; i < state.indexCount && i < 12; i++)
+            {
+                const uint32_t index = state.wideIndices ? _byteswap_ulong(reinterpret_cast<const uint32_t*>(indexData)[i])
+                                                         : BSwap16(reinterpret_cast<const uint16_t*>(indexData)[i]);
+                const int64_t vertex = int64_t(index) + state.indexOffset;
+                if (vertex < 0 || vertex >= 0x8000) { printf(" [%u ?]", index); continue; }
+                const uint8_t* at = Guest::Base + Guest::PhysicalAlias(look.physical + uint32_t(vertex) * look.stride * 4);
+                float xyz[3];
+                for (int k = 0; k < 3; k++) { const uint32_t w = _byteswap_ulong(reinterpret_cast<const uint32_t*>(at)[k]); memcpy(&xyz[k], &w, 4); }
+                const uint32_t colour = _byteswap_ulong(reinterpret_cast<const uint32_t*>(at)[5]);
+                printf(" [%u: %.3f %.3f %.3f %08X]", index, xyz[0], xyz[1], xyz[2], colour);
+            }
+            printf("\n");
+            fflush(stdout);
+        }
         RenderStats::Enter(RenderStats::SectionIndices);
     }
     IndexCheck(state, vs, out);
