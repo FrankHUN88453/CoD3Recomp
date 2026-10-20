@@ -2353,6 +2353,7 @@ void Render::Swap(uint32_t frontBufferPhysical, uint32_t width, uint32_t height)
     Overlay::NoteFrame();
     DebugProbe::Poll();
     PollDepthWritebacks();
+    RenderCommands::CheckLateWrites();
     g_frontBuffer = Guest::GpuOffset(frontBufferPhysical);
     if (FrameLogged()) printf("frame: swap %llu of %08X\n", (unsigned long long)g_swaps.load(std::memory_order_relaxed), frontBufferPhysical);
     // Whether this frame had the HDR mode's scene pass: it is shown so,

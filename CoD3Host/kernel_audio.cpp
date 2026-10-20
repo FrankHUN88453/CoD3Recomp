@@ -205,6 +205,7 @@ namespace
         uint32_t blocksThisEnable = 0;   // written since the last enable
         uint32_t output = 0;             // the output ring the last initialize gave
         bool starved = false;            // ran out of input part way through an enable
+        bool played = false;             // has written a block since it was initialized: its start is not a gap
     };
     std::map<uint32_t, Context> g_xma;   // by context address
 
@@ -274,6 +275,7 @@ namespace
                 SetField(base, context, 0, 27, 5, write);
                 if (write == read) SetField(base, context, 9, 30, 1, 0);   // full: the title reopens it
                 state.blocksThisEnable++;
+                state.played = true;
                 g_blocksWritten.fetch_add(1, std::memory_order_relaxed);
                 // COD3_XMASUBFRAME=channel: a subframe is 128 samples a channel
                 // (two blocks for stereo); by default it is one block of the
@@ -307,7 +309,7 @@ namespace
             if (valid == 0)
             {
                 // Starved: the title has not filled it yet.
-                if (state.blocksThisEnable < (subframes != 0 ? subframes : 1)) state.starved = true;
+                if (state.played && state.blocksThisEnable < (subframes != 0 ? subframes : 1)) state.starved = true;
                 return;
             }
             const uint32_t packets = which == 0 ? Input0Packets(base, context) : Input1Packets(base, context);
@@ -421,6 +423,7 @@ PPC_FUNC(__imp__XMAInitializeContext)
     Context& state = g_xma[context];
     state.enabled = false;
     state.starved = false;
+    state.played = false;
     state.fifo.clear();
     state.fifoRead = 0;
     state.packetInBuffer = 0;

@@ -517,21 +517,46 @@ namespace
         }
     }
 
+    // Verify mode, late writes: what each draw read of its vertices and
+    // indices, kept with a hash of it, and hashed again when the frame is
+    // swapped. The title's dynamic geometry (the bullet holes among it) is
+    // in pools it fills a frame at a time, two of them in turn; one that
+    // changed between the draw and the frame's end was still being written
+    // when the draw read it (the console's GPU reads it later than the
+    // command thread here does). Only in verify mode.
+    struct LateCheck { uint32_t physical, bytes; uint64_t hash; bool indices; uint64_t ps; };
+    std::vector<LateCheck> g_lateChecks;
+    uint64_t HashGuest(uint32_t physical, uint32_t bytes)
+    {
+        const uint8_t* data = Guest::Base + Guest::PhysicalAlias(physical);
+        uint64_t h = 1469598103934665603ull;
+        for (uint32_t i = 0; i < bytes; i++) { h ^= data[i]; h *= 1099511628211ull; }
+        return h;
+    }
+    void NoteForLateCheck(uint32_t physical, uint32_t bytes, bool indices, uint64_t ps)
+    {
+        if (bytes == 0 || bytes > (64u << 10) || g_lateChecks.size() >= 20000) return;
+        g_lateChecks.push_back(LateCheck{ physical, bytes, HashGuest(physical, bytes), indices, ps });
+    }
+
     // Verify mode: the vertices the draw reads, with the index offset, held
     // against what was sent of each of its buffers (verify.h).
-    void VerifyDrawBuffers(const RenderState::Snapshot& state, const DrawCommand& out)
+    void VerifyDrawBuffers(const RenderState::Snapshot& state, const DrawCommand& out, uint64_t ps)
     {
         uint32_t lowest, highest;
         if (!DrawVertexRange(state, out, lowest, highest)) return;
         const int64_t first = std::max<int64_t>(int64_t(lowest) + state.indexOffset, 0);
         const int64_t last = int64_t(highest) + state.indexOffset;
         if (last < first) return;
+        if (state.sourceSelect == 0) NoteForLateCheck(state.indexBase, state.indexCount * (state.wideIndices ? 4u : 2u), true, ps);
         for (const RangeLook& look : g_verifyBuffers)
         {
             if (look.stride == 0) continue;
             const int64_t strideBytes = int64_t(look.stride) * 4;
-            RenderResources::VerifyRange(look.buffer, look.physical, uint32_t(std::min<int64_t>(first * strideBytes, 0xFFFFFFFFll)),
-                                         uint32_t(std::min<int64_t>((last + 1) * strideBytes, 0xFFFFFFFFll)));
+            const uint32_t from = uint32_t(std::min<int64_t>(first * strideBytes, 0xFFFFFFFFll));
+            const uint32_t to = uint32_t(std::min<int64_t>((last + 1) * strideBytes, 0xFFFFFFFFll));
+            RenderResources::VerifyRange(look.buffer, look.physical, from, to);
+            if (to > from) NoteForLateCheck(look.physical + from, to - from, false, ps);
         }
     }
 
@@ -1307,7 +1332,7 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
     {
         RenderStats::Enter(RenderStats::SectionBuffers);
         if (!g_rangeLooks.empty()) LookRanges(state, out);
-        if (!g_verifyBuffers.empty()) VerifyDrawBuffers(state, out);
+        if (!g_verifyBuffers.empty()) VerifyDrawBuffers(state, out, ps != nullptr ? ps->hash : 0);
         RenderStats::Enter(RenderStats::SectionIndices);
     }
     IndexCheck(state, vs, out);
@@ -1464,6 +1489,19 @@ bool RenderCommands::PrepareResolve(ResolveCommand& out)
 
 void RenderCommands::SetAimBlur(bool drawn) { g_aimBlur = drawn; }
 void RenderCommands::SetSteadyDecals(bool on) { g_steadyDecals = on; }
+
+void RenderCommands::CheckLateWrites()
+{
+    if (g_lateChecks.empty()) return;
+    for (const LateCheck& check : g_lateChecks)
+    {
+        Verify::Checked(Verify::Buffers);
+        if (HashGuest(check.physical, check.bytes) != check.hash)
+            Verify::Mismatch(Verify::Buffers, "the %s at %08X (%u bytes) changed after a draw read them, before the frame ended: written late by the title (ps %016llx)",
+                check.indices ? "indices" : "vertices", check.physical, check.bytes, (unsigned long long)check.ps);
+    }
+    g_lateChecks.clear();
+}
 
 void RenderCommands::SetHdr(bool scenePass, float bloom)
 {
