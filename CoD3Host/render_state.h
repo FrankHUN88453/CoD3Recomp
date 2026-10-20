@@ -252,6 +252,10 @@ namespace RenderState
         // the frame is tone mapped before the HUD goes over it.
         uint32_t upgradedTargets = 0;
         bool hdrScene = false;
+        // Verify mode: a layer over a surface (the decals), counted on the GPU
+        // with an occlusion query and logged with the pool its vertices came from.
+        bool layerQuery = false;
+        uint32_t layerVertices = 0;
 
         // Housekeeping.
         bool bindingsLost = false;      // a cache dropped objects: forget what is bound first

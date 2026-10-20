@@ -775,6 +775,65 @@ namespace
 
     // The command on the context: each thing it names compared with what
     // is bound and set only when it differs, then the one draw call.
+    // Verify mode: the layers over a surface (the decals, the bullet holes)
+    // counted on the GPU. Each such draw is wrapped in an occlusion query,
+    // read back without waiting at a later swap, and the first few hundred
+    // logged with their frame, pixel program, vertex pool and index count:
+    // a layer drawn every frame whose samples come and go is failing its
+    // depth or alpha test on the GPU; one whose samples stay is being
+    // covered or blended away after it.
+    struct LayerQuery { ComPtr<ID3D11Query> query; uint64_t frame = 0, ps = 0; uint32_t vertices = 0, indices = 0; bool pending = false; };
+    std::vector<LayerQuery> g_layerQueries;
+    ID3D11Query* LayerQueryBegin()
+    {
+        LayerQuery* free = nullptr;
+        for (LayerQuery& q : g_layerQueries) if (!q.pending) { free = &q; break; }
+        if (free == nullptr)
+        {
+            if (g_layerQueries.size() >= 256) return nullptr;
+            g_layerQueries.emplace_back();
+            free = &g_layerQueries.back();
+            D3D11_QUERY_DESC desc{ D3D11_QUERY_OCCLUSION, 0 };
+            if (FAILED(g_device->CreateQuery(&desc, &free->query))) { g_layerQueries.pop_back(); return nullptr; }
+        }
+        g_context->Begin(free->query.Get());
+        return free->query.Get();
+    }
+    void LayerQueryEnd(ID3D11Query* query, const RenderState::DrawCommand& command)
+    {
+        g_context->End(query);
+        for (LayerQuery& q : g_layerQueries)
+            if (q.query.Get() == query)
+            {
+                q.pending = true;
+                q.frame = g_swaps.load(std::memory_order_relaxed);
+                q.ps = command.pixelShader != 0 ? RenderShaders::HashOf(command.pixelShader) : 0;
+                q.vertices = command.layerVertices;
+                q.indices = command.indexCount;
+                return;
+            }
+    }
+    void PollLayerQueries()
+    {
+        static int told = 0;
+        for (LayerQuery& q : g_layerQueries)
+        {
+            if (!q.pending) continue;
+            UINT64 samples = 0;
+            if (g_context->GetData(q.query.Get(), &samples, sizeof(samples), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) continue;
+            q.pending = false;
+            // The bullet holes' program by default; COD3_LAYERPS=hash for another.
+            static const uint64_t wanted = []() { const char* t = getenv("COD3_LAYERPS"); return t ? uint64_t(strtoull(t, nullptr, 16)) : 0xd6d768427524ea61ull; }();
+            if (q.ps == wanted && told < 600)
+            {
+                told++;
+                printf("verify: layer frame %llu ps %016llx vertices %08X, %u indices: %llu samples passed\n",
+                    (unsigned long long)q.frame, (unsigned long long)q.ps, q.vertices, q.indices, (unsigned long long)samples);
+                fflush(stdout);
+            }
+        }
+    }
+
     bool HdrScenePass(const RenderState::DrawCommand& command);   // the HDR section, below
     ID3D11PixelShader* HdrProgramFor(const char* pass, int toneMapper, uint32_t samples, bool fxaa);
 
@@ -958,8 +1017,10 @@ namespace
         // VGT_INDX_OFFSET is added to every vertex index, which is how the
         // terrain draws its patches out of one buffer with one set of
         // indices; the host adds it as the base vertex.
+        ID3D11Query* layerQuery = command.layerQuery ? LayerQueryBegin() : nullptr;
         if (command.indexed) g_context->DrawIndexed(command.indexCount, command.indexRingOffset / (command.indices32 ? 4 : 2), command.baseVertex);
         else g_context->Draw(command.indexCount, UINT(command.baseVertex));
+        if (layerQuery != nullptr) LayerQueryEnd(layerQuery, command);
         // The key: the pixel program's hash (3 for none), and the target's
         // width in the top 16 bits, to see which targets the time goes to.
         if (RenderStats::DrawsTimed())
@@ -2354,6 +2415,7 @@ void Render::Swap(uint32_t frontBufferPhysical, uint32_t width, uint32_t height)
     DebugProbe::Poll();
     PollDepthWritebacks();
     RenderCommands::CheckLateWrites();
+    PollLayerQueries();
     g_frontBuffer = Guest::GpuOffset(frontBufferPhysical);
     if (FrameLogged()) printf("frame: swap %llu of %08X\n", (unsigned long long)g_swaps.load(std::memory_order_relaxed), frontBufferPhysical);
     // Whether this frame had the HDR mode's scene pass: it is shown so,

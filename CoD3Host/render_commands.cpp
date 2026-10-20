@@ -1205,6 +1205,11 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
                          ((state.depthControl >> 1) & 1) != 0 && ((state.depthControl >> 2) & 1) == 0 && depthFunction == 6 &&
                          state.blendControl[0] != 0x00010001;
     out.rasterizer = RenderPipeline::Rasterizer(state.suScModeControl, true, out.rectangles, oldOffset ? state.polyOffset : slopeOnly, behind, forward);
+    // Verify mode: every such layer (whether or not it is nudged) counted on
+    // the GPU, how many of its samples passed (render_d3d11.cpp).
+    out.layerQuery = Verify::On(Verify::Buffers) && out.depthView != nullptr && !DepthOnlyMode(state) &&
+                     ((state.depthControl >> 1) & 1) != 0 && ((state.depthControl >> 2) & 1) == 0 && depthFunction == 6 &&
+                     state.blendControl[0] != 0x00010001;
     out.blend = RenderPipeline::Blend(state.blendControl, state.colorMask);
     out.depth = RenderPipeline::Depth(out.depthView ? state.depthControl : 0, state.stencilRefMask);
     memcpy(out.blendFactor, state.blendFactor, sizeof(out.blendFactor));
@@ -1333,6 +1338,7 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
         RenderStats::Enter(RenderStats::SectionBuffers);
         if (!g_rangeLooks.empty()) LookRanges(state, out);
         if (!g_verifyBuffers.empty()) VerifyDrawBuffers(state, out, ps != nullptr ? ps->hash : 0);
+        if (!g_verifyBuffers.empty()) out.layerVertices = g_verifyBuffers.front().physical;
         RenderStats::Enter(RenderStats::SectionIndices);
     }
     IndexCheck(state, vs, out);
