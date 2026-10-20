@@ -782,9 +782,14 @@ namespace
     // a layer drawn every frame whose samples come and go is failing its
     // depth or alpha test on the GPU; one whose samples stay is being
     // covered or blended away after it.
-    struct LayerQuery { ComPtr<ID3D11Query> query; uint64_t frame = 0, ps = 0; uint32_t vertices = 0, indices = 0; bool pending = false; };
+    // Each is drawn a second time, with no depth test and no colour
+    // written, into a second query: the samples it would have without the
+    // depth test. A layer whose first count drops to nought while its
+    // second stays is failing its depth test; one whose second drops too is
+    // being thrown away by its own program (its alpha test, its texture).
+    struct LayerQuery { ComPtr<ID3D11Query> query, open; uint64_t frame = 0, ps = 0; uint32_t vertices = 0, indices = 0; bool pending = false; };
     std::vector<LayerQuery> g_layerQueries;
-    ID3D11Query* LayerQueryBegin()
+    LayerQuery* LayerQueryBegin()
     {
         LayerQuery* free = nullptr;
         for (LayerQuery& q : g_layerQueries) if (!q.pending) { free = &q; break; }
@@ -794,24 +799,47 @@ namespace
             g_layerQueries.emplace_back();
             free = &g_layerQueries.back();
             D3D11_QUERY_DESC desc{ D3D11_QUERY_OCCLUSION, 0 };
-            if (FAILED(g_device->CreateQuery(&desc, &free->query))) { g_layerQueries.pop_back(); return nullptr; }
+            if (FAILED(g_device->CreateQuery(&desc, &free->query)) || FAILED(g_device->CreateQuery(&desc, &free->open))) { g_layerQueries.pop_back(); return nullptr; }
         }
         g_context->Begin(free->query.Get());
-        return free->query.Get();
+        return free;
     }
-    void LayerQueryEnd(ID3D11Query* query, const RenderState::DrawCommand& command)
+    void LayerQueryEnd(LayerQuery* q, const RenderState::DrawCommand& command)
     {
-        g_context->End(query);
-        for (LayerQuery& q : g_layerQueries)
-            if (q.query.Get() == query)
-            {
-                q.pending = true;
-                q.frame = g_swaps.load(std::memory_order_relaxed);
-                q.ps = command.pixelShader != 0 ? RenderShaders::HashOf(command.pixelShader) : 0;
-                q.vertices = command.layerVertices;
-                q.indices = command.indexCount;
-                return;
-            }
+        g_context->End(q->query.Get());
+        // Again, open: no depth test, nothing written.
+        static ComPtr<ID3D11DepthStencilState> noDepth;
+        static ComPtr<ID3D11BlendState> noWrite;
+        if (!noDepth)
+        {
+            D3D11_DEPTH_STENCIL_DESC d{};
+            d.DepthEnable = FALSE;
+            d.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+            d.DepthFunc = D3D11_COMPARISON_ALWAYS;
+            g_device->CreateDepthStencilState(&d, &noDepth);
+            D3D11_BLEND_DESC bd{};
+            bd.RenderTarget[0].RenderTargetWriteMask = 0;
+            g_device->CreateBlendState(&bd, &noWrite);
+        }
+        if (noDepth && noWrite)
+        {
+            g_context->OMSetDepthStencilState(noDepth.Get(), 0);
+            g_context->OMSetBlendState(noWrite.Get(), nullptr, 0xFFFFFFFF);
+            g_context->Begin(q->open.Get());
+            if (command.indexed) g_context->DrawIndexed(command.indexCount, command.indexRingOffset / (command.indices32 ? 4 : 2), command.baseVertex);
+            else g_context->Draw(command.indexCount, UINT(command.baseVertex));
+            g_context->End(q->open.Get());
+            // Bound again by the next draw.
+            g_bound.depth = Handle(0xFFFFFFFFu);
+            g_bound.blend = Handle(0xFFFFFFFFu);
+            g_bound.stencilReference = 0xFFFFFFFFu;
+            for (float& f : g_bound.blendFactor) f = -1.0f;
+        }
+        q->pending = true;
+        q->frame = g_swaps.load(std::memory_order_relaxed);
+        q->ps = command.pixelShader != 0 ? RenderShaders::HashOf(command.pixelShader) : 0;
+        q->vertices = command.layerVertices;
+        q->indices = command.indexCount;
     }
     void PollLayerQueries()
     {
@@ -819,16 +847,41 @@ namespace
         for (LayerQuery& q : g_layerQueries)
         {
             if (!q.pending) continue;
-            UINT64 samples = 0;
+            UINT64 samples = 0, open = 0;
             if (g_context->GetData(q.query.Get(), &samples, sizeof(samples), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) continue;
+            if (g_context->GetData(q.open.Get(), &open, sizeof(open), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) continue;
             q.pending = false;
+            // Every layer program, by the pool its vertices came from: the
+            // draws, and the samples with and without the depth test, put
+            // in the log every five hundred frames (the tracers and the
+            // other effects beside the bullet holes).
+            {
+                struct Sum { uint64_t draws = 0, samples = 0, open = 0, zero = 0; };
+                static std::map<std::pair<uint64_t, uint32_t>, Sum> sums;
+                static uint64_t since = 0;
+                Sum& sum = sums[{ q.ps, q.vertices }];
+                sum.draws++; sum.samples += samples; sum.open += open; if (samples == 0 && open != 0) sum.zero++;
+                if (since == 0) since = q.frame;
+                if (q.frame >= since + 500)
+                {
+                    printf("verify: layers by program and pool, frames %llu to %llu (draws; samples passed; without the depth test; draws that failed it all):\n",
+                        (unsigned long long)since, (unsigned long long)q.frame);
+                    for (const auto& [key, v] : sums)
+                        if (v.draws >= 20)
+                            printf("   ps %016llx pool %08X: %llu; %llu; %llu; %llu\n", (unsigned long long)key.first, key.second,
+                                (unsigned long long)v.draws, (unsigned long long)v.samples, (unsigned long long)v.open, (unsigned long long)v.zero);
+                    fflush(stdout);
+                    sums.clear();
+                    since = q.frame;
+                }
+            }
             // The bullet holes' program by default; COD3_LAYERPS=hash for another.
             static const uint64_t wanted = []() { const char* t = getenv("COD3_LAYERPS"); return t ? uint64_t(strtoull(t, nullptr, 16)) : 0xd6d768427524ea61ull; }();
             if (q.ps == wanted && told < 600)
             {
                 told++;
-                printf("verify: layer frame %llu ps %016llx vertices %08X, %u indices: %llu samples passed\n",
-                    (unsigned long long)q.frame, (unsigned long long)q.ps, q.vertices, q.indices, (unsigned long long)samples);
+                printf("verify: layer frame %llu ps %016llx vertices %08X, %u indices: %llu samples passed, %llu without the depth test\n",
+                    (unsigned long long)q.frame, (unsigned long long)q.ps, q.vertices, q.indices, (unsigned long long)samples, (unsigned long long)open);
                 fflush(stdout);
             }
         }
@@ -1017,7 +1070,7 @@ namespace
         // VGT_INDX_OFFSET is added to every vertex index, which is how the
         // terrain draws its patches out of one buffer with one set of
         // indices; the host adds it as the base vertex.
-        ID3D11Query* layerQuery = command.layerQuery ? LayerQueryBegin() : nullptr;
+        LayerQuery* layerQuery = command.layerQuery ? LayerQueryBegin() : nullptr;
         if (command.indexed) g_context->DrawIndexed(command.indexCount, command.indexRingOffset / (command.indices32 ? 4 : 2), command.baseVertex);
         else g_context->Draw(command.indexCount, UINT(command.baseVertex));
         if (layerQuery != nullptr) LayerQueryEnd(layerQuery, command);
