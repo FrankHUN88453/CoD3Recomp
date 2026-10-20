@@ -400,8 +400,37 @@ namespace
                 // one byte order and the fetch reads it in another, and the
                 // swizzle in the fetch constant undoes that. The surfaces
                 // here never go through memory, so the swap is left out.
+                // Not only the 8_8_8_8 fetch with alpha as the fourth (0x60A):
+                // the damage flash (shot or hit by a melee attack) lays a
+                // resolved copy of an earlier frame over the picture, read
+                // with red and blue swapped the same way, and a brown scene
+                // with its red and blue swapped went purple. Any resolved
+                // surface read with red from the third channel and blue from
+                // the first gets them back in place, whatever its format and
+                // its other two channels. Each new pair of format and
+                // swizzle a resolved surface is read with goes in the log.
                 uint32_t swizzle = (words[3] >> 1) & 0xFFF;
-                if (resolved && swizzle == 0x60A && (words[1] & 0x3F) == 6) swizzle = 0x688;
+                if (resolved)
+                {
+                    const uint32_t format = words[1] & 0x3F;
+                    const uint32_t original = swizzle;
+                    if ((swizzle & 7) == 2 && ((swizzle >> 6) & 7) == 0) swizzle = (swizzle & ~0x1C7u) | (2u << 6);
+                    static std::atomic<uint32_t> seen[64];
+                    static std::atomic<uint32_t> seenCount{ 0 };
+                    const uint32_t key = ((format << 12) | original) + 1;
+                    const uint32_t count = std::min<uint32_t>(seenCount.load(std::memory_order_relaxed), 64);
+                    bool known = false;
+                    for (uint32_t i = 0; i < count && !known; i++) known = seen[i].load(std::memory_order_relaxed) == key;
+                    const uint32_t slot = (known || count >= 64) ? 64 : seenCount.fetch_add(1, std::memory_order_relaxed);
+                    if (slot < 64)
+                    {
+                        seen[slot].store(key, std::memory_order_relaxed);
+                        printf("render: a resolved surface at %08X (%ux%u) read as format %u with swizzle %03X%s\n",
+                            words[1] & 0xFFFFF000u, width, height, format, original,
+                            swizzle != original ? ", red and blue put back" : "");
+                        fflush(stdout);
+                    }
+                }
                 constants.textureAdjustment[fetch.slot][0] = swizzle;
                 constants.textureAdjustment[fetch.slot][1] = (words[0] >> 2) & 0xFF;
             }
