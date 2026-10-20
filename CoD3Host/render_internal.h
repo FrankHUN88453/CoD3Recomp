@@ -10,4 +10,5 @@ namespace RenderInternal
     bool FrameLogged();       // the frame log is on for this frame
     uint64_t Swaps();         // the title's swaps so far
     int DumpNumber();         // the frame log's dump counter
+    uint32_t CpuDepthAt();    // the depth resolve the title reads on the CPU (Render::CpuReadsDepthAt), 0 for none
 }

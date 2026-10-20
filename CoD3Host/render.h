@@ -65,6 +65,12 @@ namespace Render
     // something else soon.
     void MemoryFreed(uint32_t address, uint32_t size);
 
+    // The title reads the depth resolve at this physical address on the CPU,
+    // from any thread (cpu_depth.cpp): each resolve to it is written back
+    // to guest memory, as the console's resolve wrote it, a frame or two
+    // late. COD3_DEPTHREADBACK=0 leaves it on the host.
+    void CpuReadsDepthAt(uint32_t physical);
+
     // The hash of the stage's current program, for the traces.
     uint64_t CurrentProgramHash(bool pixel);
 

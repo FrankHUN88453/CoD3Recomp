@@ -59,6 +59,7 @@ add_executable(CoD3 WIN32
     "window.cpp"
     "input.cpp"
     "mouse_look.cpp"
+    "cpu_depth.cpp"
     "settings.cpp"
     "overlay.cpp"
     "../thirdparty/imgui/imgui.cpp"

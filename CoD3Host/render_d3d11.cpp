@@ -21,6 +21,7 @@
 #include "settings.h"
 #include "kernel.h"
 #include "gpu.h"
+#include "write_watch.h"
 
 #include <algorithm>
 #include <atomic>
@@ -1005,6 +1006,163 @@ namespace
         PictureAfterDraw(command.colorTexture);
     }
 
+    // --- depth the title reads on the CPU -------------------------------------------------------------
+
+    // The title looks points of one depth resolve up on the CPU: its light
+    // coronas are drawn in front of everything and fade out where the depth
+    // there is nearer than the light (cpu_depth.cpp). On the console the
+    // resolve wrote the surface to memory; here the resolves stay on the
+    // host, and the title read nothing but zeros (the far plane) and showed
+    // every corona through the walls. So that resolve is written back: the
+    // depth at the console's pixel centres as its 24 bit float over 8 bits
+    // of stencil, tiled as the console tiles a surface, in the destination's
+    // byte order, through a buffer read back without waiting (a frame or two
+    // late, which the coronas' fade does not show).
+    const char* const DepthToGuestSource =
+        "Texture2D<float> depth : register(t0);\n"
+        "RWByteAddressBuffer guest : register(u0);\n"
+        "cbuffer Resolve : register(b0) { uint width; uint height; uint pitch; uint endian; float scaleX; float scaleY; float unused0; float unused1; };\n"
+        // The console's depth: four bits of exponent, twenty of mantissa.
+        "uint Encode20e4(float z) {\n"
+        "    uint f = asuint(saturate(z)); uint e = (f >> 23) & 255u;\n"
+        "    if (e >= 113u) return min(((e - 112u) << 20) | ((f >> 3) & 0xFFFFFu), 0xFFFFFFu);\n"
+        "    uint shift = 116u - e; return shift >= 24u ? 0u : ((f & 0x7FFFFFu) | 0x800000u) >> shift; }\n"
+        // render_resources.cpp's TiledOffset for four byte texels.
+        "uint TiledOffset(uint x, uint y) {\n"
+        "    uint aligned = (pitch + 31u) & ~31u;\n"
+        "    uint macro = ((x >> 5) + (y >> 5) * (aligned >> 5)) << 9;\n"
+        "    uint micro = ((x & 7u) + ((y & 0xEu) << 2)) << 2;\n"
+        "    uint offset = macro + ((micro & ~0xFu) << 1) + (micro & 0xFu) + ((y & 1u) << 4);\n"
+        "    return ((offset & ~0x1FFu) << 3) + ((y & 16u) << 7) + ((offset & 0x1C0u) << 2) + (((((y & 8u) >> 2) + (x >> 3)) & 3u) << 6) + (offset & 0x3Fu); }\n"
+        "[numthreads(8, 8, 1)] void main(uint3 id : SV_DispatchThreadID) {\n"
+        "    if (id.x >= width || id.y >= height) return;\n"
+        "    float z = depth.Load(int3(int((id.x + 0.5) * scaleX), int((id.y + 0.5) * scaleY), 0));\n"
+        "    uint w = Encode20e4(z) << 8;\n"
+        "    if (endian == 1u) w = ((w & 0xFF00FF00u) >> 8) | ((w & 0x00FF00FFu) << 8);\n"
+        "    else if (endian == 2u) w = (w >> 24) | ((w >> 8) & 0xFF00u) | ((w << 8) & 0xFF0000u) | (w << 24);\n"
+        "    else if (endian == 3u) w = (w >> 16) | (w << 16);\n"
+        "    guest.Store(TiledOffset(id.x, id.y), w); }\n";
+
+    std::atomic<uint32_t> g_cpuDepthAt{ 0 };
+    ComPtr<ID3D11ComputeShader> g_depthToGuest;
+    ComPtr<ID3D11Buffer> g_depthToGuestConstants;
+    bool g_depthToGuestFailed = false;
+    struct DepthReadBack
+    {
+        ComPtr<ID3D11Buffer> buffer;            // what the program writes, the guest's bytes
+        ComPtr<ID3D11UnorderedAccessView> view;
+        ComPtr<ID3D11Buffer> staging[3];        // read back in turn
+        uint32_t bytes = 0;
+        uint32_t base[3] = {};                  // where each staging copy goes, nought for none
+        uint32_t next = 0;                      // the staging copy to fill next
+        uint32_t oldest = 0;                    // and the one to read first
+    };
+    DepthReadBack g_depthReadBack;
+
+    // The copies the GPU has finished, into guest memory, oldest first.
+    void DeliverDepthReadBacks()
+    {
+        DepthReadBack& r = g_depthReadBack;
+        for (uint32_t n = 0; n < 3 && r.base[r.oldest] != 0; n++)
+        {
+            D3D11_MAPPED_SUBRESOURCE mapped{};
+            if (g_context->Map(r.staging[r.oldest].Get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped) != S_OK) return;
+            const uint32_t guest = Guest::PhysicalAlias(r.base[r.oldest]);
+            if (WriteWatch::Enabled()) WriteWatch::Forget(guest, r.bytes);
+            memcpy(Guest::Base + guest, mapped.pData, r.bytes);
+            g_context->Unmap(r.staging[r.oldest].Get(), 0);
+            static bool told = false;
+            if (!told)
+            {
+                told = true;
+                printf("render: the depth resolved to %08X written back, %u bytes\n", r.base[r.oldest], r.bytes);
+                fflush(stdout);
+            }
+            r.base[r.oldest] = 0;
+            r.oldest = (r.oldest + 1) % 3;
+        }
+    }
+
+    // A resolve's depth (the surface it made, `source`) on its way to guest
+    // memory: converted and tiled into the buffer, the buffer copied for
+    // reading back. Skipped while all three copies are still on the way.
+    void ReadBackDepth(const RenderState::ResolveCommand& command)
+    {
+        if (g_depthToGuestFailed) return;
+        if (!g_depthToGuest)
+        {
+            ComPtr<ID3DBlob> code = CompileBuiltIn(DepthToGuestSource, "main", "cs_5_0", "depth write back program");
+            if (!code || FAILED(g_device->CreateComputeShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &g_depthToGuest)))
+            {
+                g_depthToGuestFailed = true;
+                return;
+            }
+            D3D11_BUFFER_DESC desc{};
+            desc.ByteWidth = 32;
+            desc.Usage = D3D11_USAGE_DEFAULT;
+            desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+            g_device->CreateBuffer(&desc, nullptr, &g_depthToGuestConstants);
+        }
+        DepthReadBack& r = g_depthReadBack;
+        DeliverDepthReadBacks();
+        if (r.base[r.next] != 0) return;
+
+        // The surface's bytes: the pitch and the rows aligned to the tiling's
+        // 32. What the program does not write (the alignment) stays nought.
+        const uint32_t bytes = ((command.readBackPitch + 31u) & ~31u) * ((command.guestHeight + 31u) & ~31u) * 4u;
+        if (bytes != r.bytes)
+        {
+            DeliverDepthReadBacks();
+            r = DepthReadBack();
+            const std::vector<uint8_t> zeros(bytes);
+            const D3D11_SUBRESOURCE_DATA initial{ zeros.data(), 0, 0 };
+            D3D11_BUFFER_DESC desc{};
+            desc.ByteWidth = bytes;
+            desc.Usage = D3D11_USAGE_DEFAULT;
+            desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+            desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+            if (FAILED(g_device->CreateBuffer(&desc, &initial, &r.buffer))) { r = DepthReadBack(); return; }
+            D3D11_UNORDERED_ACCESS_VIEW_DESC view{};
+            view.Format = DXGI_FORMAT_R32_TYPELESS;
+            view.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+            view.Buffer.NumElements = bytes / 4;
+            view.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
+            if (FAILED(g_device->CreateUnorderedAccessView(r.buffer.Get(), &view, &r.view))) { r = DepthReadBack(); return; }
+            desc.Usage = D3D11_USAGE_STAGING;
+            desc.BindFlags = 0;
+            desc.MiscFlags = 0;
+            desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            for (auto& staging : r.staging)
+                if (FAILED(g_device->CreateBuffer(&desc, nullptr, &staging))) { r = DepthReadBack(); return; }
+            r.bytes = bytes;
+        }
+
+        struct { uint32_t width, height, pitch, endian; float scaleX, scaleY, unused[2]; } constants{
+            command.guestWidth, command.guestHeight, command.readBackPitch, command.readBackEndian,
+            float(command.width) / float(command.guestWidth), float(command.height) / float(command.guestHeight), { 0, 0 } };
+        g_context->UpdateSubresource(g_depthToGuestConstants.Get(), 0, nullptr, &constants, 0, 0);
+        // The surface was the resolve's target just now.
+        ID3D11RenderTargetView* noTargets[1] = { nullptr };
+        g_context->OMSetRenderTargets(1, noTargets, nullptr);
+        ForgetBindings();
+        ID3D11ShaderResourceView* sources[1] = { command.destinationResource };
+        ID3D11UnorderedAccessView* views[1] = { r.view.Get() };
+        ID3D11Buffer* buffers[1] = { g_depthToGuestConstants.Get() };
+        g_context->CSSetShader(g_depthToGuest.Get(), nullptr, 0);
+        g_context->CSSetShaderResources(0, 1, sources);
+        g_context->CSSetUnorderedAccessViews(0, 1, views, nullptr);
+        g_context->CSSetConstantBuffers(0, 1, buffers);
+        g_context->Dispatch((command.guestWidth + 7) / 8, (command.guestHeight + 7) / 8, 1);
+        ID3D11ShaderResourceView* noSources[1] = {};
+        ID3D11UnorderedAccessView* noViews[1] = {};
+        g_context->CSSetShaderResources(0, 1, noSources);
+        g_context->CSSetUnorderedAccessViews(0, 1, noViews, nullptr);
+        g_context->CSSetShader(nullptr, nullptr, 0);
+        g_context->CopyResource(r.staging[r.next].Get(), r.buffer.Get());
+        r.base[r.next] = command.readBackBase;
+        r.next = (r.next + 1) % 3;
+    }
+
     // --- the resolve ----------------------------------------------------------------------------------
 
     void ExecuteResolve(const RenderState::ResolveCommand& command)
@@ -1027,8 +1185,11 @@ namespace
                 copy = command.fromDepth ? g_copyDepthMS[slot].Get() : g_copyColourMS[slot].Get();
             }
             if (copy != nullptr)
+            {
                 DrawQuad(command.source, command.sourceWidth, command.sourceHeight, command.x0, command.y0, float(command.width), float(command.height),
                          command.destination, viewport, copy, g_pointSampler.Get());
+                if (command.readBack) ReadBackDepth(command);
+            }
         }
         if (command.colorClear)
         {
@@ -1373,6 +1534,7 @@ void Render::Swap(uint32_t frontBufferPhysical, uint32_t width, uint32_t height)
     // The frame's end: onto the window, the counters closed, the next
     // frame's settings taken.
     const Settings::Values settings = Settings::Get();
+    DeliverDepthReadBacks();
     PresentLocked(settings);
     RenderStats::EndFrame();
     FrameSwapped();
@@ -1427,3 +1589,21 @@ void Render::Report()
 bool RenderInternal::FrameLogged() { return ::FrameLogged(); }
 uint64_t RenderInternal::Swaps() { return g_swaps.load(std::memory_order_relaxed); }
 int RenderInternal::DumpNumber() { return g_dumpNumber; }
+uint32_t RenderInternal::CpuDepthAt()
+{
+    // COD3_DEPTHREADBACKAT=hex: that resolve written back from the start, for a test where no light is in view.
+    static const uint32_t forced = []() { const char* t = getenv("COD3_DEPTHREADBACKAT"); return t != nullptr ? uint32_t(strtoul(t, nullptr, 16)) & 0x1FFFF000u : 0u; }();
+    return forced != 0 ? forced : g_cpuDepthAt.load(std::memory_order_relaxed);
+}
+
+void Render::CpuReadsDepthAt(uint32_t physical)
+{
+    static const bool off = []() { const char* t = getenv("COD3_DEPTHREADBACK"); return t != nullptr && t[0] == '0'; }();
+    if (off) return;
+    const uint32_t at = physical & 0x1FFFF000u;
+    if (g_cpuDepthAt.exchange(at, std::memory_order_relaxed) != at)
+    {
+        printf("render: the title reads the depth resolved to %08X on the CPU; it is written back there\n", at);
+        fflush(stdout);
+    }
+}

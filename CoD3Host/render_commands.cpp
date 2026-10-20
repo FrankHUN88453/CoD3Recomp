@@ -766,12 +766,23 @@ namespace
     void Log(const RenderState::Snapshot& state, const RenderShaders::Program* vs, const RenderShaders::Program* ps, const DrawCommand& out)
     {
         printf("frame %llu (dump %d): draw %u of %u indices (%s), vte %03X viewport %g %g %g %g z %g %g, target %u %ux%u, scissor %d,%d-%d,%d, "
-               "depth %08X blend %08X factor %g %g %g %g mask %X, mode %u, cull %08X, alpha %08X, vs %016llx ps %016llx\n",
+               "depth %08X blend %08X factor %g %g %g %g mask %X, mode %u, cull %08X, alpha %08X, vs %016llx ps %016llx, surface %08X depth info %08X view %p\n",
             (unsigned long long)RenderInternal::Swaps(), RenderInternal::DumpNumber(), state.primitive, state.indexCount, out.indexed ? "indexed" : "plain",
             state.vteControl, state.viewport[0], state.viewport[1], state.viewport[2], state.viewport[3], state.viewport[4], state.viewport[5],
             out.targetCount, out.targetWidth, out.targetHeight, out.scissor[0], out.scissor[1], out.scissor[2], out.scissor[3],
             state.depthControl, state.blendControl[0], state.blendFactor[0], state.blendFactor[1], state.blendFactor[2], state.blendFactor[3], state.colorMask, state.modeControl, state.suScModeControl, state.colorControl,
-            (unsigned long long)vs->hash, (unsigned long long)ps->hash);
+            (unsigned long long)vs->hash, (unsigned long long)ps->hash, state.surfaceInfo, state.depthInfo, (void*)out.depthView);
+        {
+            // The loop constants that are not nought (0x4908 on, i0..i31).
+            bool any = false;
+            for (uint32_t i = 0; i < 32; i++)
+                if (const uint32_t v = RenderState::Register(0x4908 + i); v != 0)
+                {
+                    printf("%s i%u=%08X", any ? "" : "   loops:", i, v);
+                    any = true;
+                }
+            if (any) printf("\n");
+        }
         for (int stage = 0; stage < 2; stage++)
         {
             const RenderShaders::Program* program = stage == 0 ? ps : vs;
@@ -791,6 +802,20 @@ namespace
             uint32_t word0, word1;
             RenderState::ReadVertexFetch(fetch.slot, word0, word1);
             printf("   vertex slot %u at %08X, %u dwords, endian %u, stride %u\n", fetch.slot, word0 & ~3u, (word1 >> 2) & 0xFFFFFF, word1 & 3, fetch.stride);
+            // A small buffer's words as floats: a quad's corners and depth.
+            const uint32_t dwords = (word1 >> 2) & 0xFFFFFF;
+            if (dwords != 0 && dwords <= 48)
+            {
+                printf("     ");
+                for (uint32_t i = 0; i < dwords; i++)
+                {
+                    const uint32_t v = Guest::Read32(Guest::Base, Guest::PhysicalAlias(word0 & ~3u) + i * 4);
+                    float f;
+                    memcpy(&f, &v, 4);
+                    printf(" %g", f);
+                }
+                printf("\n");
+            }
         }
         fflush(stdout);
     }
@@ -1163,6 +1188,15 @@ bool RenderCommands::PrepareResolve(ResolveCommand& out)
         out.y0 = hostY0;
         out.width = hostWidth;
         out.height = hostHeight;
+        if (fromDepth && (state.destBase & 0x1FFFF000u) == RenderInternal::CpuDepthAt())
+        {
+            out.readBack = true;
+            out.readBackBase = state.destBase;
+            out.readBackPitch = (state.destPitch & 0x3FFF) != 0 ? (state.destPitch & 0x3FFF) : width;
+            out.readBackEndian = state.destInfo & 7;
+            out.guestWidth = width;
+            out.guestHeight = height;
+        }
     }
 
     if (colorClear)

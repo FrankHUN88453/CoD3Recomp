@@ -144,6 +144,7 @@ namespace RenderState
         uint32_t control = 0;          // source, command, clears
         uint32_t destBase = 0;         // physical, where the title will sample it
         uint32_t destInfo = 0;
+        uint32_t destPitch = 0;        // RB_COPY_DEST_PITCH: bits 0..13 the pitch, 16..29 the height
         uint32_t pitch = 0;
         uint32_t surfaceInfo = 0;      // RB_SURFACE_INFO whole: bits 16, 17 the console's MSAA
         uint32_t scissorTopLeft = 0, scissorBottomRight = 0;
@@ -273,6 +274,14 @@ namespace RenderState
         ID3D11DepthStencilView* clearDepth = nullptr;
         float clearDepthValue = 1.0f;
         uint8_t clearStencilValue = 0;
+
+        // A depth resolve the title reads on the CPU too (Render::CpuReadsDepthAt):
+        // written back to guest memory as the console's resolve wrote it.
+        bool readBack = false;
+        uint32_t readBackBase = 0;      // physical
+        uint32_t readBackPitch = 0;     // texels, before the tiling's alignment
+        uint32_t readBackEndian = 0;    // RB_COPY_DEST_INFO bits 0..2
+        uint32_t guestWidth = 0, guestHeight = 0;
 
         bool bindingsLost = false;
     };
