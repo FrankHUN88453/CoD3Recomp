@@ -30,6 +30,8 @@ Activision and Treyarch logos, the attract loop and each mission's
 briefing, through the title's own player, with Space (the A button) to
 skip them.
 
+![Saint-Lô, the rifle training](preview.png)
+
 ### Keys and mouse
 
 The keyboard and mouse stand in for the console's pad. In a level the window
