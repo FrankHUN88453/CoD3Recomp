@@ -52,13 +52,24 @@ namespace RenderResources
     // A change takes effect at the next frame, when the targets are made
     // again at the new size: no frame is drawn half at each.
     void RequestScale(float scale);
+    // The 560 pitch surfaces (smoke, soft particles, shadow cascades) at half
+    // size, as the title has them, or at full size. Applied at the frame's edge.
+    void RequestEffectsScale(double scale);   // 1 the title's half size, 1.5, 2 the frame's size
     float Scale();
+    // The MSAA samples the targets of a pitch are made with.
+    uint32_t TargetSamples(uint32_t pitch);
 
     // Samples a pixel of the render targets: 1, 2, 4 or 8. A change takes
     // effect at the next frame like the scale; the count the device does
     // not support falls back to what it does.
     void RequestMultisample(uint32_t samples);
     uint32_t Multisample();
+
+    // The HDR mode: the title's 8 bit colour targets (formats 0 and 1) made
+    // 16 bit float, so what its drawing puts past one is kept. The targets
+    // are made again at the next frame's start when this changes.
+    void RequestHdrTargets(bool upgraded);
+    bool HdrTargets();
 
     // The texture quality: how many of a texture's top mip levels are left
     // out on upload (0 all of them kept). A change takes effect at the
@@ -77,6 +88,7 @@ namespace RenderResources
         uint32_t pitch = 0, rows = 0;        // title pixels
         uint32_t samples = 1;
         DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+        bool upgraded = false;               // an 8 bit target made 16 bit float for the HDR mode
     };
     struct DepthTarget
     {
@@ -121,6 +133,9 @@ namespace RenderResources
     Resolved* ResolvedFor(uint32_t physical, uint32_t width, uint32_t height, DXGI_FORMAT format, bool depth);
     // The surface at the address, if a resolve made one.
     const Resolved* ResolvedAt(uint32_t physical);
+    // The view a fetch of that size binds: the whole surface, or a copy of
+    // its top left corner when the fetch reads less than the resolve wrote.
+    ID3D11ShaderResourceView* ResolvedView(uint32_t physical, uint32_t guestWidth, uint32_t guestHeight);
 
     // --- textures -----------------------------------------------------------------------------
 
@@ -144,6 +159,18 @@ namespace RenderResources
     // buffer in the console's byte order: the programs swap the words.
     Handle VertexBufferFor(uint32_t physical, uint32_t bytes, uint32_t endian);
     ID3D11ShaderResourceView* VertexBufferView(Handle handle);
+
+    // With "Watch memory writes" off, a big buffer is looked at whole once
+    // a frame, by its first draw. NeedsRangeLook: the buffer VertexBufferFor
+    // just gave was not looked at by that call, and has been changing (the
+    // title's pool of dynamic geometry, written a piece at a time through
+    // the frame). LookRange: the part a draw reads, compared with what went
+    // up and sent again where it differs.
+    bool NeedsRangeLook(Handle handle);
+    void LookRange(Handle handle, uint32_t physical, uint32_t firstByte, uint32_t endByte);
+    // Verify mode (verify.h): the part a draw reads held against what was
+    // sent of the buffer; a difference is said and sent again.
+    void VerifyRange(Handle handle, uint32_t physical, uint32_t firstByte, uint32_t endByte);
 
     // --- the rings ---------------------------------------------------------------------------
 

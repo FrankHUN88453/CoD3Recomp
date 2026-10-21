@@ -574,7 +574,7 @@ PPC_FUNC(__imp__NtPulseEvent)
                 if (entry.second.object == ctx.r3.u32) waiting++;
         }
         static std::atomic<int> announced{ 0 };
-        if (announced.fetch_add(1) < 120)
+        if ((announced.load(std::memory_order_relaxed) < 120 && announced.fetch_add(1) < 120))
         {
             printf("pulse: 0x%08X from 0x%08X released %d waiter%s\n",
                 ctx.r3.u32, uint32_t(ctx.lr), waiting, waiting == 1 ? "" : "s");
@@ -642,6 +642,61 @@ PPC_FUNC(__imp__NtCreateMutant)
     ctx.r3.u32 = X_STATUS_SUCCESS;
 }
 
+// The job lock's poll, paced. The title's main thread waits for its workers
+// by taking the job lock, looking, and giving it back, over and over: on
+// the console each of those kernel calls costs a microsecond or so, here a
+// tenth of that, and a run measured 2.09 billion takes and as many
+// releases in five minutes, seven million a second each. At that rate the
+// lock is free for a few nanoseconds at a time: a worker that wants it to
+// take its next job, or to say it finished one, mostly finds it taken
+// again, and every release wakes a sleeping worker to find just that. So a
+// thread that takes back the mutant it gave up less than a microsecond ago,
+// with nothing done in between, for the 64th time running, waits until a
+// microsecond has passed since the release first: the window the console's
+// own call gave everyone else. A take after real work (a worker's job) is
+// never held back. COD3_POLLPACE=microseconds (0: off), 1 by default.
+namespace
+{
+    thread_local uint32_t t_releasedMutant = 0;
+    thread_local uint64_t t_releasedAt = 0;      // __rdtsc at the release
+    thread_local uint32_t t_pollStreak = 0;
+
+    uint64_t TicksPerMicrosecond()
+    {
+        static const uint64_t ticks = []() {
+            const auto start = std::chrono::steady_clock::now();
+            const uint64_t first = __rdtsc();
+            while (std::chrono::steady_clock::now() - start < std::chrono::milliseconds(2)) _mm_pause();
+            const uint64_t elapsed = __rdtsc() - first;
+            const double micros = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count();
+            const uint64_t perMicro = micros > 0 ? uint64_t(double(elapsed) / micros) : 3000;
+            return perMicro != 0 ? perMicro : uint64_t(3000);
+        }();
+        return ticks;
+    }
+
+    uint64_t PollPaceTicks()
+    {
+        static const uint64_t ticks = []() {
+            const char* t = getenv("COD3_POLLPACE");
+            const long micros = t != nullptr ? strtol(t, nullptr, 10) : 1;
+            if (micros <= 0) return uint64_t(0);
+            return uint64_t(micros > 50 ? 50 : micros) * TicksPerMicrosecond();
+        }();
+        return ticks;
+    }
+
+    void PacePoll(uint32_t handle)
+    {
+        const uint64_t pace = PollPaceTicks();
+        if (pace == 0 || handle != t_releasedMutant) { t_pollStreak = 0; return; }
+        const uint64_t now = __rdtsc();
+        if (now - t_releasedAt >= pace) { t_pollStreak = 0; return; }
+        if (++t_pollStreak < 64) return;
+        while (__rdtsc() - t_releasedAt < pace) _mm_pause();
+    }
+}
+
 // NTSTATUS NtReleaseMutant(HANDLE handle, LONG* previous)
 PPC_FUNC(__imp__NtReleaseMutant)
 {
@@ -662,6 +717,8 @@ PPC_FUNC(__imp__NtReleaseMutant)
     {
         object->owner = 0;
         SetSignalState(*object, 1);
+        t_releasedMutant = ctx.r3.u32;
+        t_releasedAt = __rdtsc();
     }
     ctx.r3.u32 = X_STATUS_SUCCESS;
 }
@@ -672,6 +729,7 @@ PPC_FUNC(__imp__NtWaitForSingleObjectEx)
     Kernel::CountImportOn("NtWaitForSingleObjectEx", ctx.r3.u32);
     Kernel::DeliverApcs(ctx, ctx.r5.u32 != 0);
     const uint32_t handle = ctx.r3.u32;
+    PacePoll(handle);
     const uint32_t timeoutPtr = ctx.r6.u32;
 
     std::chrono::steady_clock::time_point deadline;
@@ -860,7 +918,7 @@ PPC_FUNC(__imp__KeSetEvent)
     // COD3_XMATRACE: the mixer's two events, the first few times.
     static const bool audioTrace = getenv("COD3_XMATRACE") != nullptr;
     static int shown = 0;
-    if (audioTrace && (event == 0x8291EB7Cu || event == 0x8291EB6Cu) && shown++ < 40)
+    if (audioTrace && (event == 0x8291EB7Cu || event == 0x8291EB6Cu) && (shown < 40 && shown++ < 40))
     {
         printf("title: set event %08X (was %u) from %08X on thread %lu\n", event, previous, uint32_t(ctx.lr), GetCurrentThreadId());
         fflush(stdout);
@@ -1405,7 +1463,7 @@ PPC_FUNC(__imp__NtSetTimerEx)
     if (ctx.r5.u32 != 0)
     {
         static std::atomic<int> shown{ 0 };
-        if (shown.fetch_add(1) < 4)
+        if ((shown.load(std::memory_order_relaxed) < 4 && shown.fetch_add(1) < 4))
         {
             printf("object: timer 0x%08X has a completion routine 0x%08X, which this runtime does not call\n", handle, ctx.r5.u32);
             fflush(stdout);

@@ -168,6 +168,7 @@ namespace RenderState
         float textureSize[32][4];
         uint32_t textureAdjustment[32][4];
         float pixelGen[4];             // guest pixels per host pixel x and y, the register, on or off
+        uint32_t coverage[4];          // x: the target's samples when an alpha tested edge goes to coverage, else 0; y: the HDR mode's float targets by slot, whose output is kept in range
     };
 
     // One draw, ready to run. Handles are indices into the caches; the
@@ -245,6 +246,16 @@ namespace RenderState
         ID3D11Buffer* indexBuffer = nullptr;   // the draw's indices kept converted (from 0), else the ring
         int32_t baseVertex = 0;
         uint32_t triangles = 0;         // for the counters
+
+        // The HDR mode (render_d3d11.cpp): the targets written that are 8 bit
+        // ones made float, by slot; and the bloom's composite, after which
+        // the frame is tone mapped before the HUD goes over it.
+        uint32_t upgradedTargets = 0;
+        bool hdrScene = false;
+        // Verify mode: a layer over a surface (the decals), counted on the GPU
+        // with an occlusion query and logged with the pool its vertices came from.
+        bool layerQuery = false;
+        uint32_t layerVertices = 0;
 
         // Housekeeping.
         bool bindingsLost = false;      // a cache dropped objects: forget what is bound first

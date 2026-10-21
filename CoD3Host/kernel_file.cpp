@@ -380,7 +380,7 @@ PPC_FUNC(__imp__NtCreateFile)
         // wanted, and there are more of these than there are named ones.
         // Printing the structure it passed says which shape it used.
         static std::atomic<int> announced{ 0 };
-        if (announced.fetch_add(1) < 12 && objectAttributes != 0)
+        if ((announced.load(std::memory_order_relaxed) < 12 && announced.fetch_add(1) < 12) && objectAttributes != 0)
         {
             printf("file: open with an unreadable name, attributes at 0x%08X:",
                 objectAttributes);
@@ -601,7 +601,7 @@ PPC_FUNC(__imp__NtReadFile)
     if (apcRoutine != 0)
     {
         static std::atomic<int> announced{ 0 };
-        if (announced.fetch_add(1) < 3)
+        if ((announced.load(std::memory_order_relaxed) < 3 && announced.fetch_add(1) < 3))
         {
             printf("file: reads are asynchronous, completing through 0x%08X\n",
                 apcRoutine);
@@ -675,7 +675,7 @@ PPC_FUNC(__imp__NtReadFile)
     if (padReads && archive && read < length && file.guestPath.rfind("savedrive:", 0) != 0)
     {
         static std::atomic<int> announced{ 0 };
-        if (announced.fetch_add(1) < 20)
+        if ((announced.load(std::memory_order_relaxed) < 20 && announced.fetch_add(1) < 20))
             printf("file: read of %u at %llu of %s (%llu bytes) padded with %u zeros\n", length, (unsigned long long)file.position,
                 file.guestPath.c_str(), (unsigned long long)file.size, length - read);
         memset(Guest::Ptr(buffer) + read, 0, length - read);
@@ -694,7 +694,7 @@ PPC_FUNC(__imp__NtReadFile)
         // Which file, not only how much: a load that stops is easier to place
         // when the last read names the archive it came from.
         static std::atomic<int> announced{ 0 };
-        if (announced.fetch_add(1) < 8)
+        if ((announced.load(std::memory_order_relaxed) < 8 && announced.fetch_add(1) < 8))
         {
             printf("file: read %u of %u from %s at offset %llu%s\n",
                 read, length, file.guestPath.c_str(),
@@ -886,7 +886,7 @@ PPC_FUNC(__imp__NtQueryVolumeInformationFile)
 
     {
         static std::atomic<int> announced{ 0 };
-        if (announced.fetch_add(1) < 6)
+        if ((announced.load(std::memory_order_relaxed) < 6 && announced.fetch_add(1) < 6))
         {
             printf("file: volume information class %u asked for, %u bytes\n",
                 infoClass, length);
@@ -966,7 +966,7 @@ PPC_FUNC(__imp__NtQueryDirectoryFile)
         }
 
         static std::atomic<int> announced{ 0 };
-        if (announced.fetch_add(1) < 4)
+        if ((announced.load(std::memory_order_relaxed) < 4 && announced.fetch_add(1) < 4))
         {
             printf("file: %s holds %zu entries\n",
                 file.guestPath.c_str(), file.entries.size());

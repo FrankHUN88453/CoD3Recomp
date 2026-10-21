@@ -48,8 +48,48 @@ namespace Settings
         bool dynamicLights = true;    // lights from muzzle flashes and explosions (r_dynamiclight)
         bool aimBlur = false;         // the title's depth of field while aiming down the sights: off, since at a PC's resolution its quarter size blur leaves a ghost outline round the weapon
         bool consoleDepth = true;     // depth cut to the console's 24 bit float precision (no flickering surfaces; costs with MSAA)
+        bool sharpShadows = true;     // the shadows' four tap filtering on the shadow map's own texels, point sampled (render_commands.cpp)
+        int effectsResolution = 0;    // the half size surfaces (smoke, soft particles, shadow cascades): 0 the console's half size, 1 three quarters (1.5x), 2 full size (2x) (render_resources.cpp)
+        bool foliageCoverage = true;  // with MSAA, alpha tested edges (foliage, fences) spread over the samples (xenos_hlsl.cpp)
+        bool fastShadowMaps = true;   // the shadow maps' casters drawn with no pixel program, the GPU's depth only path (render_commands.cpp)
+        bool steadyDecals = true;     // the decals and other layers over a surface put a little nearer, so they do not flicker (render_pipeline.cpp)
+        bool filmVideoLevels = true;  // the films shown as a video player shows them, without the display's TV gamma ramp (render_d3d11.cpp)
         bool nativeCommands = false;  // the draws' state taken from the game's own D3D calls, the command stream run only for what the GPU still does (docs/native-d3d11-plan.md, N3; experimental, after a restart)
         bool watchWrites = false;     // still textures and vertex buffers known unchanged by their pages, not hashed every frame (write_watch.h; experimental, after a restart)
+        // The optimizations, each of which can be turned off to find one
+        // behind something that looks wrong (tuning.h).
+        bool depthThread = true;        // depth copies for the title converted on a thread of their own
+        bool fastConstants = true;      // the constant packets stored as runs
+        bool shaderLoadCache = true;    // programs loaded again matched without hashing them byte by byte
+        bool strongChangeCheck = true;  // the eight lane fingerprint for telling whether memory changed
+        bool rangeLooks = true;         // with "Watch memory writes" off, the vertices each draw reads of a changing big buffer looked at again
+        bool opaqueShaders = true;      // pixel programs without the alpha test for the draws that do not test
+        bool stagingUploads = true;     // textures sent to the GPU through staging copies
+        bool texturePool = true;        // textures of a shape kept and used again
+        // The HDR mode (F11's HDR tab; render_d3d11.cpp, hdr/cod3_hdr.hlsl on
+        // RenoDX): an scRGB swap chain, the frame's targets 16 bit float, and
+        // RenoDX's tone mappers and sliders. The sliders are RenoDX's own
+        // scales: 50 is the game's look.
+        bool hdr = false;
+        int hdrToneMapper = 3;          // 0 vanilla (clipped as SDR), 1 none, 2 ACES, 3 RenoDRT, 4 PsychoV 17, 5 PsychoV 22, 6 PsychoV 30, 7 Prism
+        float hdrPeakNits = 0.0f;       // the display's peak; 0 is what Windows reports for it (1000 when it reports nothing)
+        float hdrGameNits = 203.0f;     // the game's white
+        float hdrUiNits = 203.0f;       // the HUD's and the menus' white
+        int hdrGammaCorrection = 1;     // the SDR picture decoded as 0 sRGB, 1 gamma 2.2, 2 gamma 2.4
+        float hdrExposure = 1.0f;       // 0 .. 4
+        float hdrHighlights = 50.0f;    // 0 .. 100
+        float hdrShadows = 50.0f;
+        float hdrContrast = 50.0f;
+        float hdrSaturation = 50.0f;
+        float hdrHighlightSaturation = 50.0f;   // RenoDRT
+        float hdrBlowout = 0.0f;                // RenoDRT
+        float hdrFlare = 0.0f;                  // RenoDRT
+        float hdrHueCorrection = 100.0f;
+        float hdrConeResponse = 50.0f;          // PsychoV
+        float hdrBloom = 50.0f;         // the bloom's strength (in SDR too): 50 the game's
+        float hdrTvRamp = 100.0f;       // how much of the title's TV gamma ramp, 0 .. 100: 100 the table's full shape, held to Game brightness (mid grey and white kept: cod3_hdr.hlsl's TvRampAnchored), lower lightens the shadows
+        bool hdrHudMatch = true;        // the HUD's white (the title draws it at about 86%) brought to the UI brightness
+        bool hdrFilmUpgrade = false;    // films expanded to HDR (RenoDX's video upscale)
         int windowMode = 0;           // 0 windowed, 1 borderless full screen
         bool fpsOverlay = false;
         bool statsOverlay = false;    // the renderer's counters over the picture
@@ -105,6 +145,8 @@ namespace Settings
         int controllerVertical = 100;
         bool rumble = true;           // the title's vibration sent to the pad
         int stickDeadzone = 15;       // per cent of a stick's travel ignored around its centre, 0 .. 50
+        int audioChannels = 0;        // the speakers: 0 automatic (5.1 when Windows' speakers have six or more channels), 1 stereo, 2 5.1 (audio_out.cpp)
+        int stickVerticalScale = 200; // the pad's up and down look, per cent of the title's own (which halves it): 200 matches the turn, 50 .. 300 (mouse_look.cpp)
         float mouseSensitivity = 1.0f;   // both axes, 0.1 .. 3
         bool rawMouse = true;            // the mouse's own counts, not the pointer's travel
         bool directMouse = true;         // the mouse turns the view itself, not through the right stick (mouse_look.cpp)
@@ -131,6 +173,9 @@ namespace Settings
     // The current values, and setting them (which also saves).
     Values Get();
     void Set(const Values& values);
+    // Setting them without saving, for a slider dragged in the menu (the
+    // HDR tabs apply as they move); Save() when the drag is over.
+    void Preview(const Values& values);
 
     // Reads the file beside the executable, or starts from the defaults.
     void Load(const std::filesystem::path& exeDirectory);

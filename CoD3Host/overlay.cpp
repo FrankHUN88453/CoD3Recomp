@@ -1,13 +1,16 @@
 #include "version.h"
 #include "overlay.h"
 #include "kernel.h"
+#include "verify.h"
 #include "settings.h"
 #include "input.h"
 #include "net.h"
 #include "render_stats.h"
 #include "render.h"
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -159,10 +162,33 @@ namespace
         g_capturing = -1;
     }
 
-    void SaveScreenshot(ID3D11Texture2D* back, int width, int height)
+    // A half float as a float, for the HDR mode's scRGB back buffer.
+    float HalfToFloat(uint16_t h)
+    {
+        const uint32_t sign = uint32_t(h & 0x8000u) << 16, exponent = (h >> 10) & 0x1Fu, mantissa = h & 0x3FFu;
+        if (exponent == 0) { const float f = std::ldexp(float(mantissa), -24); return sign ? -f : f; }
+        const uint32_t bits = exponent == 31 ? (sign | 0x7F800000u | (mantissa << 13)) : (sign | ((exponent + 112u) << 23) | (mantissa << 13));
+        float f;
+        memcpy(&f, &bits, 4);
+        return f;
+    }
+
+    // scRGB light (one is 80 nits) as an sRGB byte, the given white at the top.
+    uint8_t ScRgbToByte(uint16_t h, float white)
+    {
+        float v = HalfToFloat(h) / white;
+        if (!(v > 0.0f)) return 0;
+        v = std::min(v, 1.0f);
+        v = v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
+        return uint8_t(v * 255.0f + 0.5f);
+    }
+
+    void SaveScreenshotOf(ID3D11Texture2D* back, int width, int height, float scRgbWhite)
     {
         D3D11_TEXTURE2D_DESC desc{};
         back->GetDesc(&desc);
+        const bool half = desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT;
+        if (scRgbWhite <= 0.0f) scRgbWhite = 203.0f / 80.0f;
         desc.Usage = D3D11_USAGE_STAGING;
         desc.BindFlags = 0;
         desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
@@ -204,13 +230,24 @@ namespace
             if (SUCCEEDED(frame->SetPixelFormat(&format)))
             {
                 // The back buffer is B8G8R8A8; its alpha is whatever the
-                // present left, so it is made opaque on the way out.
+                // present left, so it is made opaque on the way out. The
+                // HDR mode's is scRGB: an SDR picture of it, the game's
+                // white at the top, highlights past it clipped.
                 std::vector<uint8_t> rows(size_t(width) * height * 4);
                 for (int y = 0; y < height; y++)
                 {
                     const uint8_t* from = static_cast<const uint8_t*>(mapped.pData) + size_t(y) * mapped.RowPitch;
                     uint8_t* to = rows.data() + size_t(y) * width * 4;
-                    memcpy(to, from, size_t(width) * 4);
+                    if (half)
+                        for (int x = 0; x < width; x++)
+                        {
+                            uint16_t c[4];
+                            memcpy(c, from + size_t(x) * 8, 8);
+                            to[x * 4 + 0] = ScRgbToByte(c[2], scRgbWhite);
+                            to[x * 4 + 1] = ScRgbToByte(c[1], scRgbWhite);
+                            to[x * 4 + 2] = ScRgbToByte(c[0], scRgbWhite);
+                        }
+                    else memcpy(to, from, size_t(width) * 4);
                     for (int x = 0; x < width; x++) to[x * 4 + 3] = 255;
                 }
                 ok = SUCCEEDED(frame->WritePixels(UINT(height), UINT(width) * 4, UINT(rows.size()), rows.data())) &&
@@ -220,6 +257,34 @@ namespace
         g_context->Unmap(staging.Get(), 0);
         printf("screenshot: %s%s\n", file.string().c_str(), ok ? "" : " could not be written");
         fflush(stdout);
+    }
+
+    // The HDR tabs' values from one set into another; true when any differed.
+    bool CopyHdrSettings(const Settings::Values& from, Settings::Values& to)
+    {
+        bool differed = false;
+        auto copy = [&](auto& into, const auto& value) { if (!(into == value)) { into = value; differed = true; } };
+        copy(to.hdr, from.hdr);
+        copy(to.hdrToneMapper, from.hdrToneMapper);
+        copy(to.hdrPeakNits, from.hdrPeakNits);
+        copy(to.hdrGameNits, from.hdrGameNits);
+        copy(to.hdrUiNits, from.hdrUiNits);
+        copy(to.hdrGammaCorrection, from.hdrGammaCorrection);
+        copy(to.hdrExposure, from.hdrExposure);
+        copy(to.hdrHighlights, from.hdrHighlights);
+        copy(to.hdrShadows, from.hdrShadows);
+        copy(to.hdrContrast, from.hdrContrast);
+        copy(to.hdrSaturation, from.hdrSaturation);
+        copy(to.hdrHighlightSaturation, from.hdrHighlightSaturation);
+        copy(to.hdrBlowout, from.hdrBlowout);
+        copy(to.hdrFlare, from.hdrFlare);
+        copy(to.hdrHueCorrection, from.hdrHueCorrection);
+        copy(to.hdrConeResponse, from.hdrConeResponse);
+        copy(to.hdrBloom, from.hdrBloom);
+        copy(to.hdrTvRamp, from.hdrTvRamp);
+        copy(to.hdrFilmUpgrade, from.hdrFilmUpgrade);
+        copy(to.hdrHudMatch, from.hdrHudMatch);
+        return differed;
     }
 
     void DrawMenu(int width, int height)
@@ -320,12 +385,117 @@ namespace
                     ImGui::Checkbox("Console depth precision", &g_edit.consoleDepth);
                     ImGui::SameLine();
                     ImGui::TextDisabled("(no flickering surfaces; costs frame rate with MSAA; after a restart)");
+                    ImGui::Checkbox("Sharp shadows", &g_edit.sharpShadows);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(shadow edges filtered at the shadow map's real resolution; off: the console's blocky ones)");
+                    const char* effectSizes[] = { "Console (half)", "High (3/4)", "Full" };
+                    ImGui::Combo("Smoke and shadow resolution", &g_edit.effectsResolution, effectSizes, 3);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(higher: smoother edges in front of smoke, sharper shadow cascades; Full cost a third of the frame rate at 4K)");
+                    ImGui::Checkbox("Smooth foliage edges", &g_edit.foliageCoverage);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(grass, leaves and fences antialiased; needs an MSAA anti-aliasing mode)");
+                    ImGui::Checkbox("Fast shadow maps", &g_edit.fastShadowMaps);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(shadow maps drawn on the GPU's fast depth only path; turn off if shadows flicker)");
+                    ImGui::Checkbox("Steady decals", &g_edit.steadyDecals);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(bullet holes, blood and scorch marks held a hair in front of their wall: no flicker)");
+                    ImGui::Checkbox("Films as video", &g_edit.filmVideoLevels);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(the cutscene films without the console's TV gamma curve: no crushed blacks)");
+                    ImGui::Checkbox("Save textures for texture packs", &g_edit.textureDump);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(each texture the game uses saved once to textures\\dump, up to 3000 a run)");
+                    ImGui::Checkbox("Use replacement textures", &g_edit.textureReplace);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(textures\\replace\\<name>.png or .dds in the game's place)");
                     ImGui::Checkbox("Native command lists (experimental)", &g_edit.nativeCommands);
                     ImGui::SameLine();
                     ImGui::TextDisabled("(the draws' state straight from the game's own calls: faster; after a restart)");
                     ImGui::Checkbox("Watch memory writes (experimental)", &g_edit.watchWrites);
                     ImGui::SameLine();
                     ImGui::TextDisabled("(still textures and buffers not looked at again until written: faster; after a restart)");
+                    // Each of the renderer's speed ups on its own switch, for
+                    // finding the one behind something that looks wrong.
+                    // They take effect at the next frame (tuning.h).
+                    if (ImGui::CollapsingHeader("Optimizations (turn one off if something looks wrong)"))
+                    {
+                        ImGui::TextDisabled("All on is fastest. A change takes effect at Apply, no restart needed.");
+                        ImGui::Checkbox("Depth copy on its own thread", &g_edit.depthThread);
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("(the depth the game reads back for light glows, prepared off the render thread)");
+                        ImGui::Checkbox("Fast constant writes", &g_edit.fastConstants);
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("(the game's shader constants stored in blocks rather than one at a time)");
+                        ImGui::Checkbox("Shader load cache", &g_edit.shaderLoadCache);
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("(shaders the game loads again recognised without hashing them again)");
+                        ImGui::Checkbox("Thorough change detection", &g_edit.strongChangeCheck);
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("(off: the older check for whether a buffer or texture changed)");
+                        ImGui::Checkbox("Recheck effect geometry each draw", &g_edit.rangeLooks);
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("(with Watch memory writes off: the vertices of effects written mid frame looked at again)");
+                        ImGui::Checkbox("Opaque shader variants", &g_edit.opaqueShaders);
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("(shaders without the alpha test for surfaces that do not use it)");
+                        ImGui::Checkbox("Staged texture uploads", &g_edit.stagingUploads);
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("(new textures sent to the GPU through a copy, fewer hitches)");
+                        ImGui::Checkbox("Texture pool", &g_edit.texturePool);
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("(textures of the same size kept and used again, fewer hitches)");
+                        if (ImGui::Button("All on"))
+                        {
+                            g_edit.depthThread = g_edit.fastConstants = g_edit.shaderLoadCache = g_edit.strongChangeCheck = true;
+                            g_edit.rangeLooks = g_edit.opaqueShaders = g_edit.stagingUploads = g_edit.texturePool = true;
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::Button("All off"))
+                        {
+                            g_edit.depthThread = g_edit.fastConstants = g_edit.shaderLoadCache = g_edit.strongChangeCheck = false;
+                            g_edit.rangeLooks = g_edit.opaqueShaders = g_edit.stagingUploads = g_edit.texturePool = false;
+                        }
+                    }
+                    // Verify mode (verify.h): each shortcut checked against the
+                    // slow, exact answer. Takes effect at once, is never saved.
+                    if (ImGui::CollapsingHeader("Verify the shortcuts (diagnostics, slow)"))
+                    {
+                        ImGui::TextDisabled("Checks each shortcut against the exact answer and logs every disagreement to CoD3.log.");
+                        ImGui::TextDisabled("Stale vertex buffers, textures and constants it finds are also sent again, so the picture is corrected.");
+                        static const char* const hints[Verify::KindCount] = {
+                            "(the vertices each draw reads against what the GPU was sent)",
+                            "(each texture's memory against what it was made from, once a frame)",
+                            "(constant uploads skipped as unchanged against what they would have been)",
+                            "(buffers and textures judged unchanged by their pages or by samples, hashed whole)",
+                            "(with Native command lists on: each draw's state against its record)" };
+                        for (int k = 0; k < Verify::KindCount; k++)
+                        {
+                            const Verify::Kind kind = Verify::Kind(k);
+                            bool value = Verify::On(kind);
+                            char label[64];
+                            snprintf(label, sizeof(label), "Verify %s", Verify::Name(kind));
+                            if (ImGui::Checkbox(label, &value)) Verify::Set(kind, value);
+                            ImGui::SameLine();
+                            ImGui::TextDisabled("%s", hints[k]);
+                            const uint64_t checked = Verify::checks[k].load(), wrong = Verify::mismatches[k].load();
+                            if (checked != 0 || wrong != 0)
+                            {
+                                ImGui::Indent();
+                                if (wrong != 0) ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "%llu checked, %llu wrong", (unsigned long long)checked, (unsigned long long)wrong);
+                                else ImGui::Text("%llu checked, none wrong", (unsigned long long)checked);
+                                const std::string last = Verify::Last(kind);
+                                if (!last.empty()) { ImGui::PushTextWrapPos(0.0f); ImGui::TextDisabled("Last: %s", last.c_str()); ImGui::PopTextWrapPos(); }
+                                ImGui::Unindent();
+                            }
+                        }
+                        if (ImGui::Button("Verify all")) for (int k = 0; k < Verify::KindCount; k++) Verify::Set(Verify::Kind(k), true);
+                        ImGui::SameLine();
+                        if (ImGui::Button("Verify none")) for (int k = 0; k < Verify::KindCount; k++) Verify::Set(Verify::Kind(k), false);
+                        ImGui::SameLine();
+                        if (ImGui::Button("Reset counts")) Verify::Reset();
+                    }
                     ImGui::Checkbox("Vertical sync (VSync)", &g_edit.vsync);
                     ImGui::Checkbox("Unlimited frame rate in levels", &g_edit.unlockFrameRate);
                     ImGui::SameLine();
@@ -333,12 +503,12 @@ namespace
                     {
                         // A cap holds the frames to an even pace: a steady 60
                         // feels smoother than a rate swinging between 50 and 140.
-                        static const int caps[] = { 0, 60, 90, 120, 144 };
-                        static const char* const names[] = { "Off", "60", "90", "120", "144" };
+                        static const int caps[] = { 0, 60, 90, 120, 144, 165, 240 };
+                        static const char* const names[] = { "Off", "60", "90", "120", "144", "165", "240" };
                         int current = 0;
-                        for (int i = 0; i < 5; i++) if (caps[i] == g_edit.frameCap) current = i;
+                        for (int i = 0; i < 7; i++) if (caps[i] == g_edit.frameCap) current = i;
                         ImGui::SetNextItemWidth(120);
-                        if (ImGui::Combo("Frame rate cap", &current, names, 5)) g_edit.frameCap = caps[current];
+                        if (ImGui::Combo("Frame rate cap", &current, names, 7)) g_edit.frameCap = caps[current];
                         ImGui::SameLine();
                         ImGui::TextDisabled("(an even pace; 60 for the steadiest picture)");
                     }
@@ -346,9 +516,141 @@ namespace
                     ImGui::Checkbox("Renderer statistics", &g_edit.statsOverlay);
                     ImGui::EndTabItem();
                 }
+                // The HDR mode (render_d3d11.cpp, hdr/cod3_hdr.hlsl), on
+                // RenoDX: the mode and its brightnesses here, RenoDX's
+                // sliders on the next tab. Both apply as they are changed,
+                // as RenoDX's own settings do.
+                if (ImGui::BeginTabItem("HDR"))
+                {
+                    bool displayHdr = false;
+                    float displayPeak = 0.0f;
+                    Render::DisplayHdr(displayHdr, displayPeak);
+                    ImGui::Checkbox("HDR", &g_edit.hdr);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(an scRGB picture tone mapped by RenoDX; the game's colour targets 16 bit float)");
+                    if (Render::HdrActive() && !displayHdr)
+                        ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "Windows has this display in SDR: turn on \"Use HDR\" in Windows' display settings.");
+                    else if (displayHdr)
+                        ImGui::TextDisabled("This display is in HDR; Windows reports a peak of %.0f nits.", displayPeak);
+                    if (g_edit.hdr && Render::HdrCompiling() > 0) ImGui::TextDisabled("Compiling the HDR shaders...");
+                    ImGui::BeginDisabled(!g_edit.hdr);
+                    static const char* const toneMappers[] = { "Vanilla (clipped, as the SDR picture)", "None (untonemapped)", "ACES", "RenoDRT",
+                                                               "PsychoV 17", "PsychoV 22", "PsychoV 30", "Prism" };
+                    ImGui::Combo("Tone mapper", &g_edit.hdrToneMapper, toneMappers, 8);
+                    {
+                        char peakText[64];
+                        if (g_edit.hdrPeakNits <= 0.0f) snprintf(peakText, sizeof(peakText), "The display's (%.0f nits)", displayPeak > 0.0f ? displayPeak : 1000.0f);
+                        else snprintf(peakText, sizeof(peakText), "%%.0f nits");
+                        ImGui::SliderFloat("Peak brightness", &g_edit.hdrPeakNits, 0.0f, 4000.0f, peakText);
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("Display's")) g_edit.hdrPeakNits = 0.0f;
+                    }
+                    ImGui::SliderFloat("Game brightness", &g_edit.hdrGameNits, 80.0f, 500.0f, "%.0f nits");
+                    ImGui::SliderFloat("UI brightness", &g_edit.hdrUiNits, 80.0f, 500.0f, "%.0f nits");
+                    ImGui::Checkbox("HUD white at the UI brightness", &g_edit.hdrHudMatch);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(the game draws its HUD's white at about 86%%: off, it peaks at 70%% of the UI brightness)");
+                    static const char* const gammas[] = { "sRGB", "2.2", "2.4" };
+                    ImGui::Combo("Gamma correction", &g_edit.hdrGammaCorrection, gammas, 3);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(how the SDR picture is decoded; 2.2 as a PC monitor shows it)");
+                    ImGui::SliderFloat("Console TV gamma ramp", &g_edit.hdrTvRamp, 0.0f, 100.0f, "%.0f%%");
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(the game's own display curve, held to Game brightness: white and mid grey stay put, the shadows go deeper as on the console; lower, lighter shadows)");
+                    ImGui::Checkbox("Upgrade films to HDR", &g_edit.hdrFilmUpgrade);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(RenoDX's video upscale for the cutscene films)");
+                    ImGui::EndDisabled();
+                    ImGui::SliderFloat("Bloom", &g_edit.hdrBloom, 0.0f, 100.0f, "%.0f");
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(50: the game's own; in SDR too)");
+                    if (ImGui::Button("Reset HDR"))
+                    {
+                        const Settings::Values defaults = Settings::Defaults();
+                        g_edit.hdrToneMapper = defaults.hdrToneMapper;
+                        g_edit.hdrPeakNits = defaults.hdrPeakNits;
+                        g_edit.hdrGameNits = defaults.hdrGameNits;
+                        g_edit.hdrUiNits = defaults.hdrUiNits;
+                        g_edit.hdrGammaCorrection = defaults.hdrGammaCorrection;
+                        g_edit.hdrTvRamp = defaults.hdrTvRamp;
+                        g_edit.hdrFilmUpgrade = defaults.hdrFilmUpgrade;
+                        g_edit.hdrHudMatch = defaults.hdrHudMatch;
+                        g_edit.hdrBloom = defaults.hdrBloom;
+                    }
+                    ImGui::Separator();
+                    ImGui::PushTextWrapPos(0.0f);
+                    ImGui::TextDisabled("The HDR mode is built on RenoDX by Carlos Lopez Jr. and its contributors "
+                                        "(github.com/clshortfuse/renodx, MIT): its tone mappers, its sliders and its scRGB output. "
+                                        "Prism tone mapper by Musa Haji and OopyDoopy / KickFister / Jon (MIT).");
+                    ImGui::PopTextWrapPos();
+                    ImGui::EndTabItem();
+                }
+                if (ImGui::BeginTabItem("RenoDX"))
+                {
+                    const int toneMapper = g_edit.hdrToneMapper;
+                    const bool renoDrt = toneMapper == 3, psychoV = toneMapper >= 4 && toneMapper <= 6, prism = toneMapper == 7;
+                    if (!g_edit.hdr) ImGui::TextDisabled("These are the HDR mode's: turn HDR on in the HDR tab.");
+                    ImGui::BeginDisabled(!g_edit.hdr);
+                    ImGui::TextDisabled("RenoDX's sliders. 50 is the game's own look; they apply as they move.");
+                    ImGui::SliderFloat("Exposure", &g_edit.hdrExposure, 0.0f, 4.0f, "%.2f");
+                    ImGui::SliderFloat("Highlights", &g_edit.hdrHighlights, 0.0f, 100.0f, "%.0f");
+                    ImGui::SliderFloat("Shadows", &g_edit.hdrShadows, 0.0f, 100.0f, "%.0f");
+                    ImGui::SliderFloat("Contrast", &g_edit.hdrContrast, 0.0f, 100.0f, "%.0f");
+                    ImGui::SliderFloat("Saturation", &g_edit.hdrSaturation, 0.0f, 100.0f, "%.0f");
+                    ImGui::BeginDisabled(!renoDrt);
+                    ImGui::SliderFloat("Highlight saturation", &g_edit.hdrHighlightSaturation, 0.0f, 100.0f, "%.0f");
+                    ImGui::SliderFloat("Blowout", &g_edit.hdrBlowout, 0.0f, 100.0f, "%.0f");
+                    ImGui::SliderFloat("Flare", &g_edit.hdrFlare, 0.0f, 100.0f, "%.0f");
+                    ImGui::EndDisabled();
+                    if (!renoDrt) { ImGui::SameLine(); ImGui::TextDisabled("(RenoDRT's)"); }
+                    ImGui::BeginDisabled(psychoV || prism);
+                    ImGui::SliderFloat("Hue correction", &g_edit.hdrHueCorrection, 0.0f, 100.0f, "%.0f");
+                    ImGui::EndDisabled();
+                    ImGui::BeginDisabled(!psychoV);
+                    ImGui::SliderFloat("Cone response", &g_edit.hdrConeResponse, 0.0f, 100.0f, "%.0f");
+                    ImGui::EndDisabled();
+                    if (!psychoV) { ImGui::SameLine(); ImGui::TextDisabled("(PsychoV's)"); }
+                    if (ImGui::Button("Reset sliders"))
+                    {
+                        const Settings::Values defaults = Settings::Defaults();
+                        g_edit.hdrExposure = defaults.hdrExposure;
+                        g_edit.hdrHighlights = defaults.hdrHighlights;
+                        g_edit.hdrShadows = defaults.hdrShadows;
+                        g_edit.hdrContrast = defaults.hdrContrast;
+                        g_edit.hdrSaturation = defaults.hdrSaturation;
+                        g_edit.hdrHighlightSaturation = defaults.hdrHighlightSaturation;
+                        g_edit.hdrBlowout = defaults.hdrBlowout;
+                        g_edit.hdrFlare = defaults.hdrFlare;
+                        g_edit.hdrHueCorrection = defaults.hdrHueCorrection;
+                        g_edit.hdrConeResponse = defaults.hdrConeResponse;
+                    }
+                    ImGui::EndDisabled();
+                    ImGui::Separator();
+                    ImGui::PushTextWrapPos(0.0f);
+                    ImGui::TextDisabled("RenoDX by Carlos Lopez Jr. and contributors, github.com/clshortfuse/renodx (MIT): "
+                                        "RenoDRT, ACES and the PsychoV tone mappers, and these sliders.");
+                    ImGui::PopTextWrapPos();
+                    ImGui::EndTabItem();
+                }
+                // The HDR tabs apply as they change: their values go into
+                // what is in use at once, and to the file when no slider is
+                // being dragged.
+                {
+                    static bool previewed = false;
+                    Settings::Values live = Settings::Get();
+                    if (CopyHdrSettings(g_edit, live)) { Settings::Preview(live); previewed = true; }
+                    if (previewed && !ImGui::IsAnyItemActive()) { Settings::Save(); previewed = false; }
+                }
                 if (ImGui::BeginTabItem("Controls"))
                 {
                     ImGui::SliderInt("Master volume", &g_edit.masterVolume, 0, 100, "%d%%");
+                    {
+                        static const char* const outputs[] = { "Automatic", "Stereo", "5.1 surround" };
+                        ImGui::SetNextItemWidth(160);
+                        ImGui::Combo("Speakers", &g_edit.audioChannels, outputs, 3);
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("(the console's own six channel mix; Automatic picks 5.1 when Windows' speakers are set up for it)");
+                    }
                     ImGui::SliderFloat("Mouse sensitivity", &g_edit.mouseSensitivity, 0.1f, 3.0f, "%.2f");
                     ImGui::TextDisabled("Both axes alike.");
                     ImGui::Checkbox("Raw mouse input", &g_edit.rawMouse);
@@ -370,6 +672,8 @@ namespace
                     ImGui::TextDisabled("(%s)", Input::ControllerStatus().c_str());
                     ImGui::Checkbox("Controller vibration", &g_edit.rumble);
                     ImGui::SliderInt("Stick deadzone", &g_edit.stickDeadzone, 0, 50, "%d%%");
+                    ImGui::SliderInt("Vertical look speed", &g_edit.stickVerticalScale, 50, 300, g_edit.stickVerticalScale == 200 ? "200%% (matches turning)" : g_edit.stickVerticalScale == 100 ? "100%% (the game's own)" : "%d%%");
+                    ImGui::TextDisabled("The game looks up and down at half the speed it turns; 200%% makes them match.");
                     ImGui::TextDisabled("Raise it if the view or the soldier drifts with the sticks untouched.");
                     ImGui::Separator();
                     ImGui::TextUnformatted("Keys");
@@ -380,6 +684,11 @@ namespace
                             ImGui::TableNextRow();
                             ImGui::TableNextColumn();
                             ImGui::TextUnformatted(Settings::ActionName(Settings::Action(i)));
+#ifndef COD3_MP
+                            if (i == Settings::BinocularsOut && ImGui::IsItemHovered())
+                                ImGui::SetTooltip("Campaign: hold to look through the binoculars, standing still\n"
+                                                  "(as holding the left stick in does on the controller).");
+#endif
                             ImGui::TableNextColumn();
                             ImGui::PushID(i);
                             const bool waiting = g_capturing == i;
@@ -762,6 +1071,15 @@ void Overlay::ConsolePrint(const std::string& line)
 
 void Overlay::RequestScreenshot() { g_screenshotWanted.store(true); }
 
+bool Overlay::TakeScreenshotRequest() { return g_screenshotWanted.exchange(false); }
+
+void Overlay::SaveScreenshot(ID3D11Texture2D* back, int width, int height, float scRgbWhite)
+{
+    if (!g_ready.load() || back == nullptr) return;
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    SaveScreenshotOf(back, width, height, scRgbWhite);
+}
+
 bool Overlay::HandleMessage(void* hwnd, uint32_t message, uint64_t wParam, int64_t lParam)
 {
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
@@ -801,9 +1119,9 @@ bool Overlay::HandleMessage(void* hwnd, uint32_t message, uint64_t wParam, int64
            message == WM_RBUTTONDOWN || message == WM_RBUTTONUP || message == WM_MBUTTONDOWN || message == WM_MBUTTONUP;
 }
 
-void Overlay::Render(ID3D11RenderTargetView* back, ID3D11Texture2D* backTexture, int width, int height)
+bool Overlay::Render(ID3D11RenderTargetView* back, ID3D11Texture2D* backTexture, int width, int height)
 {
-    if (!g_ready.load()) return;
+    if (!g_ready.load()) return false;
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     // The counter, once a second.
     {
@@ -818,7 +1136,7 @@ void Overlay::Render(ID3D11RenderTargetView* back, ID3D11Texture2D* backTexture,
         }
     }
     // The screenshot first, of the picture alone.
-    if (g_screenshotWanted.exchange(false) && backTexture != nullptr) SaveScreenshot(backTexture, width, height);
+    if (backTexture != nullptr && g_screenshotWanted.exchange(false)) SaveScreenshotOf(backTexture, width, height, 0.0f);
 
     const Settings::Values values = Settings::Get();
     const bool open = g_open.load();
@@ -833,7 +1151,7 @@ void Overlay::Render(ID3D11RenderTargetView* back, ID3D11Texture2D* backTexture,
     void (*streakHudDraw)(int, int) = g_streakHudDraw.load();
     const bool streakHud = streakHudActive && streakHudDraw && streakHudActive();
     const bool notice = NoticeShown();
-    if (!open && !console && !hud && !menuHud && !streakHud && !notice && !values.fpsOverlay && !values.statsOverlay) return;
+    if (!open && !console && !hud && !menuHud && !streakHud && !notice && !values.fpsOverlay && !values.statsOverlay) return false;
 
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
@@ -850,7 +1168,7 @@ void Overlay::Render(ID3D11RenderTargetView* back, ID3D11Texture2D* backTexture,
             {
                 // The renderer's own counters, averaged over the last second.
                 const RenderStats::Snapshot s = RenderStats::Current();
-                ImGui::Text("frame %.2f ms  cpu %.2f ms  gpu %s", s.frameMilliseconds, s.cpuMilliseconds,
+                ImGui::Text("frame %.2f ms (worst %.1f)  cpu %.2f ms  gpu %s", s.frameMilliseconds, s.worstMilliseconds, s.cpuMilliseconds,
                     s.gpuProfiled ? "" : "(COD3_GPU_PROFILE=1)");
                 if (s.gpuProfiled) { ImGui::SameLine(); ImGui::Text("%.2f ms", s.gpuMilliseconds); }
                 ImGui::Text("%.0f draws  %.0f k triangles  %.0f resolves  %.0f skipped", s.draws, s.triangles / 1000.0f, s.resolves, s.skipped);
@@ -870,4 +1188,5 @@ void Overlay::Render(ID3D11RenderTargetView* back, ID3D11Texture2D* backTexture,
     ID3D11RenderTargetView* targets[1] = { back };
     g_context->OMSetRenderTargets(1, targets, nullptr);
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+    return true;
 }

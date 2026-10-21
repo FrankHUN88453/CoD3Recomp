@@ -74,4 +74,12 @@ namespace Render
 
     // The ten second report.
     void Report();
+
+    // For the HDR tab: whether Windows has the window's display in HDR, and
+    // the peak it reports for it (nought when it reports none); whether the
+    // swap chain is scRGB now; and how many of the HDR programs are still
+    // being compiled.
+    void DisplayHdr(bool& hdr, float& peakNits);
+    bool HdrActive();
+    int HdrCompiling();
 }

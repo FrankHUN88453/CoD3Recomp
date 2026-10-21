@@ -31,4 +31,21 @@ namespace RenderCommands
     // Whether the title's blur while aiming down the sights is drawn: its
     // depth of field pass, three draws the pixel programs name.
     void SetAimBlur(bool drawn);
+    // The HDR mode's scene pass after the bloom's composite, and the bloom's
+    // strength (one the game's own), from the settings at each frame's edge.
+    void SetHdr(bool scenePass, float bloom, float hudGain);
+    // F11's "Steady decals": the layers over a surface a little nearer.
+    void SetSteadyDecals(bool on);
+    // Verify mode: the vertices and indices the frame's draws read, hashed
+    // again at its swap; a change is the title writing them after the draw
+    // (counted with the vertex buffers' checks). Clears the list.
+    void CheckLateWrites();
+
+    // Whether the shell shock's full screen pass is drawn (F11's "Shell
+    // shock screen blur"), set once a frame with the other settings.
+    void SetShellShockBlur(bool drawn);
+
+    // F11's "Sharp shadows", "Fast shadow maps" and "Smooth foliage edges",
+    // set once a frame with the other settings.
+    void SetRendering(bool sharpShadows, bool fastShadowMaps, bool foliageCoverage);
 }

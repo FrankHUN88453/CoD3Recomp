@@ -57,7 +57,7 @@ PPC_FUNC(sub_8244BB00)
         const uint32_t start = ctx.r4.u32, length = ctx.r5.u32;
         if (start != lastStart || length != lastLength)
         {
-            if (said++ < 60)
+            if ((said < 60 && said++ < 60))
             {
                 printf("shock: client %08X, began %u, lasts %u\n", ctx.r3.u32, start, length);
                 fflush(stdout);
@@ -192,7 +192,7 @@ PPC_FUNC(sub_8248ED40)
     const int32_t quick = std::min(stun / 4, 150);
     Guest::Write32(base, record + 48, uint32_t(quick));
     static int said = 0;
-    if (said++ < 20) { printf("moves: landing stun %d ms cut to %d\n", stun, quick); fflush(stdout); }
+    if ((said < 20 && said++ < 20)) { printf("moves: landing stun %d ms cut to %d\n", stun, quick); fflush(stdout); }
 }
 
 // Sprint: the player's stamina is the float at +1168 of his record (1 full),
@@ -448,7 +448,7 @@ namespace
         if (chosen <= 0 || chosen >= int(sizeof(CustomWeapons) / sizeof(CustomWeapons[0]))) return false;
         ctx.r3.u64 = WeaponName(base, chosen);
         static int said = 0;
-        if (said++ < 20) { printf("class: own spawn with %s\n", CustomWeapons[chosen]); fflush(stdout); }
+        if ((said < 20 && said++ < 20)) { printf("class: own spawn with %s\n", CustomWeapons[chosen]); fflush(stdout); }
         return true;
     }
 }
@@ -475,7 +475,7 @@ PPC_FUNC(sub_82206028)
             ctx.r4.s64 = values.classBase[slot] - 1;
     }
     static int said = 0;
-    if (said++ < 20)
+    if ((said < 20 && said++ < 20))
     {
         printf("class: kit for handle %08X (entity %08X, ours %08X), class %d%s\n", handle, entity, own, ctx.r4.s32,
                g_ownSpawn ? ": this machine's player" : "");
@@ -499,7 +499,7 @@ PPC_FUNC(sub_821DF378)
         if (const uint32_t second = SecondWeapon(base))
         {
             static int said = 0;
-            if (said++ < 20)
+            if ((said < 20 && said++ < 20))
             {
                 char name[32] = {};
                 for (int i = 0; i < 31; i++) { name[i] = char(Guest::Read8(base, second + i)); if (!name[i]) break; }
@@ -599,7 +599,7 @@ PPC_FUNC(sub_821F28C8)
         count = 4;
     if (count != before) Guest::Write32(base, out, uint32_t(count));
     static int said = 0;
-    if (said++ < 30) { printf("class: own spawn, %s %d (the game's %d)\n", slot, count, before); fflush(stdout); }
+    if ((said < 30 && said++ < 30)) { printf("class: own spawn, %s %d (the game's %d)\n", slot, count, before); fflush(stdout); }
 }
 
 // The classes' abilities: the scout's artillery, the medic's health packs
@@ -745,7 +745,7 @@ PPC_FUNC(sub_82580E38)
             Guest::Write8(base, ps + 1065, second);
             Guest::Write8(base, ps + 1066, first);
             static int said = 0;
-            if (said++ < 20) { printf("slots: dying with %u in hand: it is the one dropped (was the slot's %u)\n", held, first); fflush(stdout); }
+            if ((said < 20 && said++ < 20)) { printf("slots: dying with %u in hand: it is the one dropped (was the slot's %u)\n", held, first); fflush(stdout); }
         }
     }
     __imp__sub_82580E38(ctx, base);
@@ -798,7 +798,7 @@ void MpFixesBinoculars(PPCContext& ctx, uint8_t* base)
                     Guest::Write8(base, ps + 1064 + i, slots[i]);
                 }
             static int said = 0;
-            if (said++ < 20) { printf("class: own spawn, binoculars given (main weapon %s)\n", g_ownPrimary); fflush(stdout); }
+            if ((said < 20 && said++ < 20)) { printf("class: own spawn, binoculars given (main weapon %s)\n", g_ownPrimary); fflush(stdout); }
         }
     }
     // The others' (the host gives every player's kit): the same, with their
@@ -814,7 +814,7 @@ void MpFixesBinoculars(PPCContext& ctx, uint8_t* base)
         for (int i = 0; i < 10; i++)
             if (Guest::Read8(base, theirs + 1064 + i) != slots[i]) Guest::Write8(base, theirs + 1064 + i, slots[i]);
         static int said = 0;
-        if (said++ < 20) { printf("class: binoculars given to handle %08X\n", handle); fflush(stdout); }
+        if ((said < 20 && said++ < 20)) { printf("class: binoculars given to handle %08X\n", handle); fflush(stdout); }
     }
     g_binocularsOthers.clear();
     // Whether they are out is read from the weapon in hand (+164 of the
@@ -886,7 +886,7 @@ void MpFixesBinoculars(PPCContext& ctx, uint8_t* base)
         {
             Guest::Write32(base, binocularWeapon + 1600, word);
             static int said = 0;
-            if (said++ < 20) { printf("class: binoculars' view %.1f degrees (x%.1f of %.0f)\n", fov, magnify, own); fflush(stdout); }
+            if ((said < 20 && said++ < 20)) { printf("class: binoculars' view %.1f degrees (x%.1f of %.0f)\n", fov, magnify, own); fflush(stdout); }
         }
     };
     if (!Settings::Get().binoculars || !g_ownHandle || g_ownPrimary[0] == 0 || !out)
@@ -939,13 +939,13 @@ void MpFixesBinoculars(PPCContext& ctx, uint8_t* base)
         g_launcherOut = false;
         OnWeapon(ctx, base, 2692, g_ownPrimary);
         static int said = 0;
-        if (said++ < 20) { printf("class: d-pad up, binoculars away, to %s\n", g_ownPrimary); fflush(stdout); }
+        if ((said < 20 && said++ < 20)) { printf("class: d-pad up, binoculars away, to %s\n", g_ownPrimary); fflush(stdout); }
     }
     else if (up && !out)
     {
         OnWeapon(ctx, base, 2692, Binoculars);
         static int said = 0;
-        if (said++ < 20) { printf("class: d-pad up, binoculars out (in hand %u)\n", held); fflush(stdout); }
+        if ((said < 20 && said++ < 20)) { printf("class: d-pad up, binoculars out (in hand %u)\n", held); fflush(stdout); }
     }
     else if (down && out && !streakDown)
     {
@@ -954,7 +954,7 @@ void MpFixesBinoculars(PPCContext& ctx, uint8_t* base)
         g_launcherOut = false;
         OnWeapon(ctx, base, 2692, g_ownPrimary);
         static int said = 0;
-        if (said++ < 20) { printf("class: d-pad down, binoculars away, to %s\n", g_ownPrimary); fflush(stdout); }
+        if ((said < 20 && said++ < 20)) { printf("class: d-pad down, binoculars away, to %s\n", g_ownPrimary); fflush(stdout); }
     }
 }
 // The artillery as a killstreak (the Artillery killstreak setting, on the
@@ -1123,7 +1123,7 @@ PPC_FUNC(sub_821F70A8)
 {
     const uint32_t handle = ctx.r3.u32 ? Guest::Read32(base, ctx.r3.u32) : 0;
     static int said = 0;
-    if (said++ < 40)
+    if ((said < 40 && said++ < 40))
     {
         printf("killstreak: artillery barrage for handle %08X (r4 %016llX r5 %016llX: %.0f %.0f %.0f)%s\n", handle,
                (unsigned long long)ctx.r4.u64, (unsigned long long)ctx.r5.u64, BitsF(uint32_t(ctx.r4.u64 >> 32)),
@@ -2097,7 +2097,7 @@ void MpFixesLauncher(PPCContext& ctx, uint8_t* base)
                 }
             }
             static int said = 0;
-            if (said++ < 20)
+            if ((said < 20 && said++ < 20))
             {
                 printf("class: own spawn, %s given as equipment (main weapon %s, slot %u kept, launcher %u, clip %d, spare %d)\n",
                        Launcher(), g_ownPrimary, mainInSlot, launcher, clipGiven, spareGiven);
@@ -2142,7 +2142,7 @@ void MpFixesLauncher(PPCContext& ctx, uint8_t* base)
     }
     OnWeapon(ctx,base,2692,target.c_str());
     static int said = 0;
-    if (said++ < 20) { printf("class: d-pad left, to %s (previous %s)\n", target.c_str(),heldName.c_str()); fflush(stdout); }
+    if ((said < 20 && said++ < 20)) { printf("class: d-pad left, to %s (previous %s)\n", target.c_str(),heldName.c_str()); fflush(stdout); }
 }
 #endif
 
@@ -3890,7 +3890,7 @@ PPC_FUNC(sub_82477B50)
     __imp__sub_82477B50(ctx, base);
     if (kind == 3) g_mapArchive = int32_t(ctx.r3.u32);   // the map's own archive (kind 3)
     static int said = 0;
-    if (said++ < 200)
+    if ((said < 200 && said++ < 200))
     {
         // The banks' bitmaps (three words each, at +0 and +12): their set
         // bits counted, to see how full the pool is.
@@ -3910,7 +3910,7 @@ PPC_FUNC(sub_8246EA50)
     const uint32_t size = ctx.r3.u32;
     __imp__sub_8246EA50(ctx, base);
     static int said = 0;
-    if (ctx.r3.u32 == 0 && size != 0 && said++ < 50)
+    if (ctx.r3.u32 == 0 && size != 0 && (said < 50 && said++ < 50))
     {
         printf("archives: stream allocation of %.1f MB failed (no room in the stream heap)\n", size / 1048576.0);
         fflush(stdout);
@@ -4135,7 +4135,7 @@ PPC_FUNC(sub_820D1320)
             again.r4.u64 = alias;
             __imp__sub_820D1320(again, base);
             static int said = 0;
-            if (said++ < 10)
+            if ((said < 10 && said++ < 10))
             {
                 printf("weapons: %s has no entry of its own in table %08X; %s's (%08X) taken\n", text.c_str(), table, ReadText(base, alias).c_str(), again.r3.u32);
                 // What the entry lists (+4 a count, +8 the items, 28 bytes
@@ -4175,7 +4175,7 @@ namespace
             const bool shot = (function == 0x82556180u || function == 0x82556508u) &&
                               (ctx.r6.u32 == 1 || ctx.r6.u32 == 3 || ctx.r6.u32 == 7 || ctx.r6.u32 == 53);
             static int said = 0;
-            if (!shot && said++ < 1500)
+            if (!shot && (said < 1500 && said++ < 1500))
             {
                 printf("weapons: event %u for %s (sub_%08X, from %08X) at %llu ms\n", ctx.r6.u32, text.c_str(), function, uint32_t(ctx.lr),
                        (unsigned long long)GetTickCount64());
@@ -4227,7 +4227,7 @@ namespace
                     call.lr = 0;
                     Guest::Lookup(0x82556868)(call, base);
                     static int said = 0;
-                    if (said++ < 12) { printf("weapons: %s's own shot %s\n", gun.name, ReadText(base, name).c_str()); fflush(stdout); }
+                    if ((said < 12 && said++ < 12)) { printf("weapons: %s's own shot %s\n", gun.name, ReadText(base, name).c_str()); fflush(stdout); }
                     break;
                 }
         // With the campaign levels' sound banks loaded (campaign_sounds,
@@ -4303,7 +4303,7 @@ PPC_FUNC(sub_824964E8)
     const uint32_t result = ctx.r3.u32;
     {
         static int said = 0;
-        if (said++ < 40)
+        if ((said < 40 && said++ < 40))
         {
             printf("sounds: bank %s registered (kind %u, archive %08X) -> %08X\n", path.c_str(), saved.r6.u32, saved.r7.u32, result);
             fflush(stdout);
@@ -4422,7 +4422,7 @@ PPC_FUNC(sub_824408E0)
             if (call.r3.u32 != 0) { ctx.r3.u64 = call.r3.u32; break; }
         }
     static int said = 0;
-    if (said++ < 60)
+    if ((said < 60 && said++ < 60))
     {
         printf("materials: %s -> %08X (first %08X, the default %08X)%s\n", name.c_str(), ctx.r3.u32, first, fallback,
                ctx.r3.u32 == fallback ? " NOT FOUND" : "");
@@ -4455,7 +4455,7 @@ PPC_FUNC(sub_82446EA0)
             if (Guest::Read32(base, holder) != 0) break;
         }
     static int said = 0;
-    if (said++ < 60)
+    if ((said < 60 && said++ < 60))
     {
         printf("models: %s (bank %d) -> %08X (first %08X)\n", name.c_str(), saved.r5.s32, Guest::Read32(base, holder), first);
         fflush(stdout);
@@ -4645,7 +4645,7 @@ PPC_FUNC(sub_824784B8)
         if (call.r3.u32 != 0)
         {
             static int said = 0;
-            if (said++ < 40)
+            if ((said < 40 && said++ < 40))
             {
                 std::string key;
                 for (uint32_t i = 4; i < 32; i++) { const char c = char(Guest::Read8(base, saved.r3.u32 + i)); if (!c) break; key += c; }
@@ -4883,7 +4883,7 @@ PPC_FUNC(sub_8212B268)
                 text = t;
             }
             static int said = 0;
-            if (said++ < 30) { printf("cues: %s's shot %s -> %s\n", gun.name, cue.c_str(), own.c_str()); fflush(stdout); }
+            if ((said < 30 && said++ < 30)) { printf("cues: %s's shot %s -> %s\n", gun.name, cue.c_str(), own.c_str()); fflush(stdout); }
             ctx.r3.u64 = text;
         }
     }
@@ -5077,7 +5077,7 @@ PPC_FUNC(sub_82434918)
     else moved[2] = d;
     for (int i = 0; i < 3; i++) { memcpy(&bits, &moved[i], 4); Guest::Write32(base, matrix + 48 + 4 * i, bits); }
     static int said = 0;
-    if (said++ < 3) { printf("kangaroo: right tread (mode %d) moved %.2f, bone %u, pose at %08X\n", mode, d, bone, matrix); fflush(stdout); }
+    if ((said < 3 && said++ < 3)) { printf("kangaroo: right tread (mode %d) moved %.2f, bone %u, pose at %08X\n", mode, d, bone, matrix); fflush(stdout); }
 }
 
 // 0.5.89: the other thing that throws the Kangaroo's tread off. Justin, on

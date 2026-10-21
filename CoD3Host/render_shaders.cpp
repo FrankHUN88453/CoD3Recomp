@@ -1,5 +1,6 @@
 #include "render_shaders.h"
 #include "render_stats.h"
+#include "tuning.h"
 
 #include <chrono>
 #include <condition_variable>
@@ -14,6 +15,7 @@
 #include <vector>
 #include <string>
 #include <thread>
+#include <unordered_map>
 
 #include <Windows.h>
 #include <d3d11_1.h>
@@ -59,6 +61,56 @@ namespace
     {
         uint64_t hash = 1469598103934665603ull;
         for (size_t i = 0; i < count; i++) { hash ^= bytes[i]; hash *= 1099511628211ull; }
+        return hash;
+    }
+
+    // The title loads its programs from the stream before nearly every
+    // draw, the same few hundred again and again, and each load was hashed
+    // with HashBytes: a byte at a time, each waiting on the multiply before
+    // it, a few cycles a byte over kilobytes of microcode, a thirteenth of
+    // the command processor's time with the native command lists off. A
+    // program seen before is found by a quicker hash, eight bytes a step in
+    // four lanes, and compared whole against the copy kept of it; only one
+    // not seen before is hashed the old way, so the names and the disk cache
+    // are as they were. COD3_SLOWSHADERHASH=1 hashes every load.
+    struct KnownLoad { uint64_t hash = 0; std::vector<uint8_t> bytes; };
+    std::mutex g_knownMutex;
+    std::unordered_map<uint64_t, KnownLoad> g_knownLoads;   // by the quick hash and the size
+
+    uint64_t QuickHash(const uint8_t* bytes, size_t count)
+    {
+        constexpr uint64_t K = 0x9E3779B97F4A7C15ull;
+        uint64_t a = count * K, b = 0xBF58476D1CE4E5B9ull, c = 0x94D049BB133111EBull, d = 0xD6E8FEB86659FD93ull;
+        size_t at = 0;
+        for (; at + 32 <= count; at += 32)
+        {
+            uint64_t w[4];
+            memcpy(w, bytes + at, 32);
+            a = (a ^ w[0]) * K; b = (b ^ w[1]) * K; c = (c ^ w[2]) * K; d = (d ^ w[3]) * K;
+        }
+        for (; at + 8 <= count; at += 8) { uint64_t w; memcpy(&w, bytes + at, 8); a = (a ^ w) * K; }
+        if (at < count) { uint64_t w = 0; memcpy(&w, bytes + at, count - at); b = (b ^ w) * K; }
+        uint64_t h = a ^ (b >> 7) ^ (c << 11) ^ (d >> 19) ^ ((b ^ c ^ d) * K);
+        h ^= h >> 31; h *= 0xBF58476D1CE4E5B9ull; h ^= h >> 29;
+        return h;
+    }
+
+    uint64_t LoadHash(const uint8_t* words, size_t count)
+    {
+        static const bool slow = getenv("COD3_SLOWSHADERHASH") != nullptr;
+        if (slow || !Tuning::On(Tuning::shaderLoadCache)) return HashBytes(words, count);
+        const uint64_t quick = QuickHash(words, count);
+        std::lock_guard<std::mutex> lock(g_knownMutex);
+        auto found = g_knownLoads.find(quick);
+        if (found != g_knownLoads.end() && found->second.bytes.size() == count && memcmp(found->second.bytes.data(), words, count) == 0)
+            return found->second.hash;
+        const uint64_t hash = HashBytes(words, count);
+        if (g_knownLoads.size() < 8192)
+        {
+            KnownLoad& known = g_knownLoads[quick];
+            known.hash = hash;
+            known.bytes.assign(words, words + count);
+        }
         return hash;
     }
 
@@ -118,18 +170,18 @@ namespace
     constexpr uint32_t CacheMagic = 0x48533343u;
     constexpr uint32_t CacheVersion = 3;
 
-    std::string CachePath(uint64_t hash, bool pixel)
+    std::string CachePath(uint64_t hash, bool pixel, const char* variant = "")
     {
         char name[96];
-        snprintf(name, sizeof(name), "\\%016llx.%s.%08llx.bin", (unsigned long long)hash, pixel ? "ps" : "vs",
+        snprintf(name, sizeof(name), "\\%016llx.%s%s.%08llx.bin", (unsigned long long)hash, pixel ? "ps" : "vs", variant,
             (unsigned long long)(g_translatorVersion & 0xFFFFFFFFull));
         return g_cacheDirectory + name;
     }
 
-    bool ReadCache(Program& program)
+    bool ReadCache(Program& program, const char* variant = "")
     {
         if (g_cacheDirectory.empty()) return false;
-        const std::string path = CachePath(program.hash, program.pixel);
+        const std::string path = CachePath(program.hash, program.pixel, variant);
         FILE* in = fopen(path.c_str(), "rb");
         if (in == nullptr) return false;
         CacheHeader header{};
@@ -156,10 +208,10 @@ namespace
         return true;
     }
 
-    void WriteCache(const Program& program)
+    void WriteCache(const Program& program, const char* variant = "")
     {
         if (g_cacheDirectory.empty()) return;
-        const std::string path = CachePath(program.hash, program.pixel);
+        const std::string path = CachePath(program.hash, program.pixel, variant);
         // Written whole under another name, then renamed, so a run cut
         // short leaves no half file.
         const std::string partial = path + ".part";
@@ -235,7 +287,66 @@ namespace
         return SUCCEEDED(hr) && program.shader != nullptr;
     }
 
+    // Shader specialisation, as UnleashedRecomp does it: every translated
+    // pixel program carries the alpha test (a discard, the alpha's change
+    // across the pixel, a coverage output), whether or not the draw has the
+    // test on, and a program that can discard or writes coverage keeps the
+    // GPU from writing depth before it runs: the early depth test then
+    // does less for the frame's overdraw. Most of the frame's draws (the
+    // level's solid geometry) have the test off. So each pixel program
+    // also gets a variant without it, built here after the program, kept
+    // in the disk cache beside it (.pso), and the draws with the test off
+    // take it. COD3_NOOPAQUEPS=1: neither built nor used.
+    bool OpaqueVariants()
+    {
+        static const bool off = getenv("COD3_NOOPAQUEPS") != nullptr;
+        return !off;
+    }
+
+    void BuildOpaque(const Job& job)
+    {
+        Program& program = *job.program;
+        if (!program.pixel || !OpaqueVariants() || program.state.load(std::memory_order_acquire) != State::Ready) return;
+        Program variant;
+        variant.hash = program.hash;
+        variant.pixel = true;
+        if (!ReadCache(variant, "o"))
+        {
+            const XenosHlsl::Translation translation = XenosHlsl::Translate(*job.words, true, false);
+            if (!translation.ok) return;
+            ID3DBlob* code = nullptr;
+            ID3DBlob* errors = nullptr;
+            const HRESULT hr = g_compile(translation.hlsl.data(), translation.hlsl.size(), "pixel program (opaque)", nullptr, nullptr, "main",
+                "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errors);
+            if (errors) errors->Release();
+            if (FAILED(hr) || code == nullptr) { if (code) code->Release(); return; }
+            variant.bytecode.assign(static_cast<const uint8_t*>(code->GetBufferPointer()),
+                static_cast<const uint8_t*>(code->GetBufferPointer()) + code->GetBufferSize());
+            code->Release();
+            variant.vertexFetches = translation.vertexFetches;
+            variant.textureFetches = translation.textureFetches;
+            variant.colourTargets = translation.colourTargets;
+            variant.writesDepth = translation.writesDepth;
+            variant.hlslBytes = uint32_t(translation.hlsl.size());
+            variant.constantMap = translation.constantMap;
+            // Only a variant that reads the same constants and textures the
+            // same way stands in for the program.
+            if (variant.constantMap != program.constantMap || variant.textureFetches.size() != program.textureFetches.size()) return;
+            WriteCache(variant, "o");
+        }
+        ID3D11PixelShader* shader = nullptr;
+        if (SUCCEEDED(g_device->CreatePixelShader(variant.bytecode.data(), variant.bytecode.size(), nullptr, &shader)) && shader != nullptr)
+            program.opaque.store(shader, std::memory_order_release);
+    }
+
+    void BuildProgram(const Job& job);
     void Build(const Job& job)
+    {
+        BuildProgram(job);
+        BuildOpaque(job);
+    }
+
+    void BuildProgram(const Job& job)
     {
         Program& program = *job.program;
         const char* what = program.pixel ? "pixel program" : "vertex program";
@@ -428,7 +539,7 @@ RenderState::Handle RenderShaders::Loaded(bool pixel, const uint8_t* words, uint
     if (sizeDwords == 0 || sizeDwords > 64 * 1024 || words == nullptr) return g_current[pixel ? 1 : 0];
     // The same program again, which the title does between most of its
     // draws: one hash and one compare.
-    return Loaded(pixel, words, sizeDwords, HashBytes(words, size_t(sizeDwords) * 4));
+    return Loaded(pixel, words, sizeDwords, LoadHash(words, size_t(sizeDwords) * 4));
 }
 
 RenderState::Handle RenderShaders::Loaded(bool pixel, const uint8_t* words, uint32_t sizeDwords, uint64_t hash)
@@ -448,6 +559,7 @@ RenderState::Handle RenderShaders::Current(bool pixel) { return g_current[pixel 
 
 const RenderShaders::Program* RenderShaders::Get(Handle handle)
 {
+    handle &= ~OpaqueVariantBit;   // the opaque variant of a program is still that program
     return handle != 0 && handle <= g_programs.size() ? &g_programs[handle - 1] : nullptr;
 }
 

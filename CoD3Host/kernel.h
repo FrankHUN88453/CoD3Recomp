@@ -273,6 +273,9 @@ namespace Kernel
     // The frame rate is unlocked (the settings) and a level is played:
     // the wait after each swap is let through.
     bool FrameRateUnlocked();
+    // One of the title's films (the WMV player) is open: the render layer
+    // shows it without the display's gamma ramp (render_d3d11.cpp).
+    bool FilmPlaying();
 
     // The heaps: how much is handed out and how much of that is free again.
     void ReportHeaps();

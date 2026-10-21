@@ -214,7 +214,7 @@ namespace
         if (v >= 10.0f && v <= 170.0f) { g_goodFov = v; return; }
         if (g_goodFov <= 0.0f) return;
         static int told = 0;
-        if (told++ < 40)
+        if ((told < 40 && told++ < 40))
         {
             printf("bots: the base field of view went %.2f (bits %08X) at %s, slot %u: put back to %.2f\n",
                    v, Guest::Read32(base, BaseFov), where, slot, g_goodFov);
@@ -265,14 +265,14 @@ namespace
             if (afterStance != hostStance || memcmp(stanceHold, base + Players + 1608, sizeof(stanceHold)))
             {
                 static int toldStance = 0;
-                if (toldStance++ < 40) { printf("bots: isolated step changed host stance latch %u -> %u or hold state: restored\n", hostStance, afterStance); fflush(stdout); }
+                if ((toldStance < 40 && toldStance++ < 40)) { printf("bots: isolated step changed host stance latch %u -> %u or hold state: restored\n", hostStance, afterStance); fflush(stdout); }
                 Guest::Write32(base, 0x82B57804, hostStance);
                 memcpy(base + Players + 1608, stanceHold, sizeof(stanceHold));
             }
             if (hostView && Guest::Read32(base, 0x82C37070) == hostView && memcmp(view, base + hostView, sizeof(view)) != 0)
             {
                 static int toldView = 0;
-                if (toldView++ < 20)
+                if ((toldView < 20 && toldView++ < 20))
                 {
                     printf("bots: a bot's step wrote the host's gun view object %08X, put back:", hostView);
                     int shown = 0;
@@ -293,7 +293,7 @@ namespace
             if (memcmp(low, base, NullObjectBytes) != 0)
             {
                 static int told = 0;
-                if (told++ < 20)
+                if ((told < 20 && told++ < 20))
                 {
                     // 0.5.154: every changed word (up to 12), old and new.
                     printf("bots: a bot's step wrote the host's weapon view, put back:");
@@ -377,7 +377,7 @@ namespace
         if (g_gunPointersKnown && memcmp(now, g_gunPointers, sizeof(now)) != 0)
         {
             static int told = 0;
-            if (told++ < 60)
+            if ((told < 60 && told++ < 60))
             {
                 printf("bots: GUN VIEW POINTERS CHANGED at %s (slot %u): %08X %08X %08X %08X -> %08X %08X %08X %08X\n", where, slot,
                        g_gunPointers[0], g_gunPointers[1], g_gunPointers[2], g_gunPointers[3], now[0], now[1], now[2], now[3]);
@@ -1012,7 +1012,7 @@ namespace
                 {
                     Guest::Write32(base, record + 1924, 4);
                     static int told = 0;
-                    if (told++ < 10) { printf("bots: slot %u dead: state 3 -> 4, as the host's goes\n", slot); fflush(stdout); }
+                    if ((told < 10 && told++ < 10)) { printf("bots: slot %u dead: state 3 -> 4, as the host's goes\n", slot); fflush(stdout); }
                 }
                 if (health <= 0 && deadSince[slot] != 0 && nowMs - deadSince[slot] > 4000 && SessionPlayer(base, slot) != 0)
                 {
@@ -1141,7 +1141,7 @@ static uint32_t BotCrouch(uint32_t slot, bool want)
         g_crouched[slot] = want;
         g_stanceTaps[slot] = 1;
         static int said = 0;
-        if (said++ < 20) { printf("bots: slot %u %s\n", slot, want ? "crouches" : "stands"); fflush(stdout); }
+        if ((said < 20 && said++ < 20)) { printf("bots: slot %u %s\n", slot, want ? "crouches" : "stands"); fflush(stdout); }
     }
     if (g_stanceTaps[slot] > 0) { g_stanceTaps[slot]--; return StanceButton; }
     return 0;
@@ -1648,7 +1648,7 @@ static void BotExtras(uint8_t* base, uint32_t slot, BotOrders& orders)
     {
         orders.buttons = (orders.buttons & ~1u) | MeleeButton;
         nextMelee[slot] = now + 700 + phase % 300;
-        if (told++ < 60) { printf("bots: slot %u melees (%.0f away)\n", slot, g_seeDist[slot]); fflush(stdout); }
+        if ((told < 60 && told++ < 60)) { printf("bots: slot %u melees (%.0f away)\n", slot, g_seeDist[slot]); fflush(stdout); }
     }
     // Smoke: hurt (half health or less) with someone in sight, once in a
     // while: thrown at his feet's way to cover himself, as a player would.
@@ -1657,7 +1657,7 @@ static void BotExtras(uint8_t* base, uint32_t slot, BotOrders& orders)
     {
         smokeUntil[slot] = now + 350;
         nextSmoke[slot] = now + 30000 + phase % 15000;
-        if (told++ < 60) { printf("bots: slot %u throws smoke (health %d)\n", slot, health); fflush(stdout); }
+        if ((told < 60 && told++ < 60)) { printf("bots: slot %u throws smoke (health %d)\n", slot, health); fflush(stdout); }
     }
     if (now < smokeUntil[slot]) orders.buttons = (orders.buttons & ~(1u | 0x80u)) | SmokeButton;
     // Reload: the gun in hand's clip empty with rounds to spare (Justin never
@@ -1674,7 +1674,7 @@ static void BotExtras(uint8_t* base, uint32_t slot, BotOrders& orders)
             {
                 reloadUntil[slot] = now + 150;
                 nextReload[slot] = now + 2500;
-                if (told++ < 60) { printf("bots: slot %u reloads weapon %u\n", slot, weapon); fflush(stdout); }
+                if ((told < 60 && told++ < 60)) { printf("bots: slot %u reloads weapon %u\n", slot, weapon); fflush(stdout); }
             }
         }
         if (now < reloadUntil[slot]) orders.buttons = (orders.buttons & ~1u) | ReloadButton;
@@ -1692,7 +1692,7 @@ static void BotExtras(uint8_t* base, uint32_t slot, BotOrders& orders)
             if (stuck)
             {
                 orders.up = 127;
-                if (told++ < 60) { printf("bots: slot %u is stuck: jumps\n", slot); fflush(stdout); }
+                if ((told < 60 && told++ < 60)) { printf("bots: slot %u is stuck: jumps\n", slot); fflush(stdout); }
             }
         }
         if (nextHop[slot] == 0) nextHop[slot] = now + 6000 + phase % 9000;
@@ -1759,7 +1759,7 @@ static void FeedBots(PPCContext& ctx, uint8_t* base)
                 if (weapon != remembered)
                 {
                     static int recovered = 0;
-                    if (recovered++ < 60) { printf("bots: slot %u empty hands: stale weapon %u replaced by owned kit weapon %u\n", slot, remembered, weapon); fflush(stdout); }
+                    if ((recovered < 60 && recovered++ < 60)) { printf("bots: slot %u empty hands: stale weapon %u replaced by owned kit weapon %u\n", slot, remembered, weapon); fflush(stdout); }
                 }
             }
             // 0.5.134: out of ammunition, he asks for his other gun. A
@@ -1787,7 +1787,7 @@ static void FeedBots(PPCContext& ctx, uint8_t* base)
                         if (other != weapon && rounds(other) > 0)
                         {
                             static int told = 0;
-                            if (told++ < 40) printf("bots: slot %u is out of rounds for %u: asks for %u (%d rounds)\n", slot, weapon, other, rounds(other));
+                            if ((told < 40 && told++ < 40)) printf("bots: slot %u is out of rounds for %u: asks for %u (%d rounds)\n", slot, weapon, other, rounds(other));
                             weapon = other;
                             lastHeld[slot] = other;
                             break;
@@ -2202,13 +2202,13 @@ static void KeepHostCurrent(uint8_t* base, const char* when)
             const uint32_t now = Guest::Read32(base, LocalState(k));
             if (now == g_localStateBefore[k]) continue;
             static int toldState = 0;
-            if (toldState++ < 30) { printf("bots: local client %u's state %u -> %u %s: put back\n", k, g_localStateBefore[k], now, when); fflush(stdout); }
+            if ((toldState < 30 && toldState++ < 30)) { printf("bots: local client %u's state %u -> %u %s: put back\n", k, g_localStateBefore[k], now, when); fflush(stdout); }
             Guest::Write32(base, LocalState(k), g_localStateBefore[k]);
         }
     const uint32_t current = Guest::Read32(base, CurrentClient);
     if (current == 0) return;
     static int told = 0;
-    if (told++ < 30) { printf("bots: current client was %u %s: put back to the host's 0\n", current, when); fflush(stdout); }
+    if ((told < 30 && told++ < 30)) { printf("bots: current client was %u %s: put back to the host's 0\n", current, when); fflush(stdout); }
     Guest::Write32(base, CurrentClient, 0);
 }
 
@@ -2546,7 +2546,7 @@ PPC_FUNC(sub_82487718)
                 const double quicker = before * (1.0 + (factor - 1.0) * sights);
                 ctx.f1.f64 = quicker;
                 static int said = 0;
-                if (said++ < 6) { printf("moves: aiming %.2f, scale %.3f -> %.3f (+1124 %.3f, +1128 %.3f)\n", sights, before, quicker, fl(1124), fl(1128)); fflush(stdout); }
+                if ((said < 6 && said++ < 6)) { printf("moves: aiming %.2f, scale %.3f -> %.3f (+1124 %.3f, +1128 %.3f)\n", sights, before, quicker, fl(1124), fl(1128)); fflush(stdout); }
             }
         }
     }
@@ -2745,7 +2745,7 @@ PPC_FUNC(sub_82404DD0)
     const int32_t health = hostRecord ? int32_t(Guest::Read32(base, hostRecord + 304)) : -1;
     const int32_t state = hostRecord ? int32_t(Guest::Read32(base, hostRecord + 1924)) : -1;
     static int told = 0;
-    if (told++ < 40)
+    if ((told < 40 && told++ < 40))
     {
         printf("bots: a session death: local flag %u -> %u, the host's health %d, state %d\n", before, after, health, state);
         fflush(stdout);
@@ -2754,7 +2754,7 @@ PPC_FUNC(sub_82404DD0)
     {
         Guest::Write8(base, at, before);
         static int fixed = 0;
-        if (fixed++ < 40) { printf("bots: a bot's death cleared the host's local flag: put back to %u\n", before); fflush(stdout); }
+        if ((fixed < 40 && fixed++ < 40)) { printf("bots: a bot's death cleared the host's local flag: put back to %u\n", before); fflush(stdout); }
     }
 }
 
@@ -2787,7 +2787,7 @@ static void ReleaseDeadPlaces(uint8_t* base)
             {
                 Guest::Write8(base, g_placeAt[slot], g_placeNumber[slot]);
                 static int back = 0;
-                if (back++ < 40) { printf("bots: slot %u is alive: back in his local place\n", slot); fflush(stdout); }
+                if ((back < 40 && back++ < 40)) { printf("bots: slot %u is alive: back in his local place\n", slot); fflush(stdout); }
             }
             continue;
         }
@@ -2795,7 +2795,7 @@ static void ReleaseDeadPlaces(uint8_t* base)
         if (Guest::Read8(base, g_placeAt[slot]) != g_placeNumber[slot]) continue;
         Guest::Write8(base, g_placeAt[slot], 0xFF);
         static int told = 0;
-        if (told++ < 40) { printf("bots: slot %u is dead: leaves his local place\n", slot); fflush(stdout); }
+        if ((told < 40 && told++ < 40)) { printf("bots: slot %u is dead: leaves his local place\n", slot); fflush(stdout); }
     }
 }
 
@@ -2856,7 +2856,7 @@ PPC_FUNC(sub_82400810)
     if (g_supplementalBotPlayer && player != g_supplementalBotPlayer)
     {
         static int skipped = 0;
-        if (skipped++ < 5) { printf("bots: isolated session tick skips player %08X (active bot %08X)\n", player, g_supplementalBotPlayer); fflush(stdout); }
+        if ((skipped < 5 && skipped++ < 5)) { printf("bots: isolated session tick skips player %08X (active bot %08X)\n", player, g_supplementalBotPlayer); fflush(stdout); }
         return; // native caller ignores the return value
     }
     const bool bot = g_botRemote.load() && g_bots > 0 && IsBotSessionPlayer(base, player);
@@ -2878,7 +2878,7 @@ PPC_FUNC(sub_82400810)
     else __imp__sub_82400810(ctx, base);
     g_drawingBot = was;
     static int told = 0;
-    if (bot && told++ < 10) { printf("bots: session player %08X (slot %d) drawn as this machine's\n", player, int32_t(Guest::Read32(base, player + 8))); fflush(stdout); }
+    if (bot && (told < 10 && told++ < 10)) { printf("bots: session player %08X (slot %d) drawn as this machine's\n", player, int32_t(Guest::Read32(base, player + 8))); fflush(stdout); }
 }
 extern "C" PPC_FUNC(__imp__sub_823D9B50);
 PPC_FUNC(sub_823D9B50)
@@ -2900,7 +2900,7 @@ PPC_FUNC(sub_823D9B50)
     if (g_botRemote.load() && g_bots > 0 && IsBotSessionPlayer(base, ctx.r3.u32))
     {
         static int told = 0;
-        if (told++ < 5) { printf("bots: session player %08X (a bot) counted as this machine's\n", ctx.r3.u32); fflush(stdout); }
+        if ((told < 5 && told++ < 5)) { printf("bots: session player %08X (a bot) counted as this machine's\n", ctx.r3.u32); fflush(stdout); }
         ctx.r3.u64 = 1;
         return;
     }
@@ -2920,7 +2920,7 @@ PPC_FUNC(sub_82593D50)
     if (current != 0 && current < 4 && g_bots > 0 && !g_botLocal.load() && g_thinkSlot >= MaxClients)
     {
         static int told = 0;
-        if (told++ < 20) { printf("bots: local client %u's frame skipped (no such player; bots are remote)\n", current); fflush(stdout); }
+        if ((told < 20 && told++ < 20)) { printf("bots: local client %u's frame skipped (no such player; bots are remote)\n", current); fflush(stdout); }
         return;
     }
     __imp__sub_82593D50(ctx, base);
@@ -2953,7 +2953,7 @@ PPC_FUNC(sub_82519178)
     const float saved = objectOk ? ReadFloat(base, object + 0x74) : -1.0f;
     if (objectOk && !(saved >= 10.0f && saved <= 170.0f)) Guest::Write32(base, object + 0x74, bits);
     static int told = 0;
-    if (told++ < 20)
+    if ((told < 20 && told++ < 20))
     {
         printf("bots: weapon view %08X (current client %u) put the field of view to %.2f (its saved %.2f): healed to %.2f\n",
                object, Guest::Read32(base, CurrentClient), after, saved, good);
@@ -2975,7 +2975,7 @@ PPC_FUNC(sub_8251A950)
     if (current != 0 && g_bots > 0 && !g_botLocal.load())
     {
         static int told = 0;
-        if (told++ < 10) { printf("bots: first-person weapon view for current client %u skipped (a bot's)\n", current); fflush(stdout); }
+        if ((told < 10 && told++ < 10)) { printf("bots: first-person weapon view for current client %u skipped (a bot's)\n", current); fflush(stdout); }
         return;
     }
     __imp__sub_8251A950(ctx, base);
@@ -3005,7 +3005,7 @@ PPC_FUNC(sub_8246A7D8)
     if (event >= 165 && event <= 167 && IsBotEntity(base, ctx.r3.u32))
     {
         static int told = 0;
-        if (told++ < 60) { printf("bots: stance event %u from slot %u excluded from local input (client %u, caller %08X)\n", event, BotSlot(base, ctx.r3.u32), Guest::Read32(base, CurrentClient), uint32_t(ctx.lr)); fflush(stdout); }
+        if ((told < 60 && told++ < 60)) { printf("bots: stance event %u from slot %u excluded from local input (client %u, caller %08X)\n", event, BotSlot(base, ctx.r3.u32), Guest::Read32(base, CurrentClient), uint32_t(ctx.lr)); fflush(stdout); }
         return;
     }
     __imp__sub_8246A7D8(ctx, base);
@@ -3057,7 +3057,7 @@ static bool NotLocalClient(uint32_t client) { return client != 0xFFFFFFFFu && cl
 static void TellSkippedKick(const char* where, uint32_t client)
 {
     static int told = 0;
-    if (told++ < 20) { printf("bots: %s for client %u (not a local player) skipped: the current client stays %u\n", where, client, 0u); fflush(stdout); }
+    if ((told < 20 && told++ < 20)) { printf("bots: %s for client %u (not a local player) skipped: the current client stays %u\n", where, client, 0u); fflush(stdout); }
 }
 extern "C" PPC_FUNC(__imp__sub_8244A1D0);
 PPC_FUNC(sub_8244A1D0)
@@ -3094,7 +3094,7 @@ PPC_FUNC(sub_823E9998)
     __imp__sub_823E9998(ctx, base);
     g_botsLocal--;
     static int told = 0;
-    if (told++ < 20) { printf("bots: a death (sub_823E9998) played with the bots as this machine's\n"); fflush(stdout); }
+    if ((told < 20 && told++ < 20)) { printf("bots: a death (sub_823E9998) played with the bots as this machine's\n"); fflush(stdout); }
 }
 
 
@@ -3116,7 +3116,7 @@ PPC_FUNC(sub_823D8FF0)
     if (g_botRemote.load() && g_bots > 0 && IsBotSessionNumber(base, ctx.r3.u32, ctx.r4.u32 & 0xFF))
     {
         static int told = 0;
-        if (told++ < 5) { printf("bots: session number %u (a bot) answered as one of this machine's places\n", ctx.r4.u32 & 0xFF); fflush(stdout); }
+        if ((told < 5 && told++ < 5)) { printf("bots: session number %u (a bot) answered as one of this machine's places\n", ctx.r4.u32 & 0xFF); fflush(stdout); }
         ctx.r3.u64 = 1;
         return;
     }
@@ -3131,7 +3131,7 @@ PPC_FUNC(sub_823D8FB0)
     if (IsBotSessionNumber(base, object, Guest::Read8(base, entry)))
     {
         static int told = 0;
-        if (told++ < 5) { printf("bots: session entry %08X (a bot) given local index 3\n", entry); fflush(stdout); }
+        if ((told < 5 && told++ < 5)) { printf("bots: session entry %08X (a bot) given local index 3\n", entry); fflush(stdout); }
         ctx.r3.u64 = 3;
     }
 }
@@ -3209,14 +3209,14 @@ PPC_FUNC(sub_82404580)
         if (keys || input)
         {
             static int changed = 0;
-            if (changed++ < 30) { printf("bots: a bot's session update changed the host's %s%s%s: put back\n", keys ? "keys" : "", keys && input ? " and " : "", input ? "input" : ""); fflush(stdout); }
+            if ((changed < 30 && changed++ < 30)) { printf("bots: a bot's session update changed the host's %s%s%s: put back\n", keys ? "keys" : "", keys && input ? " and " : "", input ? "input" : ""); fflush(stdout); }
             memcpy(base + Keys, keysBefore, KeysSize);
             memcpy(base + HostInput, inputBefore, HostInputSize);
         }
     }
     g_inBotUpdate = false;
     static int told = 0;
-    if (told++ < 3) { printf("bots: isolated session update for each bot (weapon/session state; physical input locked)\n"); fflush(stdout); }
+    if ((told < 3 && told++ < 3)) { printf("bots: isolated session update for each bot (weapon/session state; physical input locked)\n"); fflush(stdout); }
 }
 
 // 0.5.167: the UAV shows the bots. The compass's enemy markers
@@ -3287,7 +3287,7 @@ static const char* WhoIs(uint8_t* base, uint32_t v, char* out)
     PPC_FUNC(sub_##addr) \
     { \
         static int calls = 0; \
-        if (calls++ < 40) \
+        if ((calls < 40 && calls++ < 40)) \
         { \
             char a[48], b[48], c[48]; \
             printf("bots: death step %s (%s) at %u: r3 %s, r4 %s, r5 %s\n", #addr, name, GetTickCount(), \
@@ -3323,7 +3323,7 @@ PPC_FUNC(sub_823FD118)
     const char* victim = WhoIs(base, ctx.r4.u32, who);
     const bool bot = strncmp(victim, "bot ", 4) == 0 && strstr(victim, "entity") != nullptr;
     static int told = 0;
-    if (told++ < 60) { printf("bots: lethal hit (sub_823FD118) on %s, session %08X%s\n", victim, Guest::Read32(base, ctx.r3.u32), bot ? ": played here (no-session way)" : ""); fflush(stdout); }
+    if ((told < 60 && told++ < 60)) { printf("bots: lethal hit (sub_823FD118) on %s, session %08X%s\n", victim, Guest::Read32(base, ctx.r3.u32), bot ? ": played here (no-session way)" : ""); fflush(stdout); }
     if (bot && g_botRemote.load())
     {
         if (!zero) { zero = Guest::AllocatePhysical(16); if (zero) memset(base + zero, 0, 16); }
@@ -3335,7 +3335,7 @@ extern "C" PPC_FUNC(__imp__sub_82587268);
 PPC_FUNC(sub_82587268)
 {
     static int calls = 0;
-    if (calls++ < 40)
+    if ((calls < 40 && calls++ < 40))
     {
         char a[48], b[48];
         printf("bots: player dies (sub_82587268): %s, killed by %s, means %u\n", WhoIs(base, ctx.r3.u32, a), WhoIs(base, ctx.r5.u32, b), ctx.r7.u32);
@@ -3368,7 +3368,7 @@ PPC_FUNC(sub_824309F0)
     if (!queue)
     {
         static int missing = 0;
-        if (missing++ < 5) { printf("bots: error-queue pointer cleared; drain skipped, guest0 untouched; cause unresolved\n"); fflush(stdout); }
+        if ((missing < 5 && missing++ < 5)) { printf("bots: error-queue pointer cleared; drain skipped, guest0 untouched; cause unresolved\n"); fflush(stdout); }
         ctx.r3.u64 = 0;
         return;
     }

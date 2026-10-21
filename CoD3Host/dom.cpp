@@ -294,7 +294,7 @@ namespace
                 Call(ctx, base, MakeString, scratch + 0x40, Text(base, scratch + 0x280, "FLAG_FLAPPING"));
                 Call(ctx, base, play, entity, scratch + 0x40, 0, 0);
                 static int said = 0;
-                if (said++ < 12) { printf("dom: %s on %08X, flapping (%08X)\n", model, entity, play); fflush(stdout); }
+                if ((said < 12 && said++ < 12)) { printf("dom: %s on %08X, flapping (%08X)\n", model, entity, play); fflush(stdout); }
                 Call(ctx, base, FreeString, scratch + 0x40);
             }
         }

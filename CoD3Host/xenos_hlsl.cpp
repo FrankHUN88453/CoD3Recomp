@@ -35,6 +35,7 @@ namespace
         std::set<uint32_t> vertexSlots;
         std::map<uint32_t, uint32_t> vertexStrides;
         std::set<uint32_t> textureSlots;
+        std::set<uint32_t> weightSlots;   // the slots getWeights is asked of: the shadows' filtering
         std::set<uint32_t> exportsUsed;
         int indent = 1;
         bool predicated = false;   // inside a predicated exec block
@@ -587,7 +588,10 @@ namespace
                     else Line("fetched = float4(0.0, 0.0, 0.0, 0.0);");
                 }
                 else if (opcode == 19)
+                {
+                    weightSlots.insert(slot);
                     Line(Format("fetched = float4(frac(%s * textureSize[%u].xy - 0.5), 0.0, 0.0);", coordinate.c_str(), slot));
+                }
                 else if (opcode != 25 && opcode != 26) { out.problem = Format("fetch opcode %u", opcode); return; }
                 if (opcode == 17 || opcode == 18 || opcode == 19) FetchWrite(dstReg, dstSwizzle, "fetched");
                 return;
@@ -782,7 +786,7 @@ namespace
                     // is the loop over a switch.
                     const uint32_t loopEnd = uint32_t(instruction) & 0x1FFF;
                     const bool repeat = ((instruction >> 13) & 1) != 0;
-                    const uint32_t loopId = uint32_t(instruction >> 32) & 0x1F;
+                    const uint32_t loopId = uint32_t(instruction >> 16) & 0x1F;   // word 0, bits 16..20
                     if (loopEnd <= i || loopEnd >= end) return false;
                     const uint64_t last = flow[loopEnd];
                     if ((uint32_t(last >> 44) & 0xF) != 8 || (uint32_t(last) & 0x1FFF) != i) return false;
@@ -946,7 +950,7 @@ namespace
                 {
                     const uint32_t loopEnd = uint32_t(instruction) & 0x1FFF;
                     const bool repeat = ((instruction >> 13) & 1) != 0;
-                    const uint32_t loopId = uint32_t(instruction >> 32) & 0x1F;
+                    const uint32_t loopId = uint32_t(instruction >> 16) & 0x1F;   // word 0, bits 16..20
                     Line(Format("{ uint constant = loops[%u][%u]; uint count = constant & 0xFF;", loopId / 4, loopId & 3));
                     Line("  if (depth < 4) { loopAddress[depth] = aL; loopCount[depth] = count; depth++; }");
                     Line("  aL = (int)((constant >> 8) & 0xFF);");
@@ -959,7 +963,7 @@ namespace
                     const uint32_t loopStart = uint32_t(instruction) & 0x1FFF;
                     const bool predicated = ((instruction >> 13) & 1) != 0;   // predicate break
                     const bool condition = ((instruction >> 42) & 1) != 0;
-                    const uint32_t loopId = uint32_t(instruction >> 32) & 0x1F;
+                    const uint32_t loopId = uint32_t(instruction >> 16) & 0x1F;   // word 0, bits 16..20
                     Line(Format("{ uint constant = loops[%u][%u]; int step = (int)((constant >> 16) & 0xFF); if (step >= 128) step -= 256;",
                         loopId / 4, loopId & 3));
                     Line("  bool again = false;");
@@ -1026,8 +1030,9 @@ uint64_t XenosHlsl::Version()
     // A number that changes when the translation would, or when one of the
     // environment knobs that shape the HLSL is set: the disk cache keyed by
     // it then starts afresh rather than serving the other translation.
-    std::string text = "xenos_hlsl 2026-10-06 bswap packed flat3d fetch offsets alu pairs read first pixel params gradients dx dy depth offset pixel centre";
+    std::string text = "xenos_hlsl 2026-10-06 bswap packed flat3d fetch offsets alu pairs read first pixel params gradients dx dy depth offset pixel centre loop ids index offset in program hud scale";
     text += Depth24() ? " depth 20e4 centroid" : " depth 32";
+    text += " shadow weights, coverage 2026-10-18, hdr clamp 2026-10-19";
     if (const char* lanes = getenv("COD3_SCALARLANES")) { text += " lanes="; text += lanes; }
     if (const char* show = getenv("COD3_D3DSHOW")) { text += " show="; text += show; }
     if (const char* sign = getenv("COD3_D3DSHOWSIGN")) { text += " sign="; text += sign; }
@@ -1041,13 +1046,14 @@ uint64_t XenosHlsl::Version()
     return hash;
 }
 
-XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, bool pixel)
+XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, bool pixel, bool alphaTest)
 {
     Translator translator(words, pixel);
     const bool ran = translator.Run();
     Translation& out = translator.out;
     if (!ran || !out.problem.empty()) { out.ok = false; return out; }
     translator.PackConstants();
+    for (TextureFetch& fetch : out.textureFetches) fetch.weights = translator.weightSlots.count(fetch.slot) != 0 ? 1u : 0u;
 
     std::string hlsl;
     hlsl += "// Translated from the console's microcode.\n";
@@ -1061,6 +1067,7 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
             "    float4 textureSize[32];  // width, height, 1/width, 1/height\n"
             "    uint4 textureAdjustment[32];   // swizzle, sign modes, unused, unused\n"
             "    float4 pixelGen;         // guest pixels per host pixel x and y, the register, on or off\n"
+            "    uint4 coverage;          // x: the target's samples when an alpha tested edge goes to coverage, else 0; y: the HDR targets; z: the index offset (signed); w: the HUD scale (float, 0 none)\n"
             "};\n";
     // The vertex buffers are bound as they lie in the console's memory, big
     // endian, and every word fetched is turned round here: a buffer upload
@@ -1153,7 +1160,9 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
         hlsl += "struct Output { float4 c0 : SV_Target0; float4 c1 : SV_Target1; float4 c2 : SV_Target2; float4 c3 : SV_Target3;";
         if (out.writesDepth) hlsl += " float depth : SV_Depth;";
         else if (cutDepth) hlsl += " float depth : SV_DepthLessEqual;";
+        if (alphaTest) hlsl += " uint coverage : SV_Coverage;";
         hlsl += " };\n";
+        hlsl += "float4 hdrClamp(float4 v) { return float4(min(max(v.rgb, 0.0), 65000.0), saturate(v.a)); }\n";
         hlsl += "Output main(Input input) {\n";
         hlsl += "    float4 r[32];\n";
         for (uint32_t i = 0; i < 32; i++)
@@ -1187,7 +1196,9 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
         hlsl += " };\n";
         hlsl += "Output main(uint vertexId : SV_VertexID) {\n";
         hlsl += "    float4 r[32];\n";
-        hlsl += "    r[0] = float4((float)vertexId, 0.0, 0.0, 0.0);\n";
+        // The index offset (VGT_INDX_OFFSET) added here (render_commands.cpp,
+        // coverage.z), the draw's base vertex left at nought.
+        hlsl += "    r[0] = float4((float)((int)vertexId + asint(coverage.z)), 0.0, 0.0, 0.0);\n";
         for (uint32_t i = 1; i < 32; i++) hlsl += Format("    r[%u] = float4(0.0, 0.0, 0.0, 0.0);\n", i);
         hlsl += "    float4 oPos = float4(0.0, 0.0, 0.0, 1.0), oPointSize = oPos, oUnused = oPos;\n";
         for (uint32_t i = 0; i < 16; i++) hlsl += Format("    float4 o%u = float4(0.0, 0.0, 0.0, 0.0);\n", i);
@@ -1206,10 +1217,26 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
         hlsl += "    Output output;\n";
         // The alpha test, from the draw's constants: never, less, equal,
         // less or equal, greater, not equal, greater or equal, always.
-        hlsl += "    { uint fn = flags.y; float ref = asfloat(flags.z); float a = oC0.w; bool passes = true;\n"
+        // With MSAA, an alpha tested edge (the foliage, the fences: alpha
+        // greater than the reference) is spread over the pixel's samples by
+        // how far past the reference its alpha is, over the alpha's change
+        // across one pixel: alpha to coverage, sharpened, so the cut-outs
+        // are antialiased like geometry rather than one sample's yes or no.
+        // The colour and its alpha are left as the title computed them.
+        if (alphaTest)
+        hlsl += "    uint coverageMask = 0xFFFFFFFFu;\n"
+                "    { uint fn = flags.y; float ref = asfloat(flags.z); float a = oC0.w; bool passes = true;\n"
+                "      float across = max(fwidth(a), 1.0 / 255.0);\n"
                 "      if (fn == 0) passes = false; else if (fn == 1) passes = a < ref; else if (fn == 2) passes = a == ref;\n"
                 "      else if (fn == 3) passes = a <= ref; else if (fn == 4) passes = a > ref; else if (fn == 5) passes = a != ref;\n"
                 "      else if (fn == 6) passes = a >= ref;\n"
+                "      if (coverage.x > 1u && (fn == 4u || fn == 6u)) {\n"
+                "          float covered = saturate((a - ref) / across + 0.5);\n"
+                "          uint samples = min(coverage.x, 16u);\n"
+                "          uint count = (uint)round(covered * samples);\n"
+                "          passes = count > 0u;\n"
+                "          coverageMask = count >= 32u ? 0xFFFFFFFFu : ((1u << count) - 1u);\n"
+                "      }\n"
                 "      if (!passes) discard; }\n";
         // COD3_D3DSHOW=oN: every pixel program puts out its Nth interpolator
         // instead of its colour, for seeing what the vertex program handed
@@ -1235,7 +1262,18 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
         // out as magenta, for finding where one comes from.
         static const bool nanShow = getenv("COD3_NANSHOW") != nullptr;
         if (nanShow) hlsl += "    if (any(isnan(oC0)) || any(isinf(oC0))) oC0 = float4(1.0, 0.0, 1.0, 1.0);\n";
-        hlsl += "    output.c0 = oC0; output.c1 = oC1; output.c2 = oC2; output.c3 = oC3;\n";
+        // The HDR mode's float targets (render_resources.cpp) keep what an 8
+        // bit one would have clipped. Past one is the point; below nought,
+        // a not-a-number or past the half float's range is not, and the
+        // alpha stays the 8 bit target's, from nought to one, for the
+        // blending that reads it back. The draw says which targets
+        // (coverage.y, a bit a slot); nothing changes without the mode.
+        // coverage.w: the HDR mode's HUD scale for the first target, a float
+        // (nought for none: render_commands.cpp, after the scene pass).
+        hlsl += "    float hudScale = coverage.w != 0u ? asfloat(coverage.w) : 1.0;\n";
+        hlsl += "    output.c0 = (coverage.y & 1u) != 0u ? hdrClamp(float4(oC0.rgb * hudScale, oC0.a)) : oC0; output.c1 = (coverage.y & 2u) != 0u ? hdrClamp(oC1) : oC1;\n"
+                "    output.c2 = (coverage.y & 4u) != 0u ? hdrClamp(oC2) : oC2; output.c3 = (coverage.y & 8u) != 0u ? hdrClamp(oC3) : oC3;\n";
+        if (alphaTest) hlsl += "    output.coverage = coverageMask;\n";
         if (out.writesDepth) hlsl += "    output.depth = oDepth4.x;\n";
         else if (depth24) hlsl += "    output.depth = Depth20e4(input.position.z);\n";
         hlsl += "    return output;\n}\n";

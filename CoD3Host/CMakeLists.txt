@@ -90,6 +90,13 @@ set(COD3_HOST_SOURCES
     "native_options.cpp")
 add_executable(CoD3 WIN32 ${COD3_HOST_SOURCES} "resources/CoD3.rc")
 
+# The HDR mode's shaders (hdr/cod3_hdr.hlsl on RenoDX's shader library and
+# the Prism tone mapper, thirdparty/renodx and thirdparty/prism, both MIT),
+# built into the executable: hdr/embed_shaders.cmake.
+set(COD3_HDR_EMBED_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/hdr_shader_files.cpp")
+include("${CMAKE_CURRENT_SOURCE_DIR}/hdr/embed_shaders.cmake")
+target_sources(CoD3 PRIVATE "${COD3_HDR_EMBED_OUTPUT}")
+
 # A console application: setup is interactive and the import trap has to be
 # readable. WIN32 above is overridden here deliberately.
 set_target_properties(CoD3 PROPERTIES WIN32_EXECUTABLE OFF)
@@ -129,6 +136,18 @@ find_path(COD3_FFMPEG_INCLUDE libavcodec/avcodec.h
     PATHS "$ENV{FFMPEG_DIR}/include" "C:/ffmpeg/include" "${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/ffmpeg/include")
 if (COD3_FFMPEG_INCLUDE)
     message(STATUS "CoD3: XMA decoding through FFmpeg, headers at ${COD3_FFMPEG_INCLUDE}")
+    # The DLLs are loaded by the major version the headers name
+    # (avcodec-NN.dll, xma.cpp), and a release ships FFmpeg 8.0's: avcodec-62
+    # and avutil-60. Headers of another FFmpeg (a nightly build is 63 and 61)
+    # build fine and then find no DLL at all, and every XMA sound is silent.
+    file(STRINGS "${COD3_FFMPEG_INCLUDE}/libavcodec/version_major.h" COD3_AVCODEC_MAJOR_LINE REGEX "^#define LIBAVCODEC_VERSION_MAJOR")
+    string(REGEX MATCH "[0-9]+" COD3_AVCODEC_MAJOR "${COD3_AVCODEC_MAJOR_LINE}")
+    if (NOT COD3_AVCODEC_MAJOR STREQUAL "62")
+        message(WARNING "CoD3: the FFmpeg headers at ${COD3_FFMPEG_INCLUDE} are avcodec ${COD3_AVCODEC_MAJOR}, "
+                        "so the game will look for avcodec-${COD3_AVCODEC_MAJOR}.dll. The port ships FFmpeg 8.0 "
+                        "(avcodec-62.dll): use FFmpeg 8.0's headers, or put that version's DLLs beside CoD3.exe, "
+                        "or the in-game sound will be silent.")
+    endif()
     target_include_directories(CoD3 PRIVATE "${COD3_FFMPEG_INCLUDE}")
     target_compile_definitions(CoD3 PRIVATE COD3_HAVE_FFMPEG_HEADERS=1)
 else()
@@ -205,7 +224,7 @@ if (TARGET CoD3RecompLibMP)
         endif()
     endforeach()
 
-    add_executable(CoD3MP WIN32 ${mpSources} "resources/CoD3.rc")
+    add_executable(CoD3MP WIN32 ${mpSources} "resources/CoD3.rc" "${COD3_HDR_EMBED_OUTPUT}")
     set_target_properties(CoD3MP PROPERTIES WIN32_EXECUTABLE OFF)
     target_link_libraries(CoD3MP PRIVATE
         CoD3RecompLibMP XenonUtils ole32 winmm dbghelp d3d11 dxgi d3dcompiler windowscodecs shell32 ws2_32 iphlpapi)

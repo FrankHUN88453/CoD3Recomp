@@ -243,8 +243,54 @@ first of a depth target, as the console's own resolve did, so the shadow
 maps and the post processing's copies see a single sampled surface; and
 FXAA 3.11 (quality path) over the frame at the present, alone or over
 MSAA 4x. Colour stays as the title computes it, its gamma in its own
-programs, with no sRGB or HDR path added: an SDR picture identical to the
-console's.
+programs: in SDR, a picture identical to the console's.
+
+### The HDR mode
+
+F11's HDR tab turns on an HDR picture built on
+[RenoDX](https://github.com/clshortfuse/renodx) (MIT, Carlos Lopez Jr. and
+contributors; its shader library is `thirdparty/renodx/hlsl`, embedded in
+the executable by `CoD3Host/hdr/embed_shaders.cmake`). The game has no tone
+mapper of its own: it draws an SDR picture, encoded for a display, into 8
+bit targets that clip at one. In the HDR mode:
+
+- the title's 8 bit colour targets (EDRAM formats 0 and 1) are made
+  `R16G16B16A16_FLOAT` (`render_resources.cpp`), and its resolves with them;
+  the EDRAM rows a pitch holds stay the console's. A pixel program writing
+  one of them clamps what it writes to nought upward, finite, with the
+  alpha from nought to one (`xenos_hlsl.cpp`'s `hdrClamp`, by
+  `DrawConstants.coverage.y`, a bit a target);
+- right before the bloom's composite (pixel program `fe6578445de135ea`, an
+  additive full screen draw, found with the RenoDX devkit: the last draw
+  before the HUD's), the frame is tone mapped where it lies
+  (`HdrScenePass`): a copy of the target (resolved, with MSAA) through
+  `hdr/cod3_hdr.hlsl`'s scene pass, the title's TV gamma ramp first (held
+  to Game brightness: raised by the power that keeps 18% grey at 18%, so
+  white and mid grey stay where the paper white puts them and only the
+  table's deeper shadows are kept; the slider sets how much), then
+  RenoDX's `ToneMapPass` (Vanilla, None, ACES, RenoDRT), PsychoV 17, 22 or
+  30, or Prism (`thirdparty/prism`), and RenoDX's `RenderIntermediatePass`,
+  which leaves the UI's white at one so the HUD blends over it as before;
+- the composite then adds the bloom over the tone mapped picture with the
+  bloom program in the game's program's place, as the author's RenoDX World
+  at War mod adds its bloom after the tone map: halos as the game's, and
+  where they add up past white they carry on into the highlights instead of
+  clipping. The glow is scaled by the game's white over the UI's (the
+  intermediate's one is the UI's), so it stands to the picture as in SDR,
+  and rolled off past that white towards twice it;
+- the present is RenoDX's `SwapChainPass` into an scRGB swap chain
+  (`R16G16B16A16_FLOAT`, `DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709`). A
+  frame the scene pass did not run on (the menus, a loading screen, a film)
+  is shown as UI, or as a film at the game's brightness, optionally through
+  RenoDX's video upscale;
+- Dear ImGui draws into a layer of its own, laid over at the UI's
+  brightness; F12's screenshot is made 8 bit with the game's white at the
+  top.
+
+The programs compile on a thread of their own the first time each is
+needed (two to five tenths of a second each). The bloom slider scales the
+composite's blend factor, in SDR too. `COD3_HDRSCENEPS=hash` names another
+pixel program for the scene pass's place.
 
 ## Settings and knobs
 

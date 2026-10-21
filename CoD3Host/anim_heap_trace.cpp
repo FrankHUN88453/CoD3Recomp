@@ -109,7 +109,7 @@ PPC_FUNC(sub_82522CB8)
         static int told = 0;
         std::lock_guard<std::mutex> hold(s_lock);
         s_refusals++;
-        if (told++ < 50)
+        if ((told < 50 && told++ < 50))
         {
             printf("animheap: REFUSED %u bytes from %08X, %u of %u bytes in use, %zu blocks live\n",
                 size, caller, used, Limit, s_live.size());
@@ -143,7 +143,7 @@ PPC_FUNC(sub_82522CB0)
         if (s_live.erase(block) == 0)
         {
             static int told = 0;
-            if (told++ < 20) { printf("animheap: free of %08X, not a live block, from %08X\n", block, uint32_t(ctx.lr)); fflush(stdout); }
+            if ((told < 20 && told++ < 20)) { printf("animheap: free of %08X, not a live block, from %08X\n", block, uint32_t(ctx.lr)); fflush(stdout); }
         }
     }
     __imp__sub_82522CB0(ctx, base);
@@ -184,7 +184,7 @@ PPC_FUNC(sub_82173AD8)
     const uint32_t caller = uint32_t(ctx.lr);
     __imp__sub_82173AD8(ctx, base);
     static std::atomic<int> told{ 0 };
-    if (Wanted() && file != 0 && (mode != 0 || int32_t(users) <= 1) && told.fetch_add(1) < 400)
+    if (Wanted() && file != 0 && (mode != 0 || int32_t(users) <= 1) && (told.load(std::memory_order_relaxed) < 400 && told.fetch_add(1) < 400))
     {
         printf("animcache: file %08X let go (mode %u, %d users before, flags %08X -> %08X) from %08X\n",
             file, mode, int32_t(users), flags, Guest::Read32(base, file + 4), caller);
@@ -377,7 +377,7 @@ PPC_FUNC(sub_824FE120)
     if (index > count)
     {
         static std::atomic<int> told{ 0 };
-        if (told.fetch_add(1) < 60)
+        if ((told.load(std::memory_order_relaxed) < 60 && told.fetch_add(1) < 60))
         {
             const uint32_t name = Guest::Read32(base, list);
             const bool named = name >= 0x10000 && name < 0xC0000000u && base[name] >= 32 && base[name] < 127;
@@ -413,7 +413,7 @@ PPC_FUNC(sub_82462648)
     __imp__sub_82462648(ctx, base);
     const uint32_t after = Guest::Read32(base, zone + 200);
     static std::atomic<int> told{ 0 };
-    if (Wanted() && before != after && told.fetch_add(1) < 200)
+    if (Wanted() && before != after && (told.load(std::memory_order_relaxed) < 200 && told.fetch_add(1) < 200))
     {
         printf("zones: zone %08X unload step, state %u -> %u\n", zone, before, after);
         fflush(stdout);
@@ -449,7 +449,7 @@ PPC_FUNC(sub_824FAF40)
     const uint32_t generation = Guest::Read32(base, GenerationAddress);
     if (Wanted() && kept != 0 && SafeRead32(base, kept) != AnimClassTable)
     {
-        if (s_stale.fetch_add(1) < 40)
+        if ((s_stale.load(std::memory_order_relaxed) < 40 && s_stale.fetch_add(1) < 40))
         {
             printf("animtree: entry %08X \"%s\" keeps class %08X whose table is %08X, not an animation class\n",
                 entry, EntryName(base, Guest::Read32(base, entry)).c_str(), kept, SafeRead32(base, kept));
@@ -460,7 +460,7 @@ PPC_FUNC(sub_824FAF40)
     if (!Wanted() || kept != 0 || tried == generation) return;
     const uint32_t found = Guest::Read32(base, entry + 8);
     if (found != 0) { s_resolved++; return; }
-    if (s_unresolved.fetch_add(1) < 60)
+    if ((s_unresolved.load(std::memory_order_relaxed) < 60 && s_unresolved.fetch_add(1) < 60))
     {
         printf("animtree: entry %08X \"%s\" finds no animation class (generation %u)\n",
             entry, EntryName(base, Guest::Read32(base, entry)).c_str(), generation);
@@ -479,7 +479,7 @@ extern "C" PPC_FUNC(__imp__sub_8245A750);
 PPC_FUNC(sub_8245A750)
 {
     static std::atomic<int> told{ 0 };
-    if (Wanted() && told.fetch_add(1) < 20) { printf("animtree: generation moves on (%u) with a directory change from %08X\n", Guest::Read32(base, GenerationAddress) + 1, uint32_t(ctx.lr)); fflush(stdout); }
+    if (Wanted() && (told.load(std::memory_order_relaxed) < 20 && told.fetch_add(1) < 20)) { printf("animtree: generation moves on (%u) with a directory change from %08X\n", Guest::Read32(base, GenerationAddress) + 1, uint32_t(ctx.lr)); fflush(stdout); }
     __imp__sub_8245A750(ctx, base);
 }
 
@@ -665,7 +665,7 @@ namespace
 
     void InfoReport(uint8_t* base, const PPCContext& ctx, const char* what, uint32_t record, uint32_t tree)
     {
-        if (s_infoTold.fetch_add(1) >= 60) return;
+        if ((s_infoTold.load(std::memory_order_relaxed) >= 60 || s_infoTold.fetch_add(1) >= 60)) return;
         const uint32_t back = Guest::Read32(base, ctx.r1.u32);
         printf("animinfo: %s record %u (tree %08X), os thread %lu, from %08X %08X %08X\n", what, record, tree,
             GetCurrentThreadId(), uint32_t(ctx.lr), Guest::Read32(base, back - 8),

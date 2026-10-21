@@ -234,7 +234,7 @@ namespace Xma
         if (sent < 0)
         {
             static int announced = 0;
-            if (announced++ < 6)
+            if ((announced < 6 && announced++ < 6))
             {
                 printf("xma: the decoder refused a packet (%d); its first words %02X%02X%02X%02X %02X%02X%02X%02X\n", sent,
                     packet[0], packet[1], packet[2], packet[3], packet[4], packet[5], packet[6], packet[7]);

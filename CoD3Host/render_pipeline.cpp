@@ -206,6 +206,22 @@ namespace
             desc.DepthBias -= 16;
             desc.SlopeScaledDepthBias -= 2.0f;
         }
+        // Forward (a layer over a surface: the decals, bullet holes, blood,
+        // scorch marks): nearer (towards one, this title's near) by four of
+        // the console's 24 bit depth steps (32 of the float's) at the
+        // triangle's nearest and by a pixel of its slope. The layer and its
+        // surface come from different vertex programs, the layer's triangles
+        // cut from the surface's by the CPU, so the host's sums can leave the
+        // two a few bits apart either way, and the greater or equal test
+        // then lets the layer through only where its bits came out ahead:
+        // decals flickering in patches as the view moves. The depth cut to
+        // the console's precision (xenos_hlsl.cpp) rounds both down, which
+        // this survives: it is more than a step of it.
+        if (key & 64)
+        {
+            desc.DepthBias += 32;
+            desc.SlopeScaledDepthBias += 1.0f;
+        }
         ComPtr<ID3D11RasterizerState> state;
         g_device->CreateRasterizerState(&desc, &state);
         return state;
@@ -233,6 +249,7 @@ namespace
         const uint32_t mag = (key >> 9) & 3, min = (key >> 11) & 3, mip = (key >> 13) & 3;
         const uint32_t aniso = (key >> 15) & 7;
         const uint32_t border = (key >> 18) & 3;
+        const bool forcedPoint = ((key >> 20) & 1) != 0;
 
         D3D11_SAMPLER_DESC desc{};
         bool linearMag = mag == 1, linearMin = min == 1, linearMip = mip == 1;
@@ -240,7 +257,8 @@ namespace
         // "base map") keeps that: its levels are not there to be used.
         const bool noMips = mip == 2;
         uint32_t anisotropy = (aniso >= 1 && aniso <= 4) ? (1u << aniso) : 1;
-        switch (g_filter)
+        if (forcedPoint) { linearMag = linearMin = linearMip = false; anisotropy = 1; }
+        else switch (g_filter)
         {
         case RenderPipeline::Filter::Native: break;
         case RenderPipeline::Filter::Bilinear: linearMag = linearMin = true; anisotropy = 1; break;
@@ -316,7 +334,7 @@ RenderState::Handle RenderPipeline::Depth(uint32_t depthControl, uint32_t stenci
     return g_depth.Insert(key, MakeDepth(depthControl, stencilRefMask));
 }
 
-RenderState::Handle RenderPipeline::Rasterizer(uint32_t suScModeControl, bool scissor, bool cullNone, const float polyOffset[4], bool behind)
+RenderState::Handle RenderPipeline::Rasterizer(uint32_t suScModeControl, bool scissor, bool cullNone, const float polyOffset[4], bool behind, bool forward)
 {
     float scale = 0.0f, offset = 0.0f;
     static const bool noOffset = getenv("COD3_NOPOLYOFFSET") != nullptr;   // for a comparison
@@ -325,11 +343,11 @@ RenderState::Handle RenderPipeline::Rasterizer(uint32_t suScModeControl, bool sc
     uint32_t scaleBits, offsetBits;
     memcpy(&scaleBits, &scale, 4);
     memcpy(&offsetBits, &offset, 4);
-    const uint32_t key[3] = { (suScModeControl & 7) | (scissor ? 8u : 0u) | (cullNone ? 16u : 0u) | (behind ? 32u : 0u), scaleBits, offsetBits };
+    const uint32_t key[3] = { (suScModeControl & 7) | (scissor ? 8u : 0u) | (cullNone ? 16u : 0u) | (behind ? 32u : 0u) | (forward ? 64u : 0u), scaleBits, offsetBits };
     if (const uint32_t handle = g_rasterizer.Find(key)) return handle;
     // Each new offset once, to see what the title asks for.
     static int announced = 0;
-    if ((scale != 0.0f || offset != 0.0f) && announced++ < 12)
+    if ((scale != 0.0f || offset != 0.0f) && (announced < 12 && announced++ < 12))
     {
         printf("render: polygon offset scale %g offset %g (mode control %08X)\n", scale, offset, suScModeControl);
         fflush(stdout);
@@ -347,6 +365,15 @@ RenderState::Handle RenderPipeline::Sampler(const uint32_t fetch[6])
     if (min == 3) min = 1;
     if (mip == 3) mip = 1;
     const uint32_t key[2] = { clampX | (clampY << 3) | (clampZ << 6) | (mag << 9) | (min << 11) | (mip << 13) | (aniso << 15) | (border << 18), 0 };
+    if (const uint32_t handle = g_sampler.Find(key)) return handle;
+    return g_sampler.Insert(key, MakeSampler(key[0]));
+}
+
+RenderState::Handle RenderPipeline::SamplerPoint(const uint32_t fetch[6])
+{
+    const uint32_t clampX = (fetch[0] >> 10) & 7, clampY = (fetch[0] >> 13) & 7, clampZ = (fetch[0] >> 16) & 7;
+    const uint32_t border = fetch[5] & 3;
+    const uint32_t key[2] = { clampX | (clampY << 3) | (clampZ << 6) | (2u << 13) | (border << 18) | (1u << 20), 0 };
     if (const uint32_t handle = g_sampler.Find(key)) return handle;
     return g_sampler.Insert(key, MakeSampler(key[0]));
 }

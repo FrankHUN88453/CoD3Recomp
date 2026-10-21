@@ -45,9 +45,14 @@ namespace RenderPipeline
     // both faces): its scale in sixteenths of a unit of slope, its offset
     // in units of the smallest depth step. `behind` puts the draw's depth
     // a little farther off than it is (the Z pass's, render_commands.cpp).
-    Handle Rasterizer(uint32_t suScModeControl, bool scissor, bool cullNone, const float polyOffset[4], bool behind = false);
+    // behind: the Z pass, a little farther off; forward: a layer laid
+    // over a surface (a decal), a little nearer (render_commands.cpp).
+    Handle Rasterizer(uint32_t suScModeControl, bool scissor, bool cullNone, const float polyOffset[4], bool behind = false, bool forward = false);
     // Sampler from the fetch constant's clamp, filter and anisotropy fields.
     Handle Sampler(const uint32_t fetch[6]);
+    // The same, but point sampled whatever the filtering setting says: for
+    // the shadow maps, whose four taps the title filters itself.
+    Handle SamplerPoint(const uint32_t fetch[6]);
 
     ID3D11BlendState* BlendObject(Handle handle);
 

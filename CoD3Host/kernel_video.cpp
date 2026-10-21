@@ -158,7 +158,7 @@ namespace
         // multiplayer title arms its own on every frame, and a line each
         // was hundreds of writes a second on the thread that delivers them.
         static std::atomic<int> unusual{ 0 };
-        if (raised < 40 || (level && (usual ? inLevel.fetch_add(1) < 40 : unusual.fetch_add(1) < 200)))
+        if (raised < 40 || (level && (usual ? (inLevel.load(std::memory_order_relaxed) < 40 && inLevel.fetch_add(1) < 40) : (unusual.load(std::memory_order_relaxed) < 200 && unusual.fetch_add(1) < 200))))
         {
             printf("gpu: interrupt %llu on cpu %u, pending mask 0x%02X, callback "
                    "0x%08X%s\n", (unsigned long long)raised, cpu, pending, armed,
@@ -588,7 +588,7 @@ namespace
 
                     static std::atomic<int> announced{ 0 };
                     if (block != 0 && (flagBefore != 0 || countdownBefore != 0) &&
-                        announced.fetch_add(1) < 24)
+                        (announced.load(std::memory_order_relaxed) < 24 && announced.fetch_add(1) < 24))
                     {
                         printf("vblank: countdown %u -> %u, swap flag %u -> %u, status 0x%08X\n",
                             countdownBefore, Guest::Read32(Guest::Base, context + 15132),
@@ -1661,10 +1661,8 @@ PPC_FUNC(__imp__VdSwap)
             {
                 Scheduler::Release();
                 struct Resume { ~Resume() { Scheduler::Acquire(); } } resume;
-                const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
-                while (Kernel::Stats().swapsReached.load(std::memory_order_acquire) < needed &&
-                       std::chrono::steady_clock::now() < deadline)
-                    std::this_thread::sleep_for(std::chrono::microseconds(200));
+                // Woken by the swap itself (gpu.cpp), up to half a second.
+                Gpu::WaitForSwapsReached(needed, std::chrono::milliseconds(500));
             }
         }
     }
@@ -1749,6 +1747,15 @@ uint32_t Gpu::InterruptContext()
 }
 
 bool Kernel::FrameRateUnlocked() { return g_frameRateUnlocked.load(std::memory_order_relaxed); }
+
+bool Kernel::FilmPlaying()
+{
+#ifdef COD3_MP
+    return false;   // multiplayer has no films
+#else
+    return Guest::Read32(Guest::Base, 0x82A2A24Cu) != 0;   // the film player (TitlePlaying above)
+#endif
+}
 
 void Kernel::QueueConsoleCommand(const std::string& text)
 {

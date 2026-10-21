@@ -45,6 +45,18 @@ You need your **own** Xbox 360 disc image of Call of Duty 3. No game files are i
 **Menus and textures**
 - Texture replacement packs; the menu art, banners, fonts, controller diagrams and HUD icons upscaled 4x
 
+**HDR mode, on RenoDX**
+- F11 → **HDR**: an scRGB HDR picture. The game's 8 bit colour targets become 16 bit float, so fire,
+  sky and muzzle flashes keep their highlights. The frame is tone mapped right after the bloom and
+  before the HUD, which keeps its own brightness.
+- Tone mappers: Vanilla, None, ACES, RenoDRT, PsychoV 17 / 22 / 30 and Prism; peak, game and UI
+  brightness, gamma correction, the console's TV gamma ramp, film upgrade and bloom strength
+- F11 → **RenoDX**: RenoDX's sliders (exposure, highlights, shadows, contrast, saturation, highlight
+  saturation, blowout, flare, hue correction, cone response), applied as they move
+- Built on **[RenoDX](https://github.com/clshortfuse/renodx)** by Carlos Lopez Jr. and its contributors
+  (MIT; `thirdparty/renodx`), with the **Prism** tone mapper by Musa Haji and OopyDoopy / KickFister / Jon
+  (MIT; `thirdparty/prism`)
+
 ## Recent work (0.5.87 – 0.5.183)
 
 - Kangaroo entry/exit improvements, native controller sensitivity up to 200%,
@@ -266,6 +278,9 @@ executable starts again with the title's launch data (`COD3_LAUNCHDATA`).
 | `tools/PpcAsm/` | A PowerPC assembler, built from the project's own opcode tables |
 | `CoD3Host/gpu.cpp` | The GPU register aperture and the PM4 command processor |
 | `thirdparty/imgui/` | Dear ImGui, for the menu |
+| `CoD3Host/hdr/cod3_hdr.hlsl` | The HDR mode's passes (the scene's tone map, the scRGB output, the menu's layer), on RenoDX |
+| `thirdparty/renodx/` | [RenoDX](https://github.com/clshortfuse/renodx)'s shader library (MIT), for the HDR mode |
+| `thirdparty/prism/` | The Prism tone mapper (MIT), for the HDR mode |
 | `CoD3Host/sampler.cpp` | Names the guest function each thread is in, without debug symbols |
 | `CoD3RecompLib/include/cod3_mmio.h` | Routes guest register access to the GPU instead of RAM |
 | `docs/kernel-imports.txt` | The 179 imports a runtime has to provide |

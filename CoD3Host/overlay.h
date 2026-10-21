@@ -16,8 +16,16 @@ namespace Overlay
     void Initialize(void* hwnd, ID3D11Device* device, ID3D11DeviceContext* context);
 
     // Before the window's Present: the menu and the counter into the back
-    // buffer, and the screenshot of it when one was asked for.
-    void Render(ID3D11RenderTargetView* back, ID3D11Texture2D* backTexture, int width, int height);
+    // buffer, and the screenshot of it when one was asked for (with a
+    // backTexture). True when anything was drawn. The HDR mode draws into a
+    // layer of its own (render_d3d11.cpp) and takes the screenshot itself.
+    bool Render(ID3D11RenderTargetView* back, ID3D11Texture2D* backTexture, int width, int height);
+
+    // The HDR mode's screenshot: whether F12 asked for one (the ask is
+    // taken), and a PNG of the scRGB back buffer, scRgbWhite (the game's
+    // white over 80 nits) at the top.
+    bool TakeScreenshotRequest();
+    void SaveScreenshot(ID3D11Texture2D* back, int width, int height, float scRgbWhite);
 
     // The window procedure hands every message here first; true when it
     // was the menu's.

@@ -1,8 +1,11 @@
 #include "render_resources.h"
+#include "parallel.h"
 #include "render_table.h"
 #include "render_stats.h"
 #include "kernel.h"
 #include "write_watch.h"
+#include "tuning.h"
+#include "verify.h"
 #include "texture_pack.h"
 
 #include <algorithm>
@@ -13,7 +16,10 @@
 #include <cstring>
 #include <deque>
 #include <chrono>
+#include <condition_variable>
 #include <map>
+#include <mutex>
+#include <thread>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -45,8 +51,10 @@ namespace
 
     float g_scale = 1.0f;
     float g_requestedScale = 1.0f;
+    double g_effectsScale = 1.0, g_requestedEffectsScale = 1.0;   // the 560 pitch surfaces' scale over the frame's (PitchScale)
     uint32_t g_samples = 1;
     uint32_t g_requestedSamples = 1;
+    bool g_hdrTargets = false, g_requestedHdrTargets = false;   // the HDR mode's 16 bit float targets
     uint32_t g_mipSkip = 0, g_requestedMipSkip = 0;   // the texture quality: top levels left out
 
     // The count the device can do, at or under the one asked for.
@@ -55,7 +63,9 @@ namespace
         for (uint32_t samples = wanted; samples > 1; samples /= 2)
         {
             UINT colour = 0, depth = 0;
+            UINT half = 0;
             if (SUCCEEDED(g_device->CheckMultisampleQualityLevels(DXGI_FORMAT_R8G8B8A8_UNORM, samples, &colour)) && colour > 0 &&
+                SUCCEEDED(g_device->CheckMultisampleQualityLevels(DXGI_FORMAT_R16G16B16A16_FLOAT, samples, &half)) && half > 0 &&
                 SUCCEEDED(g_device->CheckMultisampleQualityLevels(DXGI_FORMAT_D32_FLOAT_S8X24_UINT, samples, &depth)) && depth > 0)
                 return samples;
         }
@@ -145,8 +155,11 @@ namespace
         RenderStats::Frame().fingerprintBytes += dense ? bytes : std::min<size_t>(bytes, 65 * 64);
         constexpr uint64_t K = 1099511628211ull;
         uint64_t hash = 1469598103934665603ull ^ bytes;
-        if (dense)
+        if (dense && !Tuning::On(Tuning::strongChangeCheck))
         {
+            // The four lane fingerprint of 0.5.13 and before, for comparing
+            // (F11, Graphics, Optimizations): a change of only the top bit
+            // of two words in a lane cancels in it.
             uint64_t b = 0x9E3779B97F4A7C15ull, c = 0xBF58476D1CE4E5B9ull, d = 0x94D049BB133111EBull;
             size_t at = 0;
             for (; at + 32 <= bytes; at += 32)
@@ -168,6 +181,41 @@ namespace
                 hash = (hash ^ word) * K;
             }
             return ((hash ^ b) * K) ^ ((c ^ d) * K);
+        }
+        if (dense)
+        {
+            // Eight lanes, each a multiply and a turn of the word: the turn
+            // brings a word's top bits down into the next step's low ones.
+            // Without it a lane's top bit never reached any other, and two
+            // changes of it cancelled: a vertex buffer whose only change was
+            // the sign of the same coordinate in two vertices a stride apart
+            // (a model mirrored, a normal turned over) looked the same and
+            // kept the old vertices. Eight lanes rather than four keep the
+            // multiplier busy through the turn's extra step: as fast as before.
+            auto turn = [](uint64_t x) { return (x << 31) | (x >> 33); };
+            uint64_t b = 0x9E3779B97F4A7C15ull, c = 0xBF58476D1CE4E5B9ull, d = 0x94D049BB133111EBull;
+            uint64_t e = 0xD6E8FEB86659FD93ull, f = 0xA0761D6478BD642Full, g = 0xE7037ED1A0B428DBull, h = 0x8EBC6AF09C88C6E3ull;
+            size_t at = 0;
+            for (; at + 64 <= bytes; at += 64)
+            {
+                uint64_t w[8];
+                memcpy(w, data + at, 64);
+                hash = turn((hash ^ w[0]) * K); b = turn((b ^ w[1]) * K); c = turn((c ^ w[2]) * K); d = turn((d ^ w[3]) * K);
+                e = turn((e ^ w[4]) * K); f = turn((f ^ w[5]) * K); g = turn((g ^ w[6]) * K); h = turn((h ^ w[7]) * K);
+            }
+            for (; at + 8 <= bytes; at += 8)
+            {
+                uint64_t word;
+                memcpy(&word, data + at, 8);
+                hash = turn((hash ^ word) * K);
+            }
+            if (at < bytes)
+            {
+                uint64_t word = 0;
+                memcpy(&word, data + at, bytes - at);
+                hash = turn((hash ^ word) * K);
+            }
+            return ((hash ^ b) * K) ^ ((c ^ d) * K) ^ turn(((e ^ f) * K) ^ ((g ^ h) * K));
         }
         const size_t step = std::max<size_t>(bytes / 64, 64);
         for (size_t at = 0; at + 8 <= bytes; at += step)
@@ -199,7 +247,10 @@ namespace
         bytesPerSample = 4;
         switch (format)
         {
-        case 0: case 1: return DXGI_FORMAT_R8G8B8A8_UNORM;
+        // The HDR mode's upgrade: the same guest format and the same EDRAM
+        // bytes (the rows a pitch holds stay the console's), a float target
+        // on the host so the drawing is not clipped at one.
+        case 0: case 1: return g_hdrTargets ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
         case 2: case 10: return DXGI_FORMAT_R10G10B10A2_UNORM;
         case 3: case 12: bytesPerSample = 8; return DXGI_FORMAT_R16G16B16A16_FLOAT;
         case 4: return DXGI_FORMAT_R16G16_UNORM;
@@ -226,15 +277,51 @@ namespace
         return all || pitch >= 640 ? g_samples : 1;
     }
 
+    // The surfaces of a 560 pitch are the title's half size ones: the
+    // smoke and the soft particles (520 by 312) with the half size depth
+    // they test against, and the shadow cascades (512 by 512). Drawn at
+    // half the frame's size, the smoke was put back over the frame from a
+    // picture of half its pixels, and whatever stood in front of it had a
+    // stepped rim of the smoke's coarser pixels. Here they are drawn twice
+    // as large again: the smoke at the frame's own resolution, the shadow
+    // cascades twice as sharp. COD3_HALFSIZE=1 keeps them at half size.
+    // F11's "Full resolution smoke and shadows"; COD3_HALFSIZE=1 forces half.
+    double PitchScale(uint32_t pitch)
+    {
+        static const bool halfSize = getenv("COD3_HALFSIZE") != nullptr;
+        return (!halfSize && pitch == 560) ? g_effectsScale : 1.0;
+    }
+
     void HostSize(uint32_t pitch, uint32_t rows, uint32_t& width, uint32_t& height)
     {
-        width = std::max(1u, uint32_t(std::lround(double(pitch) * g_scale)));
-        height = std::max(1u, uint32_t(std::lround(double(rows) * g_scale)));
+        const double scale = double(g_scale) * PitchScale(pitch);
+        width = std::max(1u, uint32_t(std::lround(double(pitch) * scale)));
+        height = std::max(1u, uint32_t(std::lround(double(rows) * scale)));
     }
 
     // --- resolved surfaces -----------------------------------------------------------------------
 
-    struct ResolvedEntry { Resolved surface; ComPtr<ID3D11Texture2D> texture; ComPtr<ID3D11ShaderResourceView> resource; ComPtr<ID3D11RenderTargetView> view; uint32_t physical = 0; };
+    // `crop`: the top left corner of the surface, for a fetch that samples
+    // less than the resolve wrote. The resolve rounds its rectangle up (the
+    // aim blur's quarter frame is resolved 264x160 and sampled 260x156), and
+    // the console's fetch reads its own width and height from the corner;
+    // the whole surface here would put the fetch's 0..1 across the padding
+    // as well, the blurred picture stretched off the sharp one and the
+    // padding's black along the edges. Copied again after each resolve.
+    struct ResolvedEntry
+    {
+        Resolved surface; ComPtr<ID3D11Texture2D> texture; ComPtr<ID3D11ShaderResourceView> resource; ComPtr<ID3D11RenderTargetView> view; uint32_t physical = 0;
+        ComPtr<ID3D11Texture2D> crop; ComPtr<ID3D11ShaderResourceView> cropView;
+        uint32_t cropGuestWidth = 0, cropGuestHeight = 0, cropWidth = 0, cropHeight = 0;
+        uint64_t cropSerial = 0;
+        void DropCrop()
+        {
+            if (crop) g_resourceBytes -= uint64_t(cropWidth) * cropHeight * 4;
+            crop.Reset(); cropView.Reset();
+            cropGuestWidth = cropGuestHeight = cropWidth = cropHeight = 0;
+            cropSerial = 0;
+        }
+    };
     std::deque<ResolvedEntry> g_resolved;
     RenderTable::KeyTable<1> g_resolvedKeys;
     uint64_t g_resolveSerial = 0;
@@ -260,13 +347,13 @@ namespace
     // how much, a texture or a buffer.
     void MissAudit(const char* kind, uint32_t physical, const uint8_t* data, size_t bytes, bool dense, uint64_t& auditDense)
     {
-        static const bool audit = getenv("COD3_MISSAUDIT") != nullptr;
-        if (!audit || dense) return;
+        static const bool auditEnv = getenv("COD3_MISSAUDIT") != nullptr;
+        if ((!auditEnv && !Verify::On(Verify::Watched)) || dense) return;
+        Verify::Checked(Verify::Watched);
         const uint64_t whole = Fingerprint(data, bytes, true);
         if (whole == auditDense) return;
-        static std::atomic<int> said{ 0 };
-        if (auditDense != 0 && said.fetch_add(1) < 200)
-            printf("render: missed a change: %s at %08X, %zu bytes\n", kind, physical, bytes);
+        if (auditDense != 0)
+            Verify::Mismatch(Verify::Watched, "%s at %08X (%zu bytes) changed and its sampled look missed it", kind, physical, bytes);
         auditDense = whole;
     }
 
@@ -275,12 +362,16 @@ namespace
     // tell is named.
     void WatchAudit(const char* kind, uint32_t physical, const uint8_t* data, size_t bytes, bool dense, uint64_t fingerprint)
     {
-        static const bool audit = getenv("COD3_WATCHAUDIT") != nullptr;
-        if (!audit) return;
+        static const bool auditEnv = getenv("COD3_WATCHAUDIT") != nullptr;
+        if (!auditEnv && !Verify::On(Verify::Watched)) return;
+        Verify::Checked(Verify::Watched);
         static std::atomic<uint64_t> looks{ 0 }, missed{ 0 };
         const uint64_t look = looks.fetch_add(1) + 1;
-        if (Fingerprint(data, bytes, dense) != fingerprint && missed.fetch_add(1) < 8)
-            printf("render: watch audit: the %s at %08X (%zu bytes) changed with no write seen\n", kind, physical, bytes);
+        if (Fingerprint(data, bytes, dense) != fingerprint)
+        {
+            missed.fetch_add(1);
+            Verify::Mismatch(Verify::Watched, "the %s at %08X (%zu bytes) changed with no write seen by its pages", kind, physical, bytes);
+        }
         if ((look & 0xFFFF) == 0)
         {
             printf("render: watch audit: %llu looks by the pages, %llu missed\n", (unsigned long long)look,
@@ -306,6 +397,7 @@ namespace
         uint32_t key[4] = {};
         uint64_t fingerprint = 0;
         uint64_t auditDense = 0;        // COD3_MISSAUDIT: every byte's fingerprint when the sampling began
+        uint64_t denseFingerprint = 0;  // every byte's fingerprint when the sampling began, for a watched write
         uint64_t checkedFrame = 0;      // the frame the fingerprint was last compared in
         uint64_t usedFrame = 0;
         uint32_t stable = StableLooks;  // checks in a row that found no change; a texture starts as still
@@ -314,8 +406,203 @@ namespace
         uint32_t width = 0, height = 0, levels = 0;
         uint64_t bytes = 0;
         bool live = false;
+        std::vector<uint8_t> sourceMirror;   // verify mode: the memory it was last made from
+        uint32_t mirrorEpoch = 0;
+        uint64_t verifiedFrame = 0;
     };
     std::deque<TextureEntry> g_textures;   // by handle less one; handle 1 is the white texture
+
+    // --- the texture pool ------------------------------------------------------------------
+    //
+    // Making a texture was the frame time's spikes: a hitch line of 0.5.11
+    // took apart the slow frames, and nearly all were frames that met new
+    // textures (the level streaming them in as the player moves), each
+    // CreateTexture2D with its texels about a millisecond on the command
+    // thread at a high frame rate, eight or ten of them in one frame. The
+    // texels' layout was a tenth of that. What costs is the driver finding
+    // and initialising memory for each new texture.
+    //
+    // So textures are kept for reuse rather than made each time, as
+    // UnleashedRecomp keeps its streaming off the drawing thread: a texture
+    // let go (unused for a while, its memory freed by the title, replaced)
+    // goes into a pool by its size, levels and format; a texture changed in
+    // place is written in place; and a worker thread keeps two spare
+    // textures of each shape lately asked for made ahead, the device being
+    // free threaded for making things. Only the texels are then sent, with
+    // UpdateSubresource, on the command thread. A shape never seen before
+    // is still made there, once. COD3_NOTEXPOOL=1: made each time, as before.
+    struct PooledTexture
+    {
+        ComPtr<ID3D11Texture2D> texture;
+        ComPtr<ID3D11ShaderResourceView> view;
+    };
+    struct PoolWant
+    {
+        D3D11_TEXTURE2D_DESC desc{};
+        uint64_t lastUse = 0;
+    };
+    std::mutex g_poolMutex;
+    std::condition_variable g_poolWake;
+    std::unordered_map<uint64_t, std::vector<PooledTexture>> g_pool;
+    std::unordered_map<uint64_t, PoolWant> g_poolWants;   // shapes to keep spares of
+    uint64_t g_poolBytes = 0;
+    bool g_poolAhead = false;                             // the worker runs
+    std::atomic<uint64_t> g_poolHits{ 0 }, g_poolMisses{ 0 }, g_poolInPlace{ 0 }, g_poolMadeAhead{ 0 };
+    constexpr uint64_t PoolBytesLimit = 256ull << 20;     // spares and textures let go, together
+    constexpr size_t PoolSpares = 2;
+    constexpr uint64_t PoolSpareBytesLimit = 24ull << 20; // nothing bigger is made ahead
+    constexpr size_t PoolWantsLimit = 64;
+
+    bool TexturePoolOn()
+    {
+        static const bool off = getenv("COD3_NOTEXPOOL") != nullptr;
+        return !off && Tuning::On(Tuning::texturePool);
+    }
+
+    uint64_t PoolKey(const D3D11_TEXTURE2D_DESC& desc)
+    {
+        return uint64_t(desc.Width) | (uint64_t(desc.Height) << 16) | (uint64_t(desc.MipLevels) << 32) | (uint64_t(desc.Format) << 40);
+    }
+
+    // What a texture of the shape takes, its levels together.
+    uint64_t PoolBytes(const D3D11_TEXTURE2D_DESC& desc)
+    {
+        const bool bc1 = desc.Format == DXGI_FORMAT_BC1_UNORM;
+        const bool bc = bc1 || desc.Format == DXGI_FORMAT_BC2_UNORM || desc.Format == DXGI_FORMAT_BC3_UNORM;
+        const uint32_t texel = desc.Format == DXGI_FORMAT_R8_UNORM ? 1 : 4;
+        uint64_t bytes = 0;
+        for (uint32_t level = 0; level < std::max(desc.MipLevels, 1u); level++)
+        {
+            const uint32_t w = std::max(desc.Width >> level, 1u), h = std::max(desc.Height >> level, 1u);
+            bytes += bc ? uint64_t((w + 3) / 4) * ((h + 3) / 4) * (bc1 ? 8 : 16) : uint64_t(w) * h * texel;
+        }
+        return bytes;
+    }
+
+    // A pooled texture's shape: flat, one array slice, sampled only, and
+    // written with UpdateSubresource (not immutable).
+    bool Poolable(const D3D11_TEXTURE2D_DESC& desc)
+    {
+        return desc.Usage == D3D11_USAGE_DEFAULT && desc.ArraySize == 1 && desc.MiscFlags == 0 &&
+               desc.BindFlags == D3D11_BIND_SHADER_RESOURCE && desc.SampleDesc.Count == 1;
+    }
+
+    bool MakePooled(const D3D11_TEXTURE2D_DESC& desc, PooledTexture& made)
+    {
+        if (FAILED(g_device->CreateTexture2D(&desc, nullptr, &made.texture))) return false;
+        if (FAILED(g_device->CreateShaderResourceView(made.texture.Get(), nullptr, &made.view))) { made.texture.Reset(); return false; }
+        return true;
+    }
+
+    // The worker: makes the spares of the shapes asked for lately, one at a
+    // time, and sleeps when every shape has its two.
+    void PoolWorker()
+    {
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+        std::unique_lock<std::mutex> lock(g_poolMutex);
+        for (;;)
+        {
+            uint64_t key = 0;
+            D3D11_TEXTURE2D_DESC desc{};
+            bool short_ = false;
+            for (const auto& [wantKey, want] : g_poolWants)
+            {
+                auto found = g_pool.find(wantKey);
+                const size_t have = found == g_pool.end() ? 0 : found->second.size();
+                if (have < PoolSpares && g_poolBytes + PoolBytes(want.desc) <= PoolBytesLimit)
+                {
+                    key = wantKey; desc = want.desc; short_ = true;
+                    break;
+                }
+            }
+            if (!short_) { g_poolWake.wait(lock); continue; }
+            lock.unlock();
+            PooledTexture made;
+            const bool ok = MakePooled(desc, made);
+            lock.lock();
+            if (!ok) { g_poolWants.erase(key); continue; }
+            g_poolBytes += PoolBytes(desc);
+            g_pool[key].push_back(std::move(made));
+            g_poolMadeAhead.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
+    void StartTexturePool()
+    {
+        if (getenv("COD3_NOTEXPOOL") != nullptr || getenv("COD3_NOTEXAHEAD") != nullptr) return;
+        // Only where the driver makes things concurrently with the drawing
+        // (every current one does); else the worker would take the lock the
+        // command thread's own calls wait on.
+        D3D11_FEATURE_DATA_THREADING threading{};
+        if (FAILED(g_device->CheckFeatureSupport(D3D11_FEATURE_THREADING, &threading, sizeof(threading))) || !threading.DriverConcurrentCreates)
+        {
+            printf("render: the driver does not make resources concurrently; textures are not made ahead\n");
+            return;
+        }
+        g_poolAhead = true;
+        std::thread(PoolWorker).detach();
+    }
+
+    // A texture of the shape: a spare, or made now. Asking for a shape also
+    // has the worker keep spares of it.
+    bool AcquirePooled(const D3D11_TEXTURE2D_DESC& desc, PooledTexture& out)
+    {
+        const uint64_t key = PoolKey(desc), bytes = PoolBytes(desc);
+        bool hit = false;
+        {
+            std::lock_guard<std::mutex> lock(g_poolMutex);
+            auto found = g_pool.find(key);
+            if (found != g_pool.end() && !found->second.empty())
+            {
+                out = std::move(found->second.back());
+                found->second.pop_back();
+                g_poolBytes -= bytes;
+                hit = true;
+            }
+            if (g_poolAhead && bytes <= PoolSpareBytesLimit)
+            {
+                PoolWant& want = g_poolWants[key];
+                want.desc = desc;
+                want.lastUse = g_frame;
+                if (g_poolWants.size() > PoolWantsLimit)
+                {
+                    // The shape used longest ago is no longer kept spares of.
+                    auto oldest = g_poolWants.begin();
+                    for (auto it = g_poolWants.begin(); it != g_poolWants.end(); ++it)
+                        if (it->second.lastUse < oldest->second.lastUse) oldest = it;
+                    g_poolWants.erase(oldest);
+                }
+            }
+        }
+        if (g_poolAhead) g_poolWake.notify_one();
+        if (hit) { g_poolHits.fetch_add(1, std::memory_order_relaxed); return true; }
+        g_poolMisses.fetch_add(1, std::memory_order_relaxed);
+        return MakePooled(desc, out);
+    }
+
+    // A texture let go: into the pool when it is of a pooled shape and
+    // there is room, else released.
+    void ReleasePooled(ComPtr<ID3D11Texture2D>& texture, ComPtr<ID3D11ShaderResourceView>& view)
+    {
+        if (TexturePoolOn() && texture && view)
+        {
+            D3D11_TEXTURE2D_DESC desc{};
+            texture->GetDesc(&desc);
+            if (Poolable(desc))
+            {
+                const uint64_t bytes = PoolBytes(desc);
+                std::lock_guard<std::mutex> lock(g_poolMutex);
+                if (g_poolBytes + bytes <= PoolBytesLimit)
+                {
+                    g_pool[PoolKey(desc)].push_back(PooledTexture{ std::move(texture), std::move(view) });
+                    g_poolBytes += bytes;
+                }
+            }
+        }
+        texture.Reset();
+        view.Reset();
+    }
+
 
     // Every resource is looked at once a frame, as it always was: a look
     // put off is a texture that changes late on screen, which is a flicker
@@ -352,10 +639,29 @@ namespace
         uint32_t seen = 0;              // the largest size a fetch asked for
         uint64_t watchedSince = 0;      // COD3_WRITEWATCH: its pages watched from this write sequence on, 0 not
         uint64_t liveSince = 0;         // 0.5.99: a big buffer's pages watched within the frame from this sequence on
+        uint8_t falseWrites = 0;        // looks its pages said written that found it the same: past a few, not watched
         bool live = false;
         std::vector<uint8_t> shadow;    // a big buffer: what went up, to send only what changed
+        uint64_t changedFrame = 0;      // the frame a look last found it changed
+        uint64_t lookedCall = 0;        // the VertexBufferFor call that last looked at it
+        std::vector<uint8_t> mirror;    // verify mode: what was sent to the GPU
+        uint32_t mirrorEpoch = 0;       // the verify epoch the mirror was last whole in
+        const char* lastSent = "";      // how it was last sent, for verify mode's report
     };
+
+    // Verify mode (verify.h): what was sent of a buffer kept beside it, so
+    // a draw's vertices can be held against it. `data` is the buffer's start.
+    void Sent(BufferEntry& entry, uint32_t first, uint32_t end, const uint8_t* data, const char* how)
+    {
+        entry.lastSent = how;
+        if (!Verify::On(Verify::Buffers) || entry.bytes == 0) return;
+        if (entry.mirror.size() < entry.bytes) entry.mirror.resize(entry.bytes);
+        end = std::min(end, entry.bytes);
+        if (first < end) memcpy(entry.mirror.data() + first, data + first, end - first);
+        if (first == 0 && end >= entry.seen) entry.mirrorEpoch = Verify::epoch.load(std::memory_order_relaxed);
+    }
     std::deque<BufferEntry> g_buffers;
+    uint64_t g_vertexCalls = 0;         // VertexBufferFor's calls, counted
 
     // A vertex buffer this big is compared with a copy of what went up, a
     // piece at a time, and only the pieces that changed go up. The title
@@ -398,6 +704,27 @@ namespace
         g_freeIndexEntries.push_back(i + 1);
     }
 
+    // A level's rows, split across the cores when there are enough bytes
+    // in it to be worth waking them (a quarter of a megabyte: a 512 by 512
+    // DXT5 and up). A level is laid out on the command thread when the
+    // title first draws with it, and the textures a level streams in were
+    // the frame time's spikes: each a millisecond or more of untiling on
+    // that one thread, several in a frame as the player moved on.
+    template <class Rows>
+    void ForRows(uint32_t rows, size_t bytes, const Rows& rowsWork)
+    {
+        static const bool serial = getenv("COD3_SERIALUNTILE") != nullptr;
+        if (serial || bytes < (256u << 10) || rows < 16) { rowsWork(0u, rows); return; }
+        const int grain = std::max(4, int(rows) / (Parallel::Width() * 4));
+        Parallel::For(0, int(rows), grain, [&](int first, int last) { rowsWork(uint32_t(first), uint32_t(last)); });
+    }
+
+    // Eight bytes with each pair swapped: the console's sixteen bit order.
+    inline uint64_t SwapPairs(uint64_t v)
+    {
+        return ((v & 0x00FF00FF00FF00FFull) << 8) | ((v >> 8) & 0x00FF00FF00FF00FFull);
+    }
+
     // The bytes of a texture level as the host wants them: untiled, and
     // the console's byte order undone. `x0`, `y0` are where the level lies
     // in its tile when the levels are packed.
@@ -413,41 +740,63 @@ namespace
             const uint32_t blocksWide = (width + 3) / 4, blocksHigh = (height + 3) / 4;
             rowBytes = blocksWide * blockBytes;
             out.resize(size_t(rowBytes) * blocksHigh);
-            for (uint32_t by = 0; by < blocksHigh; by++)
-                for (uint32_t bx = 0; bx < blocksWide; bx++)
-                {
-                    const uint32_t sx = bx + x0 / 4, sy = by + y0 / 4;
-                    const uint32_t offset = tiled ? TiledOffset(sx, sy, blocksAcross, blockShift)
-                                                  : (sy * blocksAcross + sx) * blockBytes;
-                    uint8_t* to = out.data() + size_t(by) * rowBytes + size_t(bx) * blockBytes;
-                    // The blocks' sixteen bit fields are stored the console's
-                    // way round: each pair of bytes swapped.
-                    for (uint32_t i = 0; i < blockBytes; i++) to[i] = data[offset + (i ^ 1)];
-                }
+            uint8_t* const base = out.data();
+            const uint32_t stride = rowBytes;
+            ForRows(blocksHigh, out.size(), [&](uint32_t firstRow, uint32_t lastRow)
+            {
+                for (uint32_t by = firstRow; by < lastRow; by++)
+                    for (uint32_t bx = 0; bx < blocksWide; bx++)
+                    {
+                        const uint32_t sx = bx + x0 / 4, sy = by + y0 / 4;
+                        const uint32_t offset = tiled ? TiledOffset(sx, sy, blocksAcross, blockShift)
+                                                      : (sy * blocksAcross + sx) * blockBytes;
+                        uint8_t* to = base + size_t(by) * stride + size_t(bx) * blockBytes;
+                        // The blocks' sixteen bit fields are stored the console's
+                        // way round: each pair of bytes swapped, eight at a time.
+                        uint64_t word;
+                        memcpy(&word, data + offset, 8);
+                        word = SwapPairs(word);
+                        memcpy(to, &word, 8);
+                        if (blockBytes == 16)
+                        {
+                            memcpy(&word, data + offset + 8, 8);
+                            word = SwapPairs(word);
+                            memcpy(to + 8, &word, 8);
+                        }
+                    }
+            });
         }
         else if (format == 6)
         {
             rowBytes = width * 4;
             out.resize(size_t(rowBytes) * height);
-            for (uint32_t y = 0; y < height; y++)
-                for (uint32_t x = 0; x < width; x++)
+            uint8_t* const base = out.data();
+            const uint32_t stride = rowBytes;
+            ForRows(height, out.size(), [&](uint32_t firstRow, uint32_t lastRow)
+            {
+                for (uint32_t y = firstRow; y < lastRow; y++)
                 {
-                    const uint32_t offset = tiled ? TiledOffset(x + x0, y + y0, pitchTexels, 2)
-                                                  : ((y + y0) * pitchTexels + x + x0) * 4;
-                    uint32_t word;
-                    memcpy(&word, data + offset, 4);
-                    switch (endian)
+                    uint8_t* const row = base + size_t(y) * stride;
+                    for (uint32_t x = 0; x < width; x++)
                     {
-                    case 1: word = ((word & 0xFF00FF00u) >> 8) | ((word & 0x00FF00FFu) << 8); break;
-                    case 2: word = _byteswap_ulong(word); break;
-                    case 3: word = (word >> 16) | (word << 16); break;
-                    default: break;
+                        const uint32_t offset = tiled ? TiledOffset(x + x0, y + y0, pitchTexels, 2)
+                                                      : ((y + y0) * pitchTexels + x + x0) * 4;
+                        uint32_t word;
+                        memcpy(&word, data + offset, 4);
+                        switch (endian)
+                        {
+                        case 1: word = ((word & 0xFF00FF00u) >> 8) | ((word & 0x00FF00FFu) << 8); break;
+                        case 2: word = _byteswap_ulong(word); break;
+                        case 3: word = (word >> 16) | (word << 16); break;
+                        default: break;
+                        }
+                        // The word is A R G B from the top, and the console's
+                        // component x is its lowest byte: blue. The title's fetch
+                        // swizzle puts it right, so the bytes stay as they are.
+                        memcpy(row + size_t(x) * 4, &word, 4);
                     }
-                    // The word is A R G B from the top, and the console's
-                    // component x is its lowest byte: blue. The title's fetch
-                    // swizzle puts it right, so the bytes stay as they are.
-                    memcpy(out.data() + size_t(y) * rowBytes + size_t(x) * 4, &word, 4);
                 }
+            });
         }
         else if (format == 3 || format == 4 || format == 10 || format == 15)
         {
@@ -457,36 +806,46 @@ namespace
             // 6's are, the fetch swizzle putting them right.
             rowBytes = width * 4;
             out.resize(size_t(rowBytes) * height);
-            for (uint32_t y = 0; y < height; y++)
-                for (uint32_t x = 0; x < width; x++)
-                {
-                    const uint32_t offset = tiled ? TiledOffset(x + x0, y + y0, pitchTexels, 1)
-                                                  : ((y + y0) * pitchTexels + x + x0) * 2;
-                    uint16_t v;
-                    memcpy(&v, data + offset, 2);
-                    if (endian == 1 || endian == 2) v = uint16_t((v >> 8) | (v << 8));
-                    auto wide = [](uint32_t bits, uint32_t count) { return uint8_t(count >= 8 ? bits : (bits * 255 + ((1u << count) - 1) / 2) / ((1u << count) - 1)); };
-                    uint8_t* to = out.data() + size_t(y) * rowBytes + size_t(x) * 4;
-                    switch (format)
+            uint8_t* const base = out.data();
+            const uint32_t stride = rowBytes;
+            ForRows(height, out.size(), [&](uint32_t firstRow, uint32_t lastRow)
+            {
+                for (uint32_t y = firstRow; y < lastRow; y++)
+                    for (uint32_t x = 0; x < width; x++)
                     {
-                    case 3: to[0] = wide(v & 31, 5); to[1] = wide((v >> 5) & 31, 5); to[2] = wide((v >> 10) & 31, 5); to[3] = (v & 0x8000) ? 255 : 0; break;
-                    case 4: to[0] = wide(v & 31, 5); to[1] = wide((v >> 5) & 63, 6); to[2] = wide((v >> 11) & 31, 5); to[3] = 255; break;
-                    case 10: to[0] = uint8_t(v & 0xFF); to[1] = uint8_t(v >> 8); to[2] = 0; to[3] = 255; break;
-                    default: to[0] = wide(v & 15, 4); to[1] = wide((v >> 4) & 15, 4); to[2] = wide((v >> 8) & 15, 4); to[3] = wide((v >> 12) & 15, 4); break;
+                        const uint32_t offset = tiled ? TiledOffset(x + x0, y + y0, pitchTexels, 1)
+                                                      : ((y + y0) * pitchTexels + x + x0) * 2;
+                        uint16_t v;
+                        memcpy(&v, data + offset, 2);
+                        if (endian == 1 || endian == 2) v = uint16_t((v >> 8) | (v << 8));
+                        auto wide = [](uint32_t bits, uint32_t count) { return uint8_t(count >= 8 ? bits : (bits * 255 + ((1u << count) - 1) / 2) / ((1u << count) - 1)); };
+                        uint8_t* to = base + size_t(y) * stride + size_t(x) * 4;
+                        switch (format)
+                        {
+                        case 3: to[0] = wide(v & 31, 5); to[1] = wide((v >> 5) & 31, 5); to[2] = wide((v >> 10) & 31, 5); to[3] = (v & 0x8000) ? 255 : 0; break;
+                        case 4: to[0] = wide(v & 31, 5); to[1] = wide((v >> 5) & 63, 6); to[2] = wide((v >> 11) & 31, 5); to[3] = 255; break;
+                        case 10: to[0] = uint8_t(v & 0xFF); to[1] = uint8_t(v >> 8); to[2] = 0; to[3] = 255; break;
+                        default: to[0] = wide(v & 15, 4); to[1] = wide((v >> 4) & 15, 4); to[2] = wide((v >> 8) & 15, 4); to[3] = wide((v >> 12) & 15, 4); break;
+                        }
                     }
-                }
+            });
         }
         else   // 2: one byte a texel
         {
             rowBytes = width;
             out.resize(size_t(rowBytes) * height);
-            for (uint32_t y = 0; y < height; y++)
-                for (uint32_t x = 0; x < width; x++)
-                {
-                    const uint32_t offset = tiled ? TiledOffset(x + x0, y + y0, pitchTexels, 0)
-                                                  : ((y + y0) * pitchTexels + x + x0);
-                    out[size_t(y) * rowBytes + x] = data[offset];
-                }
+            uint8_t* const base = out.data();
+            const uint32_t stride = rowBytes;
+            ForRows(height, out.size(), [&](uint32_t firstRow, uint32_t lastRow)
+            {
+                for (uint32_t y = firstRow; y < lastRow; y++)
+                    for (uint32_t x = 0; x < width; x++)
+                    {
+                        const uint32_t offset = tiled ? TiledOffset(x + x0, y + y0, pitchTexels, 0)
+                                                      : ((y + y0) * pitchTexels + x + x0);
+                        base[size_t(y) * stride + x] = data[offset];
+                    }
+            });
         }
     }
 
@@ -508,6 +867,88 @@ namespace
 
     bool IsPowerOfTwo(uint32_t v) { return v != 0 && (v & (v - 1)) == 0; }
 
+    // --- texels sent through a staging texture ------------------------------------------
+    //
+    // With the pool, making textures stopped costing, and the 0.5.12 hitch
+    // lines showed what was left: the texels' own trip. A frame that met
+    // one big texture (a few megabytes of levels) spent about nine
+    // milliseconds in UpdateSubresource, the same as the immutable texture
+    // made with its texels before: under a gigabyte a second, the driver
+    // rearranging the texels into the GPU's own layout on the command
+    // thread. So the texels go into a staging texture instead (plain
+    // memory, a memcpy) and the GPU's copy engine moves them into the
+    // texture and lays them out (CopyResource), off the CPU. The staging
+    // textures are kept by shape and used again three frames on, when the
+    // GPU is done with them. COD3_NOSTAGING=1: UpdateSubresource as before.
+    struct StagingTexture
+    {
+        ComPtr<ID3D11Texture2D> texture;
+        uint64_t freeFrame = 0;
+    };
+    std::unordered_map<uint64_t, std::vector<StagingTexture>> g_staging;   // command thread only
+    uint64_t g_stagingBytes = 0;
+    constexpr uint64_t StagingBytesLimit = 192ull << 20;
+    std::atomic<uint64_t> g_stagedUploads{ 0 }, g_directUploads{ 0 };
+
+    bool StagingOn()
+    {
+        static const bool off = getenv("COD3_NOSTAGING") != nullptr;
+        return !off && Tuning::On(Tuning::stagingUploads);
+    }
+
+    bool UploadByStaging(ID3D11Texture2D* target, const D3D11_TEXTURE2D_DESC& desc,
+                         const std::vector<D3D11_SUBRESOURCE_DATA>& initial, const std::vector<std::vector<uint8_t>>& pixels, uint32_t levels)
+    {
+        if (!StagingOn() || target == nullptr) return false;
+        std::vector<StagingTexture>& list = g_staging[PoolKey(desc)];
+        StagingTexture* slot = nullptr;
+        for (StagingTexture& candidate : list)
+            if (candidate.freeFrame <= g_frame) { slot = &candidate; break; }
+        if (slot == nullptr)
+        {
+            const uint64_t bytes = PoolBytes(desc);
+            if (g_stagingBytes + bytes > StagingBytesLimit) return false;
+            D3D11_TEXTURE2D_DESC staging = desc;
+            staging.Usage = D3D11_USAGE_STAGING;
+            staging.BindFlags = 0;
+            staging.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            staging.MiscFlags = 0;
+            StagingTexture made;
+            if (FAILED(g_device->CreateTexture2D(&staging, nullptr, &made.texture))) return false;
+            list.push_back(std::move(made));
+            slot = &list.back();
+            g_stagingBytes += bytes;
+        }
+        for (uint32_t level = 0; level < levels; level++)
+        {
+            D3D11_MAPPED_SUBRESOURCE mapped{};
+            if (FAILED(g_context->Map(slot->texture.Get(), level, D3D11_MAP_WRITE, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped)))
+            {
+                // Still the GPU's (it ran more than three frames behind):
+                // tried again later; sent the old way now.
+                slot->freeFrame = g_frame + 1;
+                return false;
+            }
+            const uint32_t pitch = initial[level].SysMemPitch;
+            const uint32_t rows = pitch != 0 ? uint32_t(pixels[level].size() / pitch) : 0;
+            uint8_t* const to = static_cast<uint8_t*>(mapped.pData);
+            const uint8_t* const from = pixels[level].data();
+            const uint32_t toPitch = mapped.RowPitch;
+            ForRows(rows, pixels[level].size(), [&](uint32_t first, uint32_t last)
+            {
+                if (toPitch == pitch) memcpy(to + size_t(first) * pitch, from + size_t(first) * pitch, size_t(last - first) * pitch);
+                else for (uint32_t row = first; row < last; row++) memcpy(to + size_t(row) * toPitch, from + size_t(row) * pitch, pitch);
+            });
+            g_context->Unmap(slot->texture.Get(), level);
+        }
+        g_context->CopyResource(target, slot->texture.Get());
+        slot->freeFrame = g_frame + 3;
+        g_stagedUploads.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+
+
+
     // The texture's levels from guest memory into a new texture. The
     // levels past the first lie one after another from the mip address,
     // each with its pitch and height rounded up to whole 32 block tiles;
@@ -517,6 +958,9 @@ namespace
     // to a texel on the screen for nobody to see the difference.
     bool UploadTexture(TextureEntry& entry, const uint32_t fetch[6], const uint8_t* data)
     {
+        // The upload's two parts, timed for the hitch lines: laying the
+        // texels out, then making the texture on the device.
+        const auto uploadStarted = std::chrono::steady_clock::now();
         const uint32_t format = fetch[1] & 0x3F;
         const uint32_t endian = (fetch[1] >> 6) & 3;
         const uint32_t pitch = ((fetch[0] >> 22) & 0x1FF) * 32;
@@ -631,13 +1075,49 @@ namespace
         desc.ArraySize = faces;
         desc.Format = hostFormat;
         desc.SampleDesc.Count = 1;
-        desc.Usage = D3D11_USAGE_IMMUTABLE;
+        const bool pooled = !cube && TexturePoolOn();
+        desc.Usage = pooled ? D3D11_USAGE_DEFAULT : D3D11_USAGE_IMMUTABLE;
         desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
         desc.MiscFlags = cube ? D3D11_RESOURCE_MISC_TEXTURECUBE : 0;
-        entry.texture.Reset();
-        entry.resource.Reset();
-        if (FAILED(g_device->CreateTexture2D(&desc, initial.data(), &entry.texture))) return false;
-        if (FAILED(g_device->CreateShaderResourceView(entry.texture.Get(), nullptr, &entry.resource))) return false;
+        const auto createStarted = std::chrono::steady_clock::now();
+        RenderStats::Frame().uploadLayoutNanoseconds += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(createStarted - uploadStarted).count());
+        struct CreateTimed { std::chrono::steady_clock::time_point started; ~CreateTimed() {
+            RenderStats::Frame().uploadCreateNanoseconds += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count()); } } createTimed{ createStarted };
+        if (pooled)
+        {
+            // The texture it has, written in place when it is the same
+            // shape (a texture the title changed); else one from the pool,
+            // the old one going back to it.
+            bool inPlace = false;
+            if (entry.texture && entry.resource && !entry.cube)
+            {
+                D3D11_TEXTURE2D_DESC had{};
+                entry.texture->GetDesc(&had);
+                inPlace = Poolable(had) && PoolKey(had) == PoolKey(desc);
+            }
+            if (inPlace) g_poolInPlace.fetch_add(1, std::memory_order_relaxed);
+            else
+            {
+                ReleasePooled(entry.texture, entry.resource);
+                PooledTexture got;
+                if (!AcquirePooled(desc, got)) return false;
+                entry.texture = std::move(got.texture);
+                entry.resource = std::move(got.view);
+            }
+            if (!UploadByStaging(entry.texture.Get(), desc, initial, pixels, kept))
+            {
+                g_directUploads.fetch_add(1, std::memory_order_relaxed);
+                for (uint32_t level = 0; level < kept; level++)
+                    g_context->UpdateSubresource(entry.texture.Get(), level, nullptr, initial[level].pSysMem, initial[level].SysMemPitch, 0);
+            }
+        }
+        else
+        {
+            entry.texture.Reset();
+            entry.resource.Reset();
+            if (FAILED(g_device->CreateTexture2D(&desc, initial.data(), &entry.texture))) return false;
+            if (FAILED(g_device->CreateShaderResourceView(entry.texture.Get(), nullptr, &entry.resource))) return false;
+        }
         entry.cube = cube;
         entry.face.Reset();
         if (cube)
@@ -774,6 +1254,7 @@ void RenderResources::Initialize(ID3D11Device* device, ID3D11DeviceContext* cont
 {
     g_device = device;
     g_context = context;
+    StartTexturePool();
     g_indexRing.Make(IndexRingBytes, D3D11_BIND_INDEX_BUFFER);
     D3D11_FEATURE_DATA_D3D11_OPTIONS options{};
     if (SUCCEEDED(device->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS, &options, sizeof(options))) && options.ConstantBufferOffsetting)
@@ -832,8 +1313,7 @@ bool RenderResources::BeginFrame(uint64_t frame)
             if (!entry.live) continue;
             g_textureKeys.Erase(entry.key);
             g_resourceBytes -= entry.bytes;
-            entry.texture.Reset();
-            entry.resource.Reset();
+            ReleasePooled(entry.texture, entry.resource);
             entry.face.Reset();
             entry.live = false;
             g_freeTextures.push_back(i + 1);
@@ -849,6 +1329,26 @@ bool RenderResources::BeginFrame(uint64_t frame)
         g_colorKeys.Clear();
         g_depthKeys.Clear();
         printf("render: the frame is drawn with %u sample%s a pixel\n", g_samples, g_samples == 1 ? "" : "s");
+    }
+    if (g_requestedHdrTargets != g_hdrTargets)
+    {
+        remade = true;
+        g_hdrTargets = g_requestedHdrTargets;
+        g_colorTargets.clear();
+        g_depthTargets.clear();
+        g_colorKeys.Clear();
+        g_depthKeys.Clear();
+        printf("render: the frame's colour targets are %s\n", g_hdrTargets ? "16 bit float (HDR)" : "8 bit");
+    }
+    if (g_requestedEffectsScale != g_effectsScale)
+    {
+        remade = true;
+        g_effectsScale = g_requestedEffectsScale;
+        g_colorTargets.clear();
+        g_depthTargets.clear();
+        g_colorKeys.Clear();
+        g_depthKeys.Clear();
+        printf("render: the half size surfaces are drawn at %.2f times their size\n", g_effectsScale);
     }
     if (g_requestedScale != g_scale)
     {
@@ -869,8 +1369,8 @@ bool RenderResources::BeginFrame(uint64_t frame)
         if (!entry.live || frame - entry.usedFrame < UnusedFrames) continue;
         g_textureKeys.Erase(entry.key);
         g_resourceBytes -= entry.bytes;
-        entry.texture.Reset();
-        entry.resource.Reset();
+        ReleasePooled(entry.texture, entry.resource);
+        entry.face.Reset();
         entry.live = false;
         g_freeTextures.push_back(i + 1);
         g_released++;
@@ -894,6 +1394,19 @@ bool RenderResources::BeginFrame(uint64_t frame)
         if (entry.buffer) g_released++;
         DropIndexEntry(i);
     }
+    if (RenderStats::Wanted() && TexturePoolOn())
+    {
+        uint64_t spare = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_poolMutex);
+            spare = g_poolBytes;
+        }
+        printf("render: texture pool: %llu new textures from the pool, %llu made on the spot, %llu written in place, %llu made ahead; %.1f MB kept; "
+               "%llu sent by staging (%.1f MB of staging textures), %llu directly\n",
+            (unsigned long long)g_poolHits.load(), (unsigned long long)g_poolMisses.load(), (unsigned long long)g_poolInPlace.load(),
+            (unsigned long long)g_poolMadeAhead.load(), spare / 1048576.0,
+            (unsigned long long)g_stagedUploads.load(), g_stagingBytes / 1048576.0, (unsigned long long)g_directUploads.load());
+    }
     return remade;
 }
 
@@ -908,7 +1421,8 @@ bool RenderResources::Forget(uint32_t address, uint32_t size)
         if (!entry.live || !inside(entry.key[0])) continue;
         g_textureKeys.Erase(entry.key);
         g_resourceBytes -= entry.bytes;
-        entry.texture.Reset(); entry.resource.Reset(); entry.face.Reset();
+        ReleasePooled(entry.texture, entry.resource);
+        entry.face.Reset();
         entry.live = false;
         g_freeTextures.push_back(i + 1);
         g_released++;
@@ -939,6 +1453,7 @@ bool RenderResources::Forget(uint32_t address, uint32_t size)
         if (!entry.texture || !inside(entry.physical)) continue;
         if (entry.texture) g_resourceBytes -= uint64_t(entry.surface.width) * entry.surface.height * 4;
         entry.texture.Reset(); entry.resource.Reset(); entry.view.Reset();
+        entry.DropCrop();
         entry.surface.texture = nullptr; entry.surface.resource = nullptr; entry.surface.view = nullptr;
         entry.surface.width = entry.surface.height = 0;
         dropped = true;
@@ -946,12 +1461,16 @@ bool RenderResources::Forget(uint32_t address, uint32_t size)
     return dropped;
 }
 
+void RenderResources::RequestEffectsScale(double scale) { g_requestedEffectsScale = scale < 1.0 ? 1.0 : scale > 2.0 ? 2.0 : scale; }
+
 void RenderResources::RequestScale(float scale)
 {
     g_requestedScale = scale < 0.25f ? 0.25f : scale > 8.0f ? 8.0f : scale;
 }
 
 float RenderResources::Scale() { return g_scale; }
+
+uint32_t RenderResources::TargetSamples(uint32_t pitch) { return SamplesFor(pitch); }
 
 void RenderResources::RequestMipSkip(uint32_t levels) { g_requestedMipSkip = levels > 4 ? 4 : levels; }
 
@@ -964,6 +1483,10 @@ void RenderResources::RequestMultisample(uint32_t samples)
 }
 
 uint32_t RenderResources::Multisample() { return g_samples; }
+
+void RenderResources::RequestHdrTargets(bool upgraded) { g_requestedHdrTargets = upgraded; }
+
+bool RenderResources::HdrTargets() { return g_hdrTargets; }
 
 void RenderResources::TargetSize(uint32_t pitch, uint32_t bytesPerSample, uint32_t& width, uint32_t& height, float& scaleX, float& scaleY)
 {
@@ -984,6 +1507,7 @@ RenderState::Handle RenderResources::ColorTargetFor(uint32_t colorInfo, uint32_t
     uint32_t bytesPerSample = 4;
     const uint32_t format = (colorInfo >> 16) & 0xF;
     entry.target.format = ColorFormat(format, bytesPerSample);
+    entry.target.upgraded = g_hdrTargets && (format == 0 || format == 1);
     entry.target.pitch = pitch;
     entry.target.rows = TargetRows(pitch, bytesPerSample);
     HostSize(pitch, entry.target.rows, entry.target.width, entry.target.height);
@@ -1009,8 +1533,9 @@ RenderState::Handle RenderResources::ColorTargetFor(uint32_t colorInfo, uint32_t
     entry.target.resource = entry.resource.Get();
     entry.target.samples = samples;
     g_resourceBytes += uint64_t(entry.target.width) * entry.target.height * bytesPerSample * samples;
-    printf("render: colour target at tile %u, pitch %u, format %u: %ux%u, %u sample%s\n",
-        colorInfo & 0xFFF, pitch, format, entry.target.width, entry.target.height, samples, samples == 1 ? "" : "s");
+    printf("render: colour target at tile %u, pitch %u, format %u: %ux%u, %u sample%s%s\n",
+        colorInfo & 0xFFF, pitch, format, entry.target.width, entry.target.height, samples, samples == 1 ? "" : "s",
+        entry.target.upgraded ? ", 16 bit float (HDR)" : "");
     fflush(stdout);
     return handle;
 }
@@ -1126,6 +1651,7 @@ RenderResources::Resolved* RenderResources::ResolvedFor(uint32_t physical, uint3
     {
         if (entry.texture) g_resourceBytes -= uint64_t(out.width) * out.height * 4;
         entry.texture.Reset(); entry.resource.Reset(); entry.view.Reset();
+        entry.DropCrop();
         out.texture = nullptr; out.resource = nullptr; out.view = nullptr;
         D3D11_TEXTURE2D_DESC desc{};
         desc.Width = width;
@@ -1161,12 +1687,115 @@ const RenderResources::Resolved* RenderResources::ResolvedAt(uint32_t physical)
     return out.resource != nullptr ? &out : nullptr;
 }
 
+ID3D11ShaderResourceView* RenderResources::ResolvedView(uint32_t physical, uint32_t guestWidth, uint32_t guestHeight)
+{
+    const uint32_t key[1] = { Guest::GpuOffset(physical) };
+    const Handle handle = g_resolvedKeys.Find(key);
+    if (handle == 0) return nullptr;
+    ResolvedEntry& entry = g_resolved[handle - 1];
+    const Resolved& surface = entry.surface;
+    if (surface.resource == nullptr) return nullptr;
+    // The whole surface, unless the fetch reads a smaller corner of it.
+    const bool corner = guestWidth <= surface.guestWidth && guestHeight <= surface.guestHeight &&
+                        (guestWidth != surface.guestWidth || guestHeight != surface.guestHeight) &&
+                        surface.guestWidth != 0 && surface.guestHeight != 0;
+    if (!corner) return surface.resource;
+
+    const uint32_t width = std::min(surface.width, std::max(1u, uint32_t(std::lround(double(guestWidth) * surface.width / surface.guestWidth))));
+    const uint32_t height = std::min(surface.height, std::max(1u, uint32_t(std::lround(double(guestHeight) * surface.height / surface.guestHeight))));
+    if (!entry.crop || entry.cropGuestWidth != guestWidth || entry.cropGuestHeight != guestHeight || entry.cropWidth != width || entry.cropHeight != height)
+    {
+        entry.DropCrop();
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width = width;
+        desc.Height = height;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = surface.format;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(g_device->CreateTexture2D(&desc, nullptr, &entry.crop))) { entry.crop.Reset(); return surface.resource; }
+        if (FAILED(g_device->CreateShaderResourceView(entry.crop.Get(), nullptr, &entry.cropView))) { entry.crop.Reset(); return surface.resource; }
+        entry.cropGuestWidth = guestWidth;
+        entry.cropGuestHeight = guestHeight;
+        entry.cropWidth = width;
+        entry.cropHeight = height;
+        g_resourceBytes += uint64_t(width) * height * 4;
+    }
+    // Once per resolve: the draws after it that sample the corner share it.
+    if (entry.cropSerial != surface.serial)
+    {
+        const D3D11_BOX box{ 0, 0, 0, width, height, 1 };
+        g_context->CopySubresourceRegion(entry.crop.Get(), 0, 0, 0, 0, surface.texture, 0, &box);
+        entry.cropSerial = surface.serial;
+    }
+    return entry.cropView.Get();
+}
+
 RenderState::Handle RenderResources::WhiteTexture() { return 1; }
 
 namespace { const char* g_whiteReason = ""; }
 const char* RenderResources::WhiteReason() { return g_whiteReason; }
 
+namespace
+{
+    // Verify mode (verify.h): the memory a texture was made from, kept.
+    void TextureSent(TextureEntry& entry, const uint32_t fetch[6], const uint8_t* data)
+    {
+        if (!Verify::On(Verify::Textures)) return;
+        const size_t span = std::min(SourceBytes(fetch), size_t(64u << 20));
+        entry.sourceMirror.assign(data, data + span);
+        entry.mirrorEpoch = Verify::epoch.load(std::memory_order_relaxed);
+    }
+
+    // Made again at its next look: its fingerprint forgotten.
+    void LookAgain(TextureEntry& entry)
+    {
+        entry.fingerprint = 0;
+        entry.dense = true;
+        entry.denseFingerprint = 0;
+        entry.watchedSince = 0;
+        entry.checkedFrame = 0;
+    }
+
+    // A texture at its first use in a frame, after that frame's look, held
+    // against what it was made from: a difference is a change the look
+    // missed. It is made again, and said.
+    void VerifyTexture(RenderState::Handle handle, const uint32_t fetch[6])
+    {
+        if (handle <= 1 || handle > g_textures.size()) return;
+        TextureEntry& entry = g_textures[handle - 1];
+        if (!entry.live) return;
+        if (entry.mirrorEpoch != Verify::epoch.load(std::memory_order_relaxed)) { LookAgain(entry); return; }
+        if (entry.verifiedFrame == g_frame) return;
+        entry.verifiedFrame = g_frame;
+        Verify::Checked(Verify::Textures);
+        const uint32_t base = fetch[1] & 0xFFFFF000u;
+        const uint8_t* data = Guest::Base + Guest::PhysicalAlias(base);
+        const size_t span = std::min(std::min(SourceBytes(fetch), size_t(64u << 20)), entry.sourceMirror.size());
+        if (span == 0 || memcmp(data, entry.sourceMirror.data(), span) == 0) return;
+        size_t differ = 0;
+        for (size_t i = 0; i < span; i++) differ += data[i] != entry.sourceMirror[i];
+        Verify::Mismatch(Verify::Textures, "texture %08X, format %u, %ux%u: %zu of %zu bytes changed and its look missed it",
+            base, fetch[1] & 0x3F, (fetch[2] & 0x1FFF) + 1, ((fetch[2] >> 13) & 0x1FFF) + 1, differ, span);
+        LookAgain(entry);
+    }
+}
+
+namespace RenderResources
+{
+    Handle TextureForUnchecked(const uint32_t fetch[6], uint32_t& width, uint32_t& height, bool& resolved);
+}
+
 RenderState::Handle RenderResources::TextureFor(const uint32_t fetch[6], uint32_t& width, uint32_t& height, bool& resolved)
+{
+    const Handle handle = TextureForUnchecked(fetch, width, height, resolved);
+    if (Verify::On(Verify::Textures) && !resolved) VerifyTexture(handle, fetch);
+    return handle;
+}
+
+RenderState::Handle RenderResources::TextureForUnchecked(const uint32_t fetch[6], uint32_t& width, uint32_t& height, bool& resolved)
 {
     t_fingerprintKind = "texture";
     const uint32_t format = fetch[1] & 0x3F;
@@ -1196,8 +1825,14 @@ RenderState::Handle RenderResources::TextureFor(const uint32_t fetch[6], uint32_
                 fflush(stdout);
             }
         }
-        width = surface->guestWidth;
-        height = surface->guestHeight;
+        // A fetch inside the resolve keeps its own size: ResolvedView gives
+        // it that corner, and its texel offsets and unnormalised
+        // coordinates go by its own width and height, as on the console.
+        if (width > surface->guestWidth || height > surface->guestHeight)
+        {
+            width = surface->guestWidth;
+            height = surface->guestHeight;
+        }
         resolved = true;
         // Handle 0 with `resolved` set: the caller binds the surface itself.
         return 0;
@@ -1232,6 +1867,7 @@ RenderState::Handle RenderResources::TextureFor(const uint32_t fetch[6], uint32_
         // long enough has its pages watched, and none written since is the
         // same texture without a byte of it read. The small ones (the HUD's,
         // hashed whole every frame) are most of what the looks cost.
+        bool written = false;
         if (entry.watchedSince != 0)
         {
             if (WriteWatch::Clean(base, uint32_t(span), entry.watchedSince))
@@ -1241,17 +1877,23 @@ RenderState::Handle RenderResources::TextureFor(const uint32_t fetch[6], uint32_
                 return handle;
             }
             entry.watchedSince = 0;
+            written = true;
         }
         // Compared in the kind the stored fingerprint is; the kind changes
         // only once the memory is known to be the same, so no change is
-        // lost in the switch.
-        const uint64_t fingerprint = Fingerprint(data, span, entry.dense);
-        if (fingerprint == entry.fingerprint)
+        // lost in the switch. But a big still texture whose pages were
+        // written is compared whole: sixty four samples of it are what a
+        // streamed texture put in the same place passes unseen, the old
+        // picture staying on screen, or coming and going as the samples
+        // catch it and miss it again.
+        const bool wholeLook = written && !entry.dense && entry.denseFingerprint != 0;
+        const uint64_t fingerprint = Fingerprint(data, span, entry.dense || wholeLook);
+        if (wholeLook ? fingerprint == entry.denseFingerprint : fingerprint == entry.fingerprint)
         {
             MissAudit("texture", fetch[1] & 0xFFFFF000u, data, span, entry.dense, entry.auditDense);
             if (entry.stable < StableLooks) entry.stable++;
             const bool wantDense = WantDense(entry.stable, span);
-            if (wantDense != entry.dense) { if (!wantDense) entry.auditDense = entry.fingerprint; entry.dense = wantDense; entry.fingerprint = Fingerprint(data, span, wantDense); }
+            if (wantDense != entry.dense) { if (!wantDense) { entry.auditDense = entry.fingerprint; entry.denseFingerprint = entry.fingerprint; } entry.dense = wantDense; entry.fingerprint = Fingerprint(data, span, wantDense); }
             if (WriteWatch::Enabled() && entry.stable >= StableLooks)
             {
                 const uint64_t since = WriteWatch::Sequence();
@@ -1261,10 +1903,12 @@ RenderState::Handle RenderResources::TextureFor(const uint32_t fetch[6], uint32_
             return handle;
         }
         entry.stable = 0;
-        entry.fingerprint = entry.dense ? fingerprint : Fingerprint(data, span, true);
+        entry.fingerprint = (entry.dense || wholeLook) ? fingerprint : Fingerprint(data, span, true);
         entry.dense = true;
+        entry.denseFingerprint = 0;
         g_resourceBytes -= entry.bytes;
         if (!UploadTexture(entry, fetch, data)) { g_textureKeys.Erase(entry.key); entry.live = false; g_freeTextures.push_back(handle); g_whiteReason = "upload failed"; return 1; }
+        TextureSent(entry, fetch, data);
         g_resourceBytes += entry.bytes;
         return handle;
     }
@@ -1278,6 +1922,7 @@ RenderState::Handle RenderResources::TextureFor(const uint32_t fetch[6], uint32_
     entry.fingerprint = Fingerprint(data, std::min(SourceBytes(fetch), size_t(64u << 20)), entry.dense);
     entry.checkedFrame = entry.usedFrame = g_frame;
     if (!UploadTexture(entry, fetch, data)) { g_freeTextures.push_back(handle); g_whiteReason = "upload failed"; return 1; }
+    TextureSent(entry, fetch, data);
     entry.live = true;
     g_textureKeys.Insert(key, handle);
     g_resourceBytes += entry.bytes;
@@ -1297,15 +1942,50 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
 {
     t_fingerprintKind = "vertex";
     if (bytes == 0 || bytes > (128u << 20)) return 0;
+    // A look that takes long, named (with COD3_RENDER_STATS): the frames of
+    // 0.5.12 that spent 30 to 40 ms in the buffers were few and unexplained.
+    // Timed only when the stats are on: two clock reads a look, a few
+    // thousand looks a frame, are not free.
+    const char* path = "look";
+    const bool lookTimed = RenderStats::Wanted();
+    struct SlowLook
+    {
+        bool timed;
+        std::chrono::steady_clock::time_point started;
+        const char*& path; uint32_t physical; uint32_t& bytes;
+        ~SlowLook()
+        {
+            if (!timed) return;
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+            static int told = 0;
+            if (ms > 4.0 && told < 40)
+            {
+                told++;
+                printf("render: a vertex buffer look took %.2f ms: %08X, %u bytes, %s\n", ms, physical, bytes, path);
+            }
+        }
+    } slowLook{ lookTimed, lookTimed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}, path, physical, bytes };
     const uint32_t key[2] = { Guest::GpuOffset(physical), endian };
     Handle handle = g_bufferKeys.Find(key);
     const uint8_t* data = Guest::Base + Guest::PhysicalAlias(physical);
     bytes = (bytes + 3) & ~3u;
     uint32_t wanted = bytes;
+    const uint64_t call = ++g_vertexCalls;
 
     if (handle != 0)
     {
         BufferEntry& entry = g_buffers[handle - 1];
+        // Verify mode, just switched on: sent whole once, so what each draw
+        // is held against is known to be what the GPU has.
+        if (Verify::On(Verify::Buffers) && entry.mirrorEpoch != Verify::epoch.load(std::memory_order_relaxed)
+            && entry.buffer && entry.seen != 0 && entry.bytes >= entry.seen)
+        {
+            D3D11_BOX box{ 0, 0, 0, entry.seen, 1, 1 };
+            g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data, 0, 0);
+            if (entry.shadow.size() >= entry.seen) memcpy(entry.shadow.data(), data, entry.seen);
+            entry.fingerprint = Fingerprint(data, entry.seen, entry.dense);
+            Sent(entry, 0, entry.seen, data, "sent whole as verify mode began");
+        }
         // Already looked at this frame. A buffer is looked at once a frame,
         // like a texture, but the title rewrites some of its small ones
         // between the draws of a frame: a tank's treads are strips built
@@ -1343,10 +2023,22 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
             const uint64_t since = entry.liveSince != 0 ? entry.liveSince : entry.watchedSince;
             if (!once && !noLive && since != 0 && entry.seen > AlwaysDenseBytes && entry.buffer)
             {
+                path = "written within the frame (pieces)";
                 const uint32_t span = std::min(entry.seen, entry.bytes);
                 if (WriteWatch::Clean(physical, span, since)) return handle;
                 const uint64_t now = WriteWatch::Sequence();
-                uint64_t sent = 0;
+                // Which pieces were written is found first, then the pages
+                // are watched again, and only then are the pieces read and
+                // sent. They were read first and watched after: a page
+                // already written once is no longer protected, so the title
+                // carrying on writing it (the next mark, the next effect,
+                // into the same page) between the read and the watch went
+                // unseen, and a later draw took the piece as it was half
+                // written: its vertices flung across the screen as lines.
+                // It took the command thread running alongside the title's
+                // writes, rather than a frame behind them, to show.
+                static thread_local std::vector<std::pair<uint32_t, uint32_t>> runs;
+                runs.clear();
                 uint32_t runStart = 0xFFFFFFFFu;
                 for (uint32_t at = 0; at < span; at += BufferPieceBytes)
                 {
@@ -1356,20 +2048,25 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
                     const bool last = at + length >= span;
                     if (runStart != 0xFFFFFFFFu && (!written || last))
                     {
-                        const uint32_t end = written ? at + length : at;
-                        D3D11_BOX box{ runStart, 0, 0, end, 1, 1 };
-                        g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data + runStart, 0, 0);
-                        if (entry.shadow.size() >= end) memcpy(entry.shadow.data() + runStart, data + runStart, end - runStart);
-                        sent += end - runStart;
+                        runs.emplace_back(runStart, written ? at + length : at);
                         runStart = 0xFFFFFFFFu;
                     }
                 }
                 entry.watchedSince = 0;
                 entry.stable = 0;
                 entry.liveSince = WriteWatch::Arm(physical, span) ? now : 0;
+                uint64_t sent = 0;
+                for (const auto& [first, end] : runs)
+                {
+                    D3D11_BOX box{ first, 0, 0, end, 1, 1 };
+                    g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data + first, 0, 0);
+                    Sent(entry, first, end, data, "written within the frame (pieces)");
+                    if (entry.shadow.size() >= end) memcpy(entry.shadow.data() + first, data + first, end - first);
+                    sent += end - first;
+                }
                 if (entry.dense) entry.fingerprint = 0;   // the next frame's look sends it whole if it is not the same
                 static int told = 0;
-                if (told++ < 8)
+                if ((told < 8 && told++ < 8))
                     printf("render: the vertex buffer at %08X (%u bytes) was written within a frame: %llu bytes of it sent again for a later draw\n",
                         physical, span, (unsigned long long)sent);
                 if (sent != 0)
@@ -1382,6 +2079,11 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
                 return handle;
             }
             if (once || (entry.seen > AlwaysDenseBytes && !audit) || !entry.dense) return handle;
+            // Watched since the frame's first look (a still buffer of 32 KB
+            // up, below): none of its pages written since, the same; one
+            // written is looked at whole.
+            const bool liveWritten = entry.liveSince != 0 && entry.seen <= AlwaysDenseBytes;
+            if (liveWritten && WriteWatch::Clean(physical, entry.seen, entry.liveSince)) return handle;
             if (audit && entry.seen > AlwaysDenseBytes && !entry.midFrame)
             {
                 if (Fingerprint(data, entry.seen, true) == entry.fingerprint) return handle;
@@ -1394,10 +2096,23 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
             }
             else
             {
-                if (Fingerprint(data, entry.seen, false) == entry.sampled) return handle;
+                // A buffer that changed in the last few looks (a decal or
+                // bullet mark pool gaining a mark, a model rebuilt) is looked
+                // at whole by the frame's later draws, not by sixty four
+                // samples: a mark is a few vertices among thousands, which
+                // the samples pass over, and the draw then took the pool as
+                // it was before the mark, the mark coming and going from one
+                // frame to the next. One still for a while keeps the sampled
+                // look. COD3_SAMPLEDMIDFRAME=1: sampled for every buffer.
+                static const bool sampledOnly = getenv("COD3_SAMPLEDMIDFRAME") != nullptr;
+                if (!sampledOnly && (entry.stable < StableLooks || liveWritten))
+                {
+                    if (Fingerprint(data, entry.seen, true) == entry.fingerprint) return handle;
+                }
+                else if (Fingerprint(data, entry.seen, false) == entry.sampled) return handle;
                 entry.midFrame = true;
                 static int announced = 0;
-                if (announced++ < 16)
+                if ((announced < 16 && announced++ < 16))
                     printf("render: the vertex buffer at %08X (%u bytes) changes within a frame; every draw looks at it now\n",
                         physical, entry.seen);
             }
@@ -1407,11 +2122,30 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
         entry.usedFrame = g_frame;
         if (!look) return handle;
         entry.checkedFrame = g_frame;
+        entry.lookedCall = call;
         wanted = std::max(bytes, entry.seen);
+        // Its pages watched from its last look and none written since: the
+        // same as it was sent, without a byte of it hashed. Most of what
+        // the command thread hashed was this: a few hundred buffers of the
+        // level's models, every byte every frame, ten megabytes a frame,
+        // unchanged since they were loaded. COD3_HASHLIVE=1: hashed again.
+        static const bool noLiveLooks = getenv("COD3_HASHLIVE") != nullptr || getenv("COD3_NOLIVEBUFFERS") != nullptr;
+        const bool wasWatched = entry.liveSince != 0;
+        if (!noLiveLooks && wasWatched && wanted <= entry.seen && entry.bytes >= wanted && entry.buffer
+            && WriteWatch::Clean(physical, wanted, entry.liveSince))
+        {
+            RenderStats::Frame().watchedLooks++;
+            if (entry.stable < StableLooks) entry.stable++;
+            return handle;
+        }
         // 0.5.99: a big buffer's pages watched from before this look, so a
         // write later in the frame is seen by the draws after it (above).
+        // And a still one of 32 KB up, so its next look can go by its pages
+        // (unless its pages keep saying written when it is not: memory it
+        // shares with something the title writes every frame).
         entry.liveSince = 0;
-        if (WriteWatch::Enabled() && wanted > AlwaysDenseBytes && entry.bytes >= wanted && getenv("COD3_NOLIVEBUFFERS") == nullptr)
+        const bool watchStill = !noLiveLooks && wanted >= (32u << 10) && entry.stable >= StableLooks && !entry.midFrame && entry.falseWrites < 4;
+        if (WriteWatch::Enabled() && (wanted > AlwaysDenseBytes || watchStill) && entry.bytes >= wanted && getenv("COD3_NOLIVEBUFFERS") == nullptr)
         {
             const uint64_t since = WriteWatch::Sequence();
             if (WriteWatch::Arm(physical, wanted)) entry.liveSince = since;
@@ -1431,12 +2165,15 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
                 return handle;
             }
             entry.watchedSince = 0;
+            path = "big, compared by pieces";
             uint64_t sent = 0;
             if (entry.shadow.size() < wanted)
             {
+                path = "big, first sent whole";
                 entry.shadow.assign(data, data + wanted);
                 D3D11_BOX box{ 0, 0, 0, wanted, 1, 1 };
                 g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data, 0, 0);
+                Sent(entry, 0, wanted, data, "big, first sent whole");
                 sent = wanted;
             }
             else
@@ -1458,6 +2195,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
                         const uint32_t end = changed ? at + length : at;
                         D3D11_BOX box{ runStart, 0, 0, end, 1, 1 };
                         g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data + runStart, 0, 0);
+                        Sent(entry, runStart, end, data, "big, compared by pieces");
                         sent += end - runStart;
                         runStart = 0xFFFFFFFFu;
                     }
@@ -1467,6 +2205,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
             if (sent != 0)
             {
                 entry.stable = 0;
+                entry.changedFrame = g_frame;
                 g_bufferUploads.fetch_add(1, std::memory_order_relaxed);
                 g_bufferBytes.fetch_add(sent, std::memory_order_relaxed);
                 RenderStats::Frame().bufferUploads++;
@@ -1503,6 +2242,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
         const uint64_t fingerprint = Fingerprint(data, wanted, entry.dense);
         if (fingerprint == entry.fingerprint && entry.bytes >= wanted)
         {
+            if (wasWatched && entry.falseWrites < 255) entry.falseWrites++;
             MissAudit("vertex buffer", physical, data, wanted, entry.dense, entry.auditDense);
             if (entry.stable < StableLooks) entry.stable++;
             // 0.5.94: a vertex or index buffer under the big-buffer size is
@@ -1527,11 +2267,14 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
             return handle;
         }
         entry.stable = 0;
+        entry.changedFrame = g_frame;
         entry.fingerprint = entry.dense ? fingerprint : Fingerprint(data, wanted, true);
         entry.dense = true;
         entry.seen = wanted;
+        path = "changed, sent whole";
         if (entry.bytes < wanted)
         {
+            path = "grown, made again";
             // Grown: made again below.
             g_resourceBytes -= entry.bytes;
             g_bufferKeys.Erase(entry.key);
@@ -1545,6 +2288,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
         {
             D3D11_BOX box{ 0, 0, 0, wanted, 1, 1 };
             g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data, 0, 0);
+            Sent(entry, 0, wanted, data, "changed, sent whole");
             if (!entry.midFrame && wanted <= AlwaysDenseBytes) entry.sampled = Fingerprint(data, wanted, false);
             g_bufferUploads.fetch_add(1, std::memory_order_relaxed);
             g_bufferBytes.fetch_add(wanted, std::memory_order_relaxed);
@@ -1554,6 +2298,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
         }
     }
 
+    if (path[0] != 'g') path = "new";
     if (!g_freeBuffers.empty()) { handle = g_freeBuffers.back(); g_freeBuffers.pop_back(); }
     else { g_buffers.emplace_back(); handle = Handle(g_buffers.size()); }
     BufferEntry& entry = g_buffers[handle - 1];
@@ -1562,6 +2307,8 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
     entry.fingerprint = Fingerprint(data, wanted, entry.dense);
     if (wanted <= AlwaysDenseBytes) entry.sampled = Fingerprint(data, wanted, false);
     entry.checkedFrame = entry.usedFrame = g_frame;
+    entry.changedFrame = g_frame;
+    entry.lookedCall = call;
     entry.seen = wanted;
     // A little room to grow: the title's dynamic buffers are asked for at
     // whatever size the frame needs, and a buffer made again every time
@@ -1582,6 +2329,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
     if (FAILED(g_device->CreateShaderResourceView(entry.buffer.Get(), &view, &entry.resource))) { entry.buffer.Reset(); g_freeBuffers.push_back(handle); return 0; }
     D3D11_BOX box{ 0, 0, 0, wanted, 1, 1 };
     g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data, 0, 0);
+    Sent(entry, 0, wanted, data, "new");
     entry.live = true;
     g_bufferKeys.Insert(key, handle);
     g_resourceBytes += entry.bytes;
@@ -1590,6 +2338,101 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
     RenderStats::Frame().bufferUploads++;
     RenderStats::Frame().uploadBytes += wanted;
     return handle;
+}
+
+bool RenderResources::NeedsRangeLook(Handle handle)
+{
+    // COD3_NORANGELOOKS=1: once a frame, as before.
+    static const bool off = getenv("COD3_NORANGELOOKS") != nullptr;
+    if (off || !Tuning::On(Tuning::rangeLooks) || handle == 0 || handle > g_buffers.size()) return false;
+    const BufferEntry& entry = g_buffers[handle - 1];
+    // Watched (the pages say what was written within the frame): left to
+    // the watch, unless its pages could not be watched.
+    if (WriteWatch::Enabled() && (entry.liveSince != 0 || entry.watchedSince != 0)) return false;
+    // Changing in the last few seconds: the title's pools of dynamic
+    // geometry change most frames; the level's own models stop changing
+    // once they are loaded, and are not looked at again.
+    return entry.live && entry.buffer && entry.seen > AlwaysDenseBytes && entry.checkedFrame == g_frame
+        && entry.lookedCall != g_vertexCalls && entry.changedFrame != 0 && g_frame - entry.changedFrame <= 600;
+}
+
+void RenderResources::LookRange(Handle handle, uint32_t physical, uint32_t firstByte, uint32_t endByte)
+{
+    if (handle == 0 || handle > g_buffers.size()) return;
+    BufferEntry& entry = g_buffers[handle - 1];
+    endByte = std::min(endByte, std::min(entry.seen, entry.bytes));
+    if (!entry.buffer || firstByte >= endByte) return;
+    const uint8_t* data = Guest::Base + Guest::PhysicalAlias(physical);
+    uint64_t sent = 0;
+    if (entry.shadow.size() >= endByte)
+    {
+        // A page at a time against what went up: only what differs goes.
+        constexpr uint32_t Piece = 4096;
+        uint8_t* shadow = entry.shadow.data();
+        uint32_t runStart = 0xFFFFFFFFu;
+        for (uint32_t at = firstByte & ~(Piece - 1); at < endByte; at += Piece)
+        {
+            const uint32_t length = std::min(Piece, endByte - at);
+            const bool changed = memcmp(data + at, shadow + at, length) != 0;
+            if (changed)
+            {
+                if (runStart == 0xFFFFFFFFu) runStart = at;
+                memcpy(shadow + at, data + at, length);
+            }
+            const bool last = at + length >= endByte;
+            if (runStart != 0xFFFFFFFFu && (!changed || last))
+            {
+                const uint32_t end = changed ? at + length : at;
+                D3D11_BOX box{ runStart, 0, 0, end, 1, 1 };
+                g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data + runStart, 0, 0);
+                Sent(entry, runStart, end, data, "range looked at again by a draw");
+                sent += end - runStart;
+                runStart = 0xFFFFFFFFu;
+            }
+        }
+    }
+    else
+    {
+        // No copy kept (under a megabyte): the part is sent as it is, and
+        // the next frame's look, finding the memory changed, sends it whole.
+        D3D11_BOX box{ firstByte, 0, 0, endByte, 1, 1 };
+        g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data + firstByte, 0, 0);
+        Sent(entry, firstByte, endByte, data, "range sent again by a draw");
+        sent = endByte - firstByte;
+        // Not a change found, so not counted as one: whether it keeps
+        // being looked at is the frame's first look's to say.
+    }
+    if (sent != 0)
+    {
+        if (entry.shadow.size() >= endByte) entry.changedFrame = g_frame;
+        g_bufferUploads.fetch_add(1, std::memory_order_relaxed);
+        g_bufferBytes.fetch_add(sent, std::memory_order_relaxed);
+        RenderStats::Frame().bufferUploads++;
+        RenderStats::Frame().uploadBytes += sent;
+    }
+}
+
+void RenderResources::VerifyRange(Handle handle, uint32_t physical, uint32_t firstByte, uint32_t endByte)
+{
+    if (handle == 0 || handle > g_buffers.size()) return;
+    BufferEntry& entry = g_buffers[handle - 1];
+    if (!entry.buffer || entry.mirrorEpoch != Verify::epoch.load(std::memory_order_relaxed)) return;
+    endByte = std::min(std::min(endByte, entry.seen), std::min(entry.bytes, uint32_t(entry.mirror.size())));
+    if (firstByte >= endByte) return;
+    Verify::Checked(Verify::Buffers);
+    const uint8_t* data = Guest::Base + Guest::PhysicalAlias(physical);
+    if (memcmp(data + firstByte, entry.mirror.data() + firstByte, endByte - firstByte) == 0) return;
+    uint32_t firstDiff = 0, lastDiff = 0, differ = 0;
+    for (uint32_t at = firstByte; at < endByte; at++)
+        if (data[at] != entry.mirror[at]) { if (differ++ == 0) firstDiff = at; lastDiff = at; }
+    Verify::Mismatch(Verify::Buffers, "vertex buffer %08X (%u bytes): a draw reads %u..%u, %u bytes there are not what the GPU has (%u..%u); last sent: %s",
+        physical, entry.seen, firstByte, endByte, differ, firstDiff, lastDiff + 1, entry.lastSent);
+    // Sent again, so the picture is right and one miss is not said by
+    // every draw after it.
+    D3D11_BOX box{ firstDiff, 0, 0, lastDiff + 1, 1, 1 };
+    g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data + firstDiff, 0, 0);
+    memcpy(entry.mirror.data() + firstDiff, data + firstDiff, lastDiff + 1 - firstDiff);
+    if (entry.shadow.size() >= lastDiff + 1) memcpy(entry.shadow.data() + firstDiff, data + firstDiff, lastDiff + 1 - firstDiff);
 }
 
 ID3D11ShaderResourceView* RenderResources::VertexBufferView(Handle handle)

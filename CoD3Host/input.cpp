@@ -179,6 +179,7 @@ namespace
     // swallows the pointer without asking cannot be left.
     std::atomic<bool> g_mouseHeld{ false };
     std::atomic<bool> g_captureSuspended{ false };
+    bool g_binocularKey = false;   // the campaign's Binoculars out key held (ReadKeyboard, under Refresh's lock)
     POINT g_centre{};
 
     void SetHold(bool hold)
@@ -523,6 +524,7 @@ namespace
     Input::Pad ReadKeyboard()
     {
         Input::Pad pad{};
+        g_binocularKey = false;
         // COD3_NOKEYBOARD=1 ignores the keyboard and mouse entirely, for
         // runs driven by a script while someone is using the machine: the
         // key state is global, and typing anywhere walked the title's menus.
@@ -594,9 +596,16 @@ namespace
             { keys.keys[Settings::Grenade], PadRightShoulder },
             { keys.keys[Settings::Smoke], PadLeftShoulder },
             { keys.keys[Settings::Objectives], PadLeft },
+#ifdef COD3_MP
             { keys.keys[Settings::BinocularsOut], PadUp },
+#endif
             { keys.keys[Settings::BinocularsAway], PadDown },
         };
+#ifndef COD3_MP
+        // The campaign's binoculars are the left stick held in, standing
+        // (Refresh, after the sprint): the Binoculars out key held is that.
+        g_binocularKey = keys.keys[Settings::BinocularsOut] != 0 && Down(keys.keys[Settings::BinocularsOut]);
+#endif
 
         for (const Mapping& mapping : mappings)
             if (mapping.key != 0 && Down(mapping.key)) pad.buttons |= mapping.button;
@@ -762,19 +771,34 @@ namespace
         // title until the run would end anyway: the stick or the keys no
         // longer forward, aiming down the sights or firing, or sprint
         // pressed again.
+        static SprintInput::State sprint;
         {
-            static SprintInput::State sprint;
 #ifdef COD3_MP
             const bool scopedBreath=g_scopedBreath.load();
+            const bool standing=false;
 #else
             const bool scopedBreath=false; // campaign uses separate binocular/breath bindings
+            const bool standing=true;      // L3 held standing: the campaign's binoculars
 #endif
             pad.buttons=SprintInput::Filter(sprint,pad.buttons,pad.thumbLY,pad.leftTrigger,
-                                            pad.rightTrigger,Settings::Get().toggleSprint,scopedBreath);
+                                            pad.rightTrigger,Settings::Get().toggleSprint,scopedBreath,standing);
         }
-        // Forward walking while ADS remains walking, not a sprint report.
-        g_sprinting.store(pad.leftTrigger<=30 && ((pad.buttons & PadLeftThumb)!=0 ||
-                          std::abs(int(pad.thumbLY))>20000 || std::abs(int(pad.thumbLX))>20000));
+#ifndef COD3_MP
+        // The Binoculars out key: the left stick held in, while not pushing
+        // forward (forward, the title would take it for a run).
+        if (g_binocularKey && pad.thumbLY < SprintInput::RunStart) pad.buttons |= PadLeftThumb;
+#endif
+        // Running, for the campaign's binoculars (movement_fixes.cpp): a run
+        // latched by tap to sprint, the stick pushed well forward, or L3
+        // held with the stick past half way forward (a run is only ever
+        // forward). L3 held standing, walking slowly, strafing or backing
+        // off is not one: that is the binoculars themselves. (A third of the
+        // way, 8000 up, counted as a run, and the click itself can push the
+        // stick that far: a player holding it in to raise them, standing,
+        // was taken for a runner and they never came up.) Forward walking
+        // while ADS remains walking, not a sprint report.
+        g_sprinting.store(pad.leftTrigger<=30 && (sprint.running || pad.thumbLY>20000 ||
+                          ((pad.buttons & PadLeftThumb)!=0 && pad.thumbLY>=SprintInput::RunStart)));
         // Presses of Start and the d-pad's up and down, counted as they
         // happen here (every few milliseconds): the game's frame, where the
         // binoculars look (mp_fixes.cpp), comes only twenty times a second,
@@ -816,7 +840,7 @@ namespace
             // the title sometimes walks its own menus with no one pressing
             // anything, and this says whether anything was pressed at all.
             static int announced = 0;
-            if (pad.buttons != g_pad.buttons && announced++ < 40)
+            if (pad.buttons != g_pad.buttons && (announced < 40 && announced++ < 40))
             {
                 printf("input: buttons 0x%04X (keyboard 0x%04X, script 0x%04X, pad 0x%04X, focus %d)\n",
                     pad.buttons, fromKeyboard, fromScript, fromPad, Window::HasFocus() ? 1 : 0);
@@ -827,7 +851,7 @@ namespace
             // ever seen pressing anything.
             static uint16_t lastFromPad = 0;
             static int padAnnounced = 0;
-            if (fromPad != lastFromPad && padAnnounced++ < 40)
+            if (fromPad != lastFromPad && (padAnnounced < 40 && padAnnounced++ < 40))
             {
                 printf("input: pad buttons 0x%04X, left stick %d,%d\n", fromPad, pad.thumbLX, pad.thumbLY);
                 fflush(stdout);

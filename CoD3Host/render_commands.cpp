@@ -10,6 +10,8 @@
 
 #include "render_commands.h"
 #include "render_internal.h"
+#include "tuning.h"
+#include "verify.h"
 #include "render_pipeline.h"
 #include "render_shaders.h"
 #include "render_resources.h"
@@ -51,6 +53,17 @@ namespace
     // sharp. The two before it still run, so the surface they make is
     // there for anything else that reads it.
     bool g_aimBlur = true;
+    bool g_hdrScene = false;    // the HDR mode: the frame tone mapped at the bloom's composite
+    bool g_steadyDecals = true; // the layers over a surface put a little nearer
+    float g_bloom = 1.0f;       // the bloom's strength, the game's at one
+    float g_hudGain = 0.0f;     // the HDR mode's HUD colour scale, nought for none
+    uint64_t g_sceneSwap = ~0ull;   // the frame the scene pass last ran on
+    // The shell shock pass (below): taken from the settings once a frame.
+    // It was a Settings::Get() on every draw, a lock and a copy of the
+    // whole settings block a thousand times a frame.
+    bool g_shellShockBlur = false;
+    // F11's shadow and foliage options, taken once a frame (SetRendering).
+    bool g_sharpShadows = true, g_fastShadowMaps = true, g_foliageCoverage = true;
     bool IsAimBlurProgram(uint64_t hash)
     {
         return hash == 0x56ccd878c09e55bbull;
@@ -224,6 +237,15 @@ namespace
         return state.modeControl == 5 && !runProgram;
     }
     constexpr RenderState::Handle NoPixelProgram = 0xFFFFFFFFu;
+    // A depth only draw with its colour mask closed: a shadow map's caster.
+    // It gets no pixel program at all, not even the one that cuts depth to
+    // the console's precision (which the shadow maps do not need: the cut
+    // keeps the frame's own passes agreeing with each other), so the GPU's
+    // depth only path draws it: a pixel program that writes depth turns
+    // off the fast depth only rate and part of the early depth test, and
+    // the shadow passes were most of the frame's GPU time in a battle.
+    // COD3_SHADOWDEPTHCUT=1 gives them the cutting program again.
+    constexpr RenderState::Handle NoPixelProgramFast = 0xFFFFFFFEu;
 
     bool Targets(const RenderState::Snapshot& state, const RenderShaders::Program* vs, const RenderShaders::Program* ps, DrawCommand& out, float& scaleY)
     {
@@ -251,6 +273,7 @@ namespace
             if (duplicate) continue;
             out.targets[i] = target->view;
             out.targetResources[i] = target->resource;
+            if (target->upgraded) out.upgradedTargets |= 1u << i;
             if (i == 0) out.colorTexture = target->texture;
             out.targetCount = i + 1;
         }
@@ -268,7 +291,7 @@ namespace
             // The first few, with their state: what a draw with nowhere to
             // draw is asking for.
             static int announced = 0;
-            if (announced++ < 6)
+            if ((announced < 6 && announced++ < 6))
             {
                 printf("render: draw with no target: primitive %u, %u indices, mode %u, colour mask %08X, depth control %08X, targets written %X, colour info %08X, depth info %08X, vs %016llx ps %016llx\n",
                     state.primitive, state.indexCount, state.modeControl, state.colorMask, state.depthControl, ps->colourTargets, state.colorInfo[0], state.depthInfo,
@@ -320,7 +343,7 @@ namespace
         static std::atomic<int> said{ 0 };
         static uint64_t last = 0;
         const uint64_t what = (uint64_t(words[1]) << 32) ^ (uint64_t(slot) << 8) ^ uint64_t(desc.Format);
-        if (what == last || said.fetch_add(1) >= 100) return;
+        if (what == last || (said.load(std::memory_order_relaxed) >= 100 || said.fetch_add(1) >= 100)) return;
         last = what;
         printf("render: frame %llu, %s texture %u, format %u at %08X (%ux%u), is bound to a view of DXGI format %u%s\n",
             (unsigned long long)RenderInternal::Swaps(), stage == 0 ? "pixel" : "vertex", slot, format, words[1] & 0xFFFFF000u,
@@ -347,10 +370,27 @@ namespace
                 binding.stage = uint8_t(stage);
                 binding.slot = uint8_t(fetch.slot);
                 binding.samplerSlot = uint8_t(fetch.sampler);
-                if (resolved) binding.view = RenderResources::ResolvedAt(words[1] & 0xFFFFF000u)->resource;
+                if (resolved) binding.view = RenderResources::ResolvedView(words[1] & 0xFFFFF000u, width, height);
                 else binding.view = RenderResources::TextureView(texture, fetch.dimension);
                 CheckView(binding.view, words, resolved, texture, fetch.slot, stage);
-                binding.sampler = RenderPipeline::SamplerObject(RenderPipeline::Sampler(words));
+                // A shadow map: a depth surface the program filters itself,
+                // four taps at a texel's corners blended by getWeights. Those
+                // go by the size given here, and with the title's size they
+                // filtered on the console's 512 texel grid however finely the
+                // map was drawn: shadows in blocks of the console's texels,
+                // and the texture filter setting blurring the depths besides.
+                // So the map's own size, and point sampling: four exact texels
+                // of the map as drawn. COD3_OLDSHADOWS=1 for the old way.
+                static const bool oldShadowsForced = getenv("COD3_OLDSHADOWS") != nullptr;
+                const bool oldShadows = oldShadowsForced || !g_sharpShadows;
+                const RenderResources::Resolved* shadow = (resolved && fetch.weights != 0 && !oldShadows) ? RenderResources::ResolvedAt(words[1] & 0xFFFFF000u) : nullptr;
+                if (shadow != nullptr && shadow->depth && shadow->guestWidth != 0 && shadow->guestHeight != 0)
+                {
+                    width = std::max(1u, uint32_t(std::lround(double(width) * shadow->width / shadow->guestWidth)));
+                    height = std::max(1u, uint32_t(std::lround(double(height) * shadow->height / shadow->guestHeight)));
+                    binding.sampler = RenderPipeline::SamplerObject(RenderPipeline::SamplerPoint(words));
+                }
+                else binding.sampler = RenderPipeline::SamplerObject(RenderPipeline::Sampler(words));
                 constants.textureSize[fetch.slot][0] = float(width);
                 constants.textureSize[fetch.slot][1] = float(height);
                 constants.textureSize[fetch.slot][2] = 1.0f / float(width);
@@ -360,18 +400,57 @@ namespace
                 // one byte order and the fetch reads it in another, and the
                 // swizzle in the fetch constant undoes that. The surfaces
                 // here never go through memory, so the swap is left out.
+                // Not only the 8_8_8_8 fetch with alpha as the fourth (0x60A):
+                // the damage flash (shot or hit by a melee attack) lays a
+                // resolved copy of an earlier frame over the picture, read
+                // with red and blue swapped the same way, and a brown scene
+                // with its red and blue swapped went purple. Any resolved
+                // surface read with red from the third channel and blue from
+                // the first gets them back in place, whatever its format and
+                // its other two channels. Each new pair of format and
+                // swizzle a resolved surface is read with goes in the log.
                 uint32_t swizzle = (words[3] >> 1) & 0xFFF;
-                if (resolved && swizzle == 0x60A && (words[1] & 0x3F) == 6) swizzle = 0x688;
+                if (resolved)
+                {
+                    const uint32_t format = words[1] & 0x3F;
+                    const uint32_t original = swizzle;
+                    if ((swizzle & 7) == 2 && ((swizzle >> 6) & 7) == 0) swizzle = (swizzle & ~0x1C7u) | (2u << 6);
+                    static std::atomic<uint32_t> seen[64];
+                    static std::atomic<uint32_t> seenCount{ 0 };
+                    const uint32_t key = ((format << 12) | original) + 1;
+                    const uint32_t count = std::min<uint32_t>(seenCount.load(std::memory_order_relaxed), 64);
+                    bool known = false;
+                    for (uint32_t i = 0; i < count && !known; i++) known = seen[i].load(std::memory_order_relaxed) == key;
+                    const uint32_t slot = (known || count >= 64) ? 64 : seenCount.fetch_add(1, std::memory_order_relaxed);
+                    if (slot < 64)
+                    {
+                        seen[slot].store(key, std::memory_order_relaxed);
+                        printf("render: a resolved surface at %08X (%ux%u) read as format %u with swizzle %03X%s\n",
+                            words[1] & 0xFFFFF000u, width, height, format, original,
+                            swizzle != original ? ", red and blue put back" : "");
+                        fflush(stdout);
+                    }
+                }
                 constants.textureAdjustment[fetch.slot][0] = swizzle;
                 constants.textureAdjustment[fetch.slot][1] = (words[0] >> 2) & 0xFF;
             }
         }
     }
 
+    // The draw's buffers that want the part it reads looked at again
+    // (RenderResources::NeedsRangeLook), for LookRanges once its indices
+    // are known.
+    struct RangeLook { Handle buffer; uint32_t physical; uint32_t stride; };
+    std::vector<RangeLook> g_rangeLooks;
+    std::vector<RangeLook> g_verifyBuffers;   // verify mode: every buffer the draw reads
+
     // The vertex buffers the vertex program fetches. False when one could
     // not be had.
     bool Buffers(const RenderShaders::Program* vs, DrawCommand& out)
     {
+        g_rangeLooks.clear();
+        g_verifyBuffers.clear();
+        const bool verify = Verify::On(Verify::Buffers);
         for (const XenosHlsl::VertexFetch& fetch : vs->vertexFetches)
         {
             uint32_t word0, word1;
@@ -382,7 +461,7 @@ namespace
             if ((word1 & 3) != 2)
             {
                 static int announced = 0;
-                if (announced++ < 4) printf("render: a vertex buffer in byte order %u, drawn as order 2\n", word1 & 3);
+                if ((announced < 4 && announced++ < 4)) printf("render: a vertex buffer in byte order %u, drawn as order 2\n", word1 & 3);
             }
             const Handle buffer = RenderResources::VertexBufferFor(word0 & ~3u, ((word1 >> 2) & 0xFFFFFF) * 4, 2);
             ID3D11ShaderResourceView* view = RenderResources::VertexBufferView(buffer);
@@ -390,8 +469,126 @@ namespace
             DrawCommand::Buffer& binding = out.buffers[out.bufferCount++];
             binding.slot = uint8_t(fetch.slot);
             binding.view = view;
+            if (RenderResources::NeedsRangeLook(buffer)) g_rangeLooks.push_back(RangeLook{ buffer, word0 & ~3u, fetch.stride });
+            if (verify) g_verifyBuffers.push_back(RangeLook{ buffer, word0 & ~3u, fetch.stride });
         }
         return true;
+    }
+
+    // With "Watch memory writes" off: the vertices this draw reads, of a
+    // big buffer the frame's first draw looked at and the title has been
+    // changing, compared again and sent where they differ. The title
+    // writes its dynamic geometry (marks, effects) into one big pool a
+    // piece at a time through the frame, each piece just before the draw
+    // that uses it; looked at only by the frame's first draw, a later draw
+    // got what its piece held before, and its vertices were flung across
+    // the screen as lines. That took the command thread running alongside
+    // the title's writes, rather than a frame behind them, to show. Which
+    // vertices: the indices' lowest and highest, with the index offset.
+    // The lowest and highest vertex the draw's indices name, without the
+    // index offset. False for a draw with none.
+    bool DrawVertexRange(const RenderState::Snapshot& state, const DrawCommand& out, uint32_t& lowest, uint32_t& highest)
+    {
+        const uint32_t count = state.indexCount;
+        if (count == 0) return false;
+        lowest = 0xFFFFFFFFu; highest = 0;
+        if (state.sourceSelect == 0)
+        {
+            const bool strips = out.topology == D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP || out.topology == D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP;
+            const bool resetEnabled = strips && (state.suScModeControl & (1u << 21)) != 0;
+            const uint8_t* data = Guest::Base + Guest::PhysicalAlias(state.indexBase);
+            if (state.wideIndices)
+            {
+                const uint32_t reset = resetEnabled ? state.resetIndex & 0xFFFFFFu : 0xFFFFFFFFu;
+                const uint32_t* from = reinterpret_cast<const uint32_t*>(data);
+                for (uint32_t i = 0; i < count; i++)
+                {
+                    const uint32_t index = _byteswap_ulong(from[i]);
+                    if (resetEnabled && (index & 0xFFFFFFu) == reset) continue;
+                    lowest = std::min(lowest, index); highest = std::max(highest, index);
+                }
+            }
+            else
+            {
+                const uint32_t reset = resetEnabled ? state.resetIndex & 0xFFFFu : 0xFFFFFFFFu;
+                const uint16_t* from = reinterpret_cast<const uint16_t*>(data);
+                for (uint32_t i = 0; i < count; i++)
+                {
+                    const uint32_t index = BSwap16(from[i]);
+                    if (index == reset) continue;
+                    lowest = std::min(lowest, index); highest = std::max(highest, index);
+                }
+            }
+        }
+        else { lowest = 0; highest = count - 1; }
+        return lowest <= highest;
+    }
+
+    void LookRanges(const RenderState::Snapshot& state, const DrawCommand& out)
+    {
+        uint32_t lowest, highest;
+        if (!DrawVertexRange(state, out, lowest, highest)) return;
+        const int64_t offset = state.indexOffset;
+        for (const RangeLook& look : g_rangeLooks)
+        {
+            if (look.stride == 0) continue;
+            const int64_t strideBytes = int64_t(look.stride) * 4;
+            auto send = [&](int64_t first, int64_t last)
+            {
+                if (last < 0) return;
+                first = std::max<int64_t>(first, 0);
+                const int64_t from = std::min<int64_t>(first * strideBytes, 0xFFFFFFFFll);
+                const int64_t to = std::min<int64_t>((last + 1) * strideBytes, 0xFFFFFFFFll);
+                RenderResources::LookRange(look.buffer, look.physical, uint32_t(from), uint32_t(to));
+            };
+            // With the offset, as the program sees the vertex; and without,
+            // should the host's vertex id not carry it.
+            send(int64_t(lowest) + offset, int64_t(highest) + offset);
+            if (offset != 0) send(lowest, highest);
+        }
+    }
+
+    // Verify mode, late writes: what each draw read of its vertices and
+    // indices, kept with a hash of it, and hashed again when the frame is
+    // swapped. The title's dynamic geometry (the bullet holes among it) is
+    // in pools it fills a frame at a time, two of them in turn; one that
+    // changed between the draw and the frame's end was still being written
+    // when the draw read it (the console's GPU reads it later than the
+    // command thread here does). Only in verify mode.
+    struct LateCheck { uint32_t physical, bytes; uint64_t hash; bool indices; uint64_t ps; };
+    std::vector<LateCheck> g_lateChecks;
+    uint64_t HashGuest(uint32_t physical, uint32_t bytes)
+    {
+        const uint8_t* data = Guest::Base + Guest::PhysicalAlias(physical);
+        uint64_t h = 1469598103934665603ull;
+        for (uint32_t i = 0; i < bytes; i++) { h ^= data[i]; h *= 1099511628211ull; }
+        return h;
+    }
+    void NoteForLateCheck(uint32_t physical, uint32_t bytes, bool indices, uint64_t ps)
+    {
+        if (bytes == 0 || bytes > (64u << 10) || g_lateChecks.size() >= 20000) return;
+        g_lateChecks.push_back(LateCheck{ physical, bytes, HashGuest(physical, bytes), indices, ps });
+    }
+
+    // Verify mode: the vertices the draw reads, with the index offset, held
+    // against what was sent of each of its buffers (verify.h).
+    void VerifyDrawBuffers(const RenderState::Snapshot& state, const DrawCommand& out, uint64_t ps)
+    {
+        uint32_t lowest, highest;
+        if (!DrawVertexRange(state, out, lowest, highest)) return;
+        const int64_t first = std::max<int64_t>(int64_t(lowest) + state.indexOffset, 0);
+        const int64_t last = int64_t(highest) + state.indexOffset;
+        if (last < first) return;
+        if (state.sourceSelect == 0) NoteForLateCheck(state.indexBase, state.indexCount * (state.wideIndices ? 4u : 2u), true, ps);
+        for (const RangeLook& look : g_verifyBuffers)
+        {
+            if (look.stride == 0) continue;
+            const int64_t strideBytes = int64_t(look.stride) * 4;
+            const uint32_t from = uint32_t(std::min<int64_t>(first * strideBytes, 0xFFFFFFFFll));
+            const uint32_t to = uint32_t(std::min<int64_t>((last + 1) * strideBytes, 0xFFFFFFFFll));
+            RenderResources::VerifyRange(look.buffer, look.physical, from, to);
+            if (to > from) NoteForLateCheck(look.physical + from, to - from, false, ps);
+        }
     }
 
     // The float files, packed to what the programs read, and the draw's own
@@ -429,7 +626,7 @@ namespace
         }
         const bool drawChanged = memcmp(&g_lastConstants, &constants, sizeof(constants)) != 0;
         const RenderShaders::Program* programs[2] = { vs, ps };
-        const Handle handles[2] = { out.vertexShader, out.pixelShader };
+        const Handle handles[2] = { out.vertexShader, out.pixelShader & ~RenderShaders::OpaqueVariantBit };
         out.ring = RenderResources::ConstantOffsetsAvailable();
         if (!out.ring)
         {
@@ -471,25 +668,24 @@ namespace
             // COD3_CONSTCHECK=1: a stage whose upload is skipped held against
             // what the upload before it packed: a constant that differs is
             // one the skip got wrong.
-            static const bool constCheck = getenv("COD3_CONSTCHECK") != nullptr;
+            static const bool constCheckEnv = getenv("COD3_CONSTCHECK") != nullptr;
+            const bool constCheck = constCheckEnv || Verify::On(Verify::Constants);
             if (constCheck && !upload[stage] && g_packedShadow[stage].size() == size_t(need[stage]) * 4)
             {
+                Verify::Checked(Verify::Constants);
                 const uint32_t* from = file + (stage == 0 ? 0x4000 : 0x4400);
                 const size_t count = map.empty() ? 256 : map.size();
                 for (size_t i = 0; i < count; i++)
                 {
                     const uint32_t constant = map.empty() ? uint32_t(i) : map[i];
                     if (memcmp(&g_packedShadow[stage][i * 4], from + constant * 4, 16) == 0) continue;
-                    static int told = 0;
-                    if (told++ < 30)
-                    {
-                        printf("render: constant check: %s %016llx c%u was uploaded as %08X %08X %08X %08X, is %08X %08X %08X %08X now, the sent file says %08X; record %d\n",
-                            stage == 0 ? "vs" : "ps", (unsigned long long)programs[stage]->hash, constant,
-                            g_packedShadow[stage][i * 4], g_packedShadow[stage][i * 4 + 1], g_packedShadow[stage][i * 4 + 2], g_packedShadow[stage][i * 4 + 3],
-                            from[constant * 4], from[constant * 4 + 1], from[constant * 4 + 2], from[constant * 4 + 3],
-                            g_sentFile[stage][constant * 4], record ? 1 : 0);
-                        fflush(stdout);
-                    }
+                    Verify::Mismatch(Verify::Constants, "%s %016llx c%u was uploaded as %08X %08X %08X %08X, is %08X %08X %08X %08X now; skipped as unchanged (record %d)",
+                        stage == 0 ? "vs" : "ps", (unsigned long long)programs[stage]->hash, constant,
+                        g_packedShadow[stage][i * 4], g_packedShadow[stage][i * 4 + 1], g_packedShadow[stage][i * 4 + 2], g_packedShadow[stage][i * 4 + 3],
+                        from[constant * 4], from[constant * 4 + 1], from[constant * 4 + 2], from[constant * 4 + 3], record ? 1 : 0);
+                    // Uploaded after all, so the draw is right and the miss
+                    // is said once rather than by every draw after it.
+                    upload[stage] = true;
                     break;
                 }
             }
@@ -569,8 +765,8 @@ namespace
                         fflush(stdout);
                     }
                 }
-                static const bool constCheck = getenv("COD3_CONSTCHECK") != nullptr;
-                if (constCheck) g_packedShadow[stage].assign(words, words + need[stage] * 4);
+                static const bool constCheckEnv = getenv("COD3_CONSTCHECK") != nullptr;
+                if (constCheckEnv || Verify::On(Verify::Constants)) g_packedShadow[stage].assign(words, words + need[stage] * 4);
                 g_uploaded.floatAt[stage] = base + at;
                 g_uploaded.floatCount[stage] = need[stage];
                 g_uploaded.floatProgram[stage] = handles[stage];
@@ -633,7 +829,7 @@ namespace
         if (!past) return;
         static std::atomic<int> said{ 0 };
         static uint64_t lastHash = 0;
-        if (vs->hash == lastHash || said.fetch_add(1) >= 60) return;
+        if (vs->hash == lastHash || (said.load(std::memory_order_relaxed) >= 60 || said.fetch_add(1) >= 60)) return;
         lastHash = vs->hash;
         printf("render: frame %llu, vs %016llx: %u indices (%u resets) from %u to %u, offset %d, clamp %u..%u, the buffer has %u vertices\n",
             (unsigned long long)RenderInternal::Swaps(), (unsigned long long)vs->hash, state.indexCount, resets, lowest, highest,
@@ -954,7 +1150,7 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
         // The host draws a point as one pixel; a wider one is noted.
         out.topology = D3D11_PRIMITIVE_TOPOLOGY_POINTLIST;
         static int announced = 0;
-        if (((state.pointSize & 0xFFFF) > 8 || (state.pointSize >> 16) > 8) && announced++ < 4)
+        if (((state.pointSize & 0xFFFF) > 8 || (state.pointSize >> 16) > 8) && (announced < 4 && announced++ < 4))
             printf("render: a point list of %u with a point size of %u by %u eighths of a pixel, drawn as pixels\n", state.indexCount, state.pointSize & 0xFFFF, state.pointSize >> 16);
         break;
     }
@@ -971,7 +1167,20 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
     const RenderShaders::Program* vs;
     const RenderShaders::Program* ps;
     if (!Programs(out, vs, ps)) return false;
-    if (DepthOnlyMode(state)) { out.ps = nullptr; out.pixelShader = NoPixelProgram; }
+    if (DepthOnlyMode(state))
+    {
+        static const bool shadowCutForced = getenv("COD3_SHADOWDEPTHCUT") != nullptr;
+        const bool shadowCut = shadowCutForced || !g_fastShadowMaps;
+        out.ps = nullptr;
+        // Only a shadow map's caster goes without the depth cut: its
+        // viewport is square (512 or 1024 a side). A depth only draw into
+        // the frame's own surface (a depth pass ahead of the colour pass)
+        // keeps the cut, or its depth and the colour pass's would not
+        // agree and the surfaces drawn over it would flicker.
+        const float vx = std::fabs(state.viewport[0]), vy = std::fabs(state.viewport[2]);
+        const bool squareViewport = vx >= 64.0f && std::fabs(vx - vy) < 1.0f;
+        out.pixelShader = (!shadowCut && state.colorMask == 0 && squareViewport) ? NoPixelProgramFast : NoPixelProgram;
+    }
     if (state.pitch == 0) { Skip(SkipPitch); return false; }
 
     RenderStats::Enter(RenderStats::SectionTargets);
@@ -1016,7 +1225,22 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
     // surface. COD3_ZPASSBEHIND=0 leaves it where it is.
     static const bool behindOff = []() { const char* t = getenv("COD3_ZPASSBEHIND"); return t != nullptr && t[0] == '0'; }();
     const bool behind = !behindOff && DepthOnlyMode(state) && state.colorMask != 0;
-    out.rasterizer = RenderPipeline::Rasterizer(state.suScModeControl, true, out.rectangles, oldOffset ? state.polyOffset : slopeOnly, behind);
+    // The layers laid over a surface (the decals: pixel program
+    // d6d768427524ea61 and the like): tested greater or equal, writing no
+    // depth, blended. Put a little nearer (render_pipeline.cpp), so they no
+    // longer flicker against the surface under them. F11's "Steady decals";
+    // COD3_NODECALNUDGE=1 leaves them, to compare.
+    static const bool nudgeOff = getenv("COD3_NODECALNUDGE") != nullptr;
+    const uint32_t depthFunction = (state.depthControl >> 4) & 7;
+    const bool forward = !nudgeOff && g_steadyDecals && out.depthView != nullptr && !DepthOnlyMode(state) &&
+                         ((state.depthControl >> 1) & 1) != 0 && ((state.depthControl >> 2) & 1) == 0 && depthFunction == 6 &&
+                         state.blendControl[0] != 0x00010001;
+    out.rasterizer = RenderPipeline::Rasterizer(state.suScModeControl, true, out.rectangles, oldOffset ? state.polyOffset : slopeOnly, behind, forward);
+    // Verify mode: every such layer (whether or not it is nudged) counted on
+    // the GPU, how many of its samples passed (render_d3d11.cpp).
+    out.layerQuery = Verify::On(Verify::Buffers) && out.depthView != nullptr && !DepthOnlyMode(state) &&
+                     ((state.depthControl >> 1) & 1) != 0 && ((state.depthControl >> 2) & 1) == 0 && depthFunction == 6 &&
+                     state.blendControl[0] != 0x00010001;
     out.blend = RenderPipeline::Blend(state.blendControl, state.colorMask);
     out.depth = RenderPipeline::Depth(out.depthView ? state.depthControl : 0, state.stencilRefMask);
     memcpy(out.blendFactor, state.blendFactor, sizeof(out.blendFactor));
@@ -1028,6 +1252,25 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
     if (RenderPipeline::BlendTakesConstantAlpha(state.blendControl))
         out.blendFactor[0] = out.blendFactor[1] = out.blendFactor[2] = state.blendFactor[3];
     out.stencilReference = state.stencilRefMask & 0xFF;
+    // The bloom's composite: one full screen draw of this pixel program,
+    // adding the blurred bright parts (an 886 pixel square at 4K) to the
+    // frame by the constant colour, right before the HUD (seen with the
+    // RenoDX devkit: draw 2148 of 2180, then the HUD's from 2149). Its
+    // strength is the HDR tab's bloom slider, in SDR too; and in the HDR
+    // mode the frame is tone mapped right before it (render_d3d11.cpp's
+    // HdrScenePass) and the bloom added over the tone mapped picture, so the
+    // halos stay the game's and the HUD is drawn over the finished picture.
+    // COD3_HDRSCENEPS=hash names another program for the place.
+    {
+        static const uint64_t composite = []() { const char* t = getenv("COD3_HDRSCENEPS"); return t ? uint64_t(strtoull(t, nullptr, 16)) : 0xfe6578445de135eaull; }();
+        const bool adds = ((state.blendControl[0] >> 8) & 0x1F) == 1;   // the destination's factor one
+        if (ps != nullptr && ps->hash == composite && adds && out.targetCount > 0 && out.targets[0] != nullptr)
+        {
+            for (int i = 0; i < 3; i++) out.blendFactor[i] *= g_bloom;
+            out.hdrScene = g_hdrScene && (out.upgradedTargets & 1) != 0;
+            if (out.hdrScene) g_sceneSwap = RenderInternal::Swaps();
+        }
+    }
     // Only the opaque draws may go flat: a blended one in a flat colour
     // with an alpha of one would cover the frame.
     out.opaque = state.blendControl[0] == 0x00010001;
@@ -1053,6 +1296,45 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
     constants.flags[1] = ((state.colorControl >> 3) & 1) ? (state.colorControl & 7) : 7;   // the alpha test, or always
     constants.flags[2] = state.alphaReference;
     constants.flags[3] = uint32_t(ps->hash);
+    // Alpha to coverage for an alpha tested draw into a multisampled target
+    // (xenos_hlsl.cpp's alpha test). COD3_NOCOVERAGE=1 leaves it out.
+    {
+        static const bool noCoverageForced = getenv("COD3_NOCOVERAGE") != nullptr;
+        const bool noCoverage = noCoverageForced || !g_foliageCoverage;
+        const uint32_t samples = RenderResources::TargetSamples(state.pitch);
+        constants.coverage[0] = (!noCoverage && samples > 1 && out.targetCount > 0 && constants.flags[1] != 7) ? samples : 0u;
+        constants.coverage[1] = out.upgradedTargets;
+        constants.coverage[2] = constants.coverage[3] = 0;
+    }
+    // The index offset (VGT_INDX_OFFSET), added to each index by the
+    // vertex program itself (xenos_hlsl.cpp: coverage.z), not by the draw
+    // call's base vertex. Whether Direct3D 11's SV_VertexID carries the base
+    // vertex is not something every driver agrees on, and where it did not
+    // the vertices were fetched from the start of the buffer. The title's
+    // dynamic pools (the bullet holes, the tracers) are drawn at a growing
+    // offset into two pools taken in turn, and each frame drew whatever
+    // stale geometry lay at the pool's start: the holes blinked (one pool's
+    // start covered 29 pixels of the screen, the other's 3526, for the same
+    // draw), and old tracers stayed hanging where they had been.
+    constants.coverage[2] = uint32_t(state.indexOffset);
+    // The HDR mode's HUD: what is drawn into the frame after the scene pass
+    // has tone mapped it (the HUD, the menus over a level) has its colour
+    // scaled (coverage.w, a float; nought for none), so the HUD's white,
+    // which the title draws at about 86%, comes out at the UI brightness.
+    constants.coverage[3] = 0;
+    if (g_hudGain > 0.0f && g_sceneSwap == RenderInternal::Swaps() && !out.hdrScene && (out.upgradedTargets & 1) != 0)
+        memcpy(&constants.coverage[3], &g_hudGain, 4);
+    // A draw with the alpha test off takes its pixel program's variant
+    // without it (render_shaders.cpp), once built: the same picture, and
+    // the GPU's early depth test whole for it.
+    if (constants.flags[1] == 7 && out.ps != nullptr && ps != nullptr && out.pixelShader < RenderShaders::OpaqueVariantBit && Tuning::On(Tuning::opaqueShaders))
+    {
+        if (ID3D11DeviceChild* opaque = ps->opaque.load(std::memory_order_acquire))
+        {
+            out.ps = static_cast<ID3D11PixelShader*>(opaque);
+            out.pixelShader |= RenderShaders::OpaqueVariantBit;
+        }
+    }
     // The pixel's own position, which the console writes into a register
     // of the pixel program when the program control asks (bit 18), the
     // register named by the context's bits 8 to 15. The soft particles
@@ -1080,7 +1362,7 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
     // unless "Shell shock screen blur" is ticked in F11 (found from F12
     // captures of the shock: present at its first and eighth frame, gone by
     // its twentieth, and the frame black from that draw on).
-    if (!Settings::Get().shellShockBlur && ps != nullptr && ps->hash == 0x5fb07e1b8502496aull) return false;
+    if (!g_shellShockBlur && ps != nullptr && ps->hash == 0x5fb07e1b8502496aull) return false;
     // debug.txt's skip_vs and skip_ps, and dump_vs: what a vertex program's
     // draws are given, the vertices as the title wrote them.
     {
@@ -1100,7 +1382,49 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
 
     RenderStats::Enter(RenderStats::SectionIndices);
     if (!Indices(state, convertQuads, convertFan, out)) return false;
-    out.baseVertex = state.indexOffset;
+    out.baseVertex = 0;   // added by the vertex program (coverage.z, above)
+    if (!g_rangeLooks.empty() || !g_verifyBuffers.empty())
+    {
+        RenderStats::Enter(RenderStats::SectionBuffers);
+        if (!g_rangeLooks.empty()) LookRanges(state, out);
+        if (!g_verifyBuffers.empty()) VerifyDrawBuffers(state, out, ps != nullptr ? ps->hash : 0);
+        if (!g_verifyBuffers.empty()) out.layerVertices = g_verifyBuffers.front().physical;
+        // Verify mode: the bullet holes' draws (or COD3_LAYERPS's) written out
+        // whole, the first 120: what of their depth could differ from one
+        // frame to the next (their two pools give different sample counts).
+        static const uint64_t layerPs = []() { const char* t = getenv("COD3_LAYERPS"); return t ? uint64_t(strtoull(t, nullptr, 16)) : 0xd6d768427524ea61ull; }();
+        static int layerTold = 0;
+        if (out.layerQuery && ps != nullptr && ps->hash == layerPs && layerTold < 120 && !g_verifyBuffers.empty() && state.sourceSelect == 0)
+        {
+            layerTold++;
+            const RangeLook& look = g_verifyBuffers.front();
+            float vc[16];
+            for (int i = 0; i < 16; i++) { const uint32_t w = RenderState::Register(RenderState::VertexConstants + i); memcpy(&vc[i], &w, 4); }
+            printf("verify: layer draw, frame %llu, pool %08X, indices at %08X x%u (wide %d), offset %d, min %u max %u, sc %08X, poly %g %g %g %g, vte %03X, depth %08X, vp %g %g %g %g %g %g\n",
+                (unsigned long long)RenderInternal::Swaps(), look.physical, state.indexBase, state.indexCount, state.wideIndices ? 1 : 0, state.indexOffset,
+                state.minVertexIndex, state.maxVertexIndex, state.suScModeControl, state.polyOffset[0], state.polyOffset[1], state.polyOffset[2], state.polyOffset[3],
+                state.vteControl, state.depthControl, state.viewport[0], state.viewport[1], state.viewport[2], state.viewport[3], state.viewport[4], state.viewport[5]);
+            printf("   c0-3: %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g\n", vc[0], vc[1], vc[2], vc[3], vc[4], vc[5], vc[6], vc[7],
+                vc[8], vc[9], vc[10], vc[11], vc[12], vc[13], vc[14], vc[15]);
+            const uint8_t* indexData = Guest::Base + Guest::PhysicalAlias(state.indexBase);
+            printf("   vertices:");
+            for (uint32_t i = 0; i < state.indexCount && i < 12; i++)
+            {
+                const uint32_t index = state.wideIndices ? _byteswap_ulong(reinterpret_cast<const uint32_t*>(indexData)[i])
+                                                         : BSwap16(reinterpret_cast<const uint16_t*>(indexData)[i]);
+                const int64_t vertex = int64_t(index) + state.indexOffset;
+                if (vertex < 0 || vertex >= 0x8000) { printf(" [%u ?]", index); continue; }
+                const uint8_t* at = Guest::Base + Guest::PhysicalAlias(look.physical + uint32_t(vertex) * look.stride * 4);
+                float xyz[3];
+                for (int k = 0; k < 3; k++) { const uint32_t w = _byteswap_ulong(reinterpret_cast<const uint32_t*>(at)[k]); memcpy(&xyz[k], &w, 4); }
+                const uint32_t colour = _byteswap_ulong(reinterpret_cast<const uint32_t*>(at)[5]);
+                printf(" [%u: %.3f %.3f %.3f %08X]", index, xyz[0], xyz[1], xyz[2], colour);
+            }
+            printf("\n");
+            fflush(stdout);
+        }
+        RenderStats::Enter(RenderStats::SectionIndices);
+    }
     IndexCheck(state, vs, out);
     switch (out.topology)
     {
@@ -1254,6 +1578,34 @@ bool RenderCommands::PrepareResolve(ResolveCommand& out)
 }
 
 void RenderCommands::SetAimBlur(bool drawn) { g_aimBlur = drawn; }
+void RenderCommands::SetSteadyDecals(bool on) { g_steadyDecals = on; }
+
+void RenderCommands::CheckLateWrites()
+{
+    if (g_lateChecks.empty()) return;
+    for (const LateCheck& check : g_lateChecks)
+    {
+        Verify::Checked(Verify::Buffers);
+        if (HashGuest(check.physical, check.bytes) != check.hash)
+            Verify::Mismatch(Verify::Buffers, "the %s at %08X (%u bytes) changed after a draw read them, before the frame ended: written late by the title (ps %016llx)",
+                check.indices ? "indices" : "vertices", check.physical, check.bytes, (unsigned long long)check.ps);
+    }
+    g_lateChecks.clear();
+}
+
+void RenderCommands::SetHdr(bool scenePass, float bloom, float hudGain)
+{
+    g_hdrScene = scenePass;
+    g_bloom = bloom;
+    g_hudGain = scenePass ? hudGain : 0.0f;
+}
+void RenderCommands::SetShellShockBlur(bool drawn) { g_shellShockBlur = drawn; }
+void RenderCommands::SetRendering(bool sharpShadows, bool fastShadowMaps, bool foliageCoverage)
+{
+    g_sharpShadows = sharpShadows;
+    g_fastShadowMaps = fastShadowMaps;
+    g_foliageCoverage = foliageCoverage;
+}
 
 void RenderCommands::ReportSkips()
 {
