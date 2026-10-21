@@ -71,6 +71,14 @@ namespace Render
     // late. COD3_DEPTHREADBACK=0 leaves it on the host.
     void CpuReadsDepthAt(uint32_t physical);
 
+    // The button prompts drawn as keys (pc_prompts.cpp): while cells are
+    // given, the texture at `physical` (the button icon font's) is drawn as
+    // a picture made here, a key cap in each cell (u0 v0 u1 v1 over the
+    // texture) with its label (UTF-8); none, the texture as it is. From any
+    // thread; the picture is made again only when the cells change.
+    struct PromptCell { float u0, v0, u1, v1; char label[24]; };
+    void SetPromptKeys(uint32_t physical, const PromptCell* cells, uint32_t count);
+
     // The hash of the stage's current program, for the traces.
     uint64_t CurrentProgramHash(bool pixel);
 

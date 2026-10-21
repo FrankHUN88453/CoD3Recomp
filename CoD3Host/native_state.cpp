@@ -46,6 +46,7 @@
 #include "settings.h"
 
 #include <algorithm>
+#include <intrin.h>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -213,15 +214,22 @@ namespace
     struct ProgramMemo { uint32_t physical = 0, dwords = 0; uint64_t sum = 0, hash = 0; };
     ProgramMemo g_programMemo[4096];
 
+    uint64_t g_programLoads = 0, g_programHits = 0, g_programDwords = 0, g_programImmediate = 0;
     Program LoadedProgram(uint8_t* base, uint32_t physical, uint32_t dwords)
     {
+        g_programLoads++;
+        g_programDwords += dwords;
         Program program{ physical, dwords, 0 };
         if (dwords == 0 || dwords > 0x4000) return program;
         const uint8_t* bytes = base + Guest::PhysicalAlias(physical);
         const uint64_t sum = WordSum(bytes, dwords);
-        ProgramMemo& memo = g_programMemo[(physical >> 2) & 4095];
+        // By a hash of the address: the microcode is allocated on wide
+        // boundaries, and its address's low bits put nearly every program in
+        // a handful of slots (a fifth of the loads were found).
+        ProgramMemo& memo = g_programMemo[(((physical >> 2) ^ dwords) * 0x9E3779B1u) >> 20];
         if (memo.physical == physical && memo.dwords == dwords && memo.sum == sum)
         {
+            g_programHits++;
             program.hash = memo.hash;
             return program;
         }
@@ -275,62 +283,115 @@ namespace
         return *model;
     }
 
-    // A draw packet's state.
+    // A draw packet's state. Of a fixed size and copied whole, so a reader
+    // can take one without a lock (RecordSlot): the lists in it are short
+    // (a draw's constants from memory, a dozen at most in the levels
+    // measured; a pass's own registers, three).
+    constexpr uint32_t MaxMemory = 24, MaxPassRegisters = 8;
     struct Record
     {
+        uint32_t key = 0;          // the packet's last word, physical: the slot's key
         uint32_t lastWordValue = 0;
         uint32_t initiator = 0;
         uint32_t device = 0;
         uint64_t chunks[Chunks];   // the copy, by chunk: arena serials
         uint64_t oldest = 0;       // the oldest of them
-        std::vector<std::pair<uint16_t, uint32_t>> constantMemory;   // float4 index: physical address
         Program vertex[2], pixel[2];
-        std::vector<std::pair<uint32_t, uint32_t>> passRegisters[2];
+        uint32_t memoryCount = 0;  // the float4s loaded from memory: index, physical address
+        uint16_t memoryIndex[MaxMemory];
+        uint32_t memoryAddress[MaxMemory];
+        uint32_t passCount[2] = {};   // a pass's own registers: register, value
+        uint32_t passRegister[2][MaxPassRegisters], passValue[2][MaxPassRegisters];
     };
+    static_assert(std::is_trivially_copyable_v<Record>, "a record is copied as bytes");
 
-    // The records, a ring of them, found by their packet's last word.
+    // The records, a ring of them, found by their packet's last word. One
+    // writer (Keep, under g_modelMutex) and the command processor reading:
+    // a slot's sequence is odd while its record is written, and a reader
+    // that finds it changed over its copy has nothing. g_mutex is for the
+    // checks' tallies alone now: the command processor took it for every
+    // draw and the writer for every record, and each waited for the other.
+    struct RecordSlot { std::atomic<uint32_t> sequence{ 0 }; Record record; };
     constexpr uint32_t RecordCount = 8192;
     std::mutex g_mutex;
-    std::unique_ptr<Record[]> g_records;
-    std::vector<uint32_t> g_keys;
-    uint32_t g_next = 0;
+    RecordSlot g_records[RecordCount];
+    std::atomic<uint32_t> g_keys[RecordCount];
+    uint32_t g_next = 0;   // the writer's
 
-    // The slots by key (under g_mutex): eight ways a set, nothing allocated.
-    // A way holds a key and its slot + 1; it is right while that slot's key
-    // is still the key.
+    // The slots by key: eight ways a set, a way a key and its slot + 1 in one
+    // word (written by the writer alone, read by anyone); it is right while
+    // that slot's key is still the key.
     constexpr uint32_t KeySetBits = 14;
-    struct Way { uint32_t key = 0, slot = 0; };
     constexpr uint32_t KeyWays = 8;
-    Way g_keyTable[1u << KeySetBits][KeyWays];
-    Way* KeySet(uint32_t key) { return g_keyTable[((key >> 2) * 0x9E3779B1u) >> (32 - KeySetBits)]; }
+    std::atomic<uint64_t> g_keyTable[1u << KeySetBits][KeyWays];
+    std::atomic<uint64_t>* KeySet(uint32_t key) { return g_keyTable[((key >> 2) * 0x9E3779B1u) >> (32 - KeySetBits)]; }
+    inline uint32_t WayKey(uint64_t way) { return uint32_t(way); }
+    inline uint32_t WaySlot(uint64_t way) { return uint32_t(way >> 32); }   // slot + 1, 0 none
     int32_t FindSlot(uint32_t key)
     {
-        if (!g_records) return -1;
-        const Way* set = KeySet(key);
+        const std::atomic<uint64_t>* set = KeySet(key);
         for (uint32_t i = 0; i < KeyWays; i++)
-            if (const Way& way = set[i]; way.slot != 0 && way.key == key && g_keys[way.slot - 1] == key) return int32_t(way.slot - 1);
+        {
+            const uint64_t way = set[i].load(std::memory_order_acquire);
+            if (WaySlot(way) != 0 && WayKey(way) == key && g_keys[WaySlot(way) - 1].load(std::memory_order_acquire) == key) return int32_t(WaySlot(way) - 1);
+        }
         return -1;
     }
     void PutSlot(uint32_t key, uint32_t slot)
     {
         // The key's own way, else one that is empty or gone, else the oldest.
-        Way* set = KeySet(key);
-        Way* victim = nullptr;
+        std::atomic<uint64_t>* set = KeySet(key);
+        std::atomic<uint64_t>* victim = nullptr;
         for (uint32_t i = 0; i < KeyWays && victim == nullptr; i++)
-            if (set[i].slot != 0 && set[i].key == key) victim = &set[i];
+        {
+            const uint64_t way = set[i].load(std::memory_order_relaxed);
+            if (WaySlot(way) != 0 && WayKey(way) == key) victim = &set[i];
+        }
         for (uint32_t i = 0; i < KeyWays && victim == nullptr; i++)
-            if (set[i].slot == 0 || g_keys[set[i].slot - 1] != set[i].key) victim = &set[i];
+        {
+            const uint64_t way = set[i].load(std::memory_order_relaxed);
+            if (WaySlot(way) == 0 || g_keys[WaySlot(way) - 1].load(std::memory_order_relaxed) != WayKey(way)) victim = &set[i];
+        }
         if (victim == nullptr)
         {
             uint32_t oldest = 0;
             for (uint32_t i = 0; i < KeyWays; i++)
             {
-                const uint32_t age = (g_next - set[i].slot) % RecordCount;   // how many records ago it was made
+                const uint32_t age = (g_next - WaySlot(set[i].load(std::memory_order_relaxed))) % RecordCount;   // how many records ago it was made
                 if (victim == nullptr || age > oldest) { victim = &set[i]; oldest = age; }
             }
         }
-        victim->key = key;
-        victim->slot = slot + 1;
+        victim->store(uint64_t(key) | (uint64_t(slot + 1) << 32), std::memory_order_release);
+    }
+
+    // A record's copy, when `key` has one: taken without a lock, its slot's
+    // sequence read before and after.
+    bool ReadRecord(uint32_t key, Record& out)
+    {
+        const int32_t slot = FindSlot(key);
+        if (slot < 0) return false;
+        const RecordSlot& s = g_records[slot];
+        const uint32_t before = s.sequence.load(std::memory_order_acquire);
+        if ((before & 1) != 0) return false;
+        memcpy(&out, &s.record, sizeof(Record));
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (s.sequence.load(std::memory_order_relaxed) != before) return false;
+        return out.key == key;
+    }
+    // Its first words only (as far as `oldest`), for the checks that need no more.
+    bool ReadRecordHead(uint32_t key, uint32_t& lastWordValue, uint64_t& oldest)
+    {
+        const int32_t slot = FindSlot(key);
+        if (slot < 0) return false;
+        const RecordSlot& s = g_records[slot];
+        const uint32_t before = s.sequence.load(std::memory_order_acquire);
+        if ((before & 1) != 0) return false;
+        const uint32_t copiedKey = s.record.key;
+        lastWordValue = s.record.lastWordValue;
+        oldest = s.record.oldest;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (s.sequence.load(std::memory_order_relaxed) != before) return false;
+        return copiedKey == key;
     }
 
     // The chunks, a ring of them by serial (under g_mutex). A chunk is there
@@ -597,6 +658,15 @@ namespace
 
     // A record for one draw packet, from the device's model as it is at the
     // packet, the shadows standing in for what it does not know.
+    uint64_t g_keepChunks = 0, g_keepWait = 0, g_keepLocked = 0, g_keepCount = 0, g_keepCopied = 0;
+    uint32_t g_listHistogram[3][8] = {};   // memory, colour pass, Z pass: sizes 0, 1-4, 5-8, 9-16, 17-32, 33-64, 65-128, more
+    uint32_t g_listMax[3] = {};
+    void NoteList(uint32_t which, size_t n)
+    {
+        const uint32_t bucket = n == 0 ? 0 : n <= 4 ? 1 : n <= 8 ? 2 : n <= 16 ? 3 : n <= 32 ? 4 : n <= 64 ? 5 : n <= 128 ? 6 : 7;
+        g_listHistogram[which][bucket]++;
+        g_listMax[which] = std::max(g_listMax[which], uint32_t(n));
+    }
     // (`passes`: the passes the draw packet runs in, by its predicate.)
     void Keep(uint8_t* base, uint32_t device, uint32_t lastWord, uint32_t initiator, uint32_t passes, DeviceModel& model)
     {
@@ -617,31 +687,47 @@ namespace
             model.passListStale = false;
         }
 
-        // Made once, under the lock the readers hold (not taken again for
-        // every draw: the command processor holds it for each of its own).
+        // The arena, made once, before any record is put out (a reader finds
+        // it through a record).
         static std::once_flag made;
-        std::call_once(made, []() {
-            std::lock_guard<std::mutex> lock(g_mutex);
-            g_records.reset(new Record[RecordCount]);
-            g_keys.assign(RecordCount, 0);
-            g_arena.reset(new uint32_t[ArenaChunks * ChunkWords]);
-        });
+        std::call_once(made, []() { g_arena.reset(new uint32_t[ArenaChunks * ChunkWords]); });
 
         // The record is made here, the changed chunks going into the arena
-        // (one writer: this is under g_modelMutex), and only put into its
-        // slot under g_mutex, which the command processor takes for every
-        // draw it makes.
+        // (one writer: this is under g_modelMutex), and then put into its
+        // slot. The slot and its key's set are asked for now: a ring of
+        // records and a table this size are cold by the time a slot comes
+        // round again, and filling them in was most of what putting a record
+        // out cost (the writer is this thread alone, so g_next can be read).
+        {
+            const RecordSlot* next = &g_records[g_next % RecordCount];
+            for (uint32_t line = 0; line < sizeof(RecordSlot); line += 64) __builtin_prefetch(reinterpret_cast<const char*>(next) + line, 1, 3);
+            __builtin_prefetch(&g_keys[g_next % RecordCount], 1, 3);
+            __builtin_prefetch(KeySet(key), 1, 3);
+        }
         static Record staging;
+        staging.key = key;
         staging.lastWordValue = Guest::Read32(base, lastWord);
         staging.initiator = initiator;
         staging.device = device;
         uint32_t unknown = 0;
         staging.oldest = ~0ull;
-        for (uint32_t c = 0; c < Chunks; c++)
+        static const bool timing = getenv("COD3_SCANTIME") != nullptr;
+        const uint64_t c0 = timing ? __rdtsc() : 0;
+        // The chunks to copy, then their serials taken at once (before any
+        // is written, as a reader expects): the serial is shared with the
+        // command processor, and taking one a chunk was a round trip each.
+        uint64_t copy = 0;
         {
-            if (((model.dirty >> c) & 1) != 0 || model.unknownIn[c] != 0 || g_arenaNext.load(std::memory_order_relaxed) - model.chunkSerial[c] > ArenaChunks / 2)
+            const uint64_t now = g_arenaNext.load(std::memory_order_relaxed);
+            for (uint32_t c = 0; c < Chunks; c++)
+                if (((model.dirty >> c) & 1) != 0 || model.unknownIn[c] != 0 || now - model.chunkSerial[c] > ArenaChunks / 2) copy |= 1ull << c;
+        }
+        if (copy != 0)
+        {
+            uint64_t serial = g_arenaNext.fetch_add(uint64_t(__builtin_popcountll(copy)));
+            for (uint64_t bits = copy; bits != 0; bits &= bits - 1, serial++)
             {
-                const uint64_t serial = g_arenaNext.fetch_add(1);
+                const uint32_t c = uint32_t(__builtin_ctzll(bits));
                 uint32_t* to = ArenaAt(serial);
                 const uint32_t from = c * ChunkWords;
                 if (model.unknownIn[c] == 0) memcpy(to, model.registers + from, ChunkLength(c) * 4);
@@ -652,7 +738,11 @@ namespace
                         else { to[i] = Guest::Read32(base, device + g_copy.offset[from + i]); unknown++; }
                     }
                 model.chunkSerial[c] = serial;
+                if (timing) g_keepCopied++;
             }
+        }
+        for (uint32_t c = 0; c < Chunks; c++)
+        {
             staging.chunks[c] = model.chunkSerial[c];
             staging.oldest = std::min(staging.oldest, model.chunkSerial[c]);
         }
@@ -660,18 +750,23 @@ namespace
         // The constants from memory, by their bits: nearly every draw has
         // some (a shader's own literals), and looking at all 512 for them
         // was a good part of what a record cost.
-        staging.constantMemory.clear();
+        // A list longer than a record holds leaves the draw without one: the
+        // command processor then runs its buffer as it is.
+        bool overflow = false;
+        staging.memoryCount = 0;
         for (uint32_t w = 0; w < 8; w++)
             for (uint64_t bits = model.fromMemory[w]; bits != 0; bits &= bits - 1)
             {
                 const uint32_t i = w * 64 + uint32_t(__builtin_ctzll(bits));
-                staging.constantMemory.emplace_back(uint16_t(i), model.constantMemory[i]);
+                if (staging.memoryCount == MaxMemory) { overflow = true; break; }
+                staging.memoryIndex[staging.memoryCount] = uint16_t(i);
+                staging.memoryAddress[staging.memoryCount++] = model.constantMemory[i];
             }
         for (uint32_t pass = 0; pass < 2; pass++)
         {
             staging.vertex[pass] = model.vertex[pass];
             staging.pixel[pass] = model.pixel[pass];
-            staging.passRegisters[pass].clear();
+            staging.passCount[pass] = 0;
         }
         // The Z pass's values only for a draw that runs in the Z pass: one
         // predicated to the colour pass alone never does (the command
@@ -679,32 +774,51 @@ namespace
         // mask, and then picks the colour pass).
         const bool colour = model.passCount[ColourPass] != 0;
         const bool z = (passes & 2) != 0 && model.passCount[ZPass] != 0;
+        auto passRegister = [&](uint32_t pass, uint16_t at) {
+            uint32_t& n = staging.passCount[pass];
+            if (n == MaxPassRegisters) { overflow = true; return; }
+            staging.passRegister[pass][n] = g_copy.reg[at];
+            staging.passValue[pass][n++] = model.passValue[pass][at];
+        };
         if (colour || z)
             for (uint16_t at : model.passList)
             {
-                if (colour && (model.passMask[at] & 1) != 0) staging.passRegisters[ColourPass].emplace_back(g_copy.reg[at], model.passValue[ColourPass][at]);
-                if (z && (model.passMask[at] & 2) != 0) staging.passRegisters[ZPass].emplace_back(g_copy.reg[at], model.passValue[ZPass][at]);
+                if (colour && (model.passMask[at] & 1) != 0) passRegister(ColourPass, at);
+                if (z && (model.passMask[at] & 2) != 0) passRegister(ZPass, at);
             }
 
-        std::lock_guard<std::mutex> lock(g_mutex);
-        const uint32_t slot = g_next++ % RecordCount;
-        Record& record = g_records[slot];
-        record.lastWordValue = staging.lastWordValue;
-        record.initiator = staging.initiator;
-        record.device = staging.device;
-        memcpy(record.chunks, staging.chunks, sizeof(record.chunks));
-        record.oldest = staging.oldest;
-        record.constantMemory.swap(staging.constantMemory);
-        for (uint32_t pass = 0; pass < 2; pass++)
+        if (timing)
         {
-            record.vertex[pass] = staging.vertex[pass];
-            record.pixel[pass] = staging.pixel[pass];
-            record.passRegisters[pass].swap(staging.passRegisters[pass]);
+            NoteList(0, staging.memoryCount);
+            NoteList(1, staging.passCount[0]);
+            NoteList(2, staging.passCount[1]);
         }
-        g_keys[slot] = key;
+        const uint64_t w0 = timing ? __rdtsc() : 0;
+        if (timing) { g_keepChunks += w0 - c0; g_keepCount++; }
+        struct LockedLap { bool on; uint64_t l0; ~LockedLap() { if (on) g_keepLocked += __rdtsc() - l0; } } lockedLap{ timing, w0 };
+        if (overflow)
+        {
+            static bool told = false;
+            if (!told) { told = true; printf("native: a draw's lists are longer than a record holds (%u constants from memory); its buffer runs as it is\n", staging.memoryCount); fflush(stdout); }
+            return;
+        }
+        // Put out: the slot's sequence odd while its record is written, its
+        // key's way after.
+        const uint32_t slot = g_next++ % RecordCount;
+        RecordSlot& s = g_records[slot];
+        const uint32_t sequence = s.sequence.load(std::memory_order_relaxed);
+        s.sequence.store(sequence + 1, std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_release);
+        memcpy(&s.record, &staging, sizeof(Record));
+        s.sequence.store(sequence + 2, std::memory_order_release);
+        g_keys[slot].store(key, std::memory_order_release);
         PutSlot(key, slot);
-        g_tally.recorded++;
-        g_tally.unknown += unknown;
+        if (CheckingNow())
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            g_tally.recorded++;
+            g_tally.unknown += unknown;
+        }
     }
 
     // The passes a predicated packet runs in, under that bin mask.
@@ -852,6 +966,19 @@ namespace
         std::lock_guard<std::mutex> lock(g_mutex);
         g_scanTally.packets[who][kind]++;
         g_scanTally.words[who][kind] += length;
+        // The "other" ones by what they are: a type 0 run's register, a type
+        // 3 packet's opcode, type 1 and 2 by type.
+        static std::map<uint32_t, uint64_t> others;
+        if (kind == 7) others[type == 0 ? (header & 0x7FFF) : type == 3 ? 0x30000u | opcode : 0x10000u * type]++;
+        // The fillers (type 2) by the runs they come in.
+        static uint32_t runEnd = 0, runLength = 0;
+        static std::map<uint32_t, uint64_t> runs;
+        if (type == 2)
+        {
+            if (at == runEnd) runLength++;
+            else { if (runLength) runs[runLength]++; runLength = 1; }
+            runEnd = at + 4;
+        }
         const auto now = std::chrono::steady_clock::now();
         if (now - g_scanReported < std::chrono::seconds(5)) return;
         g_scanReported = now;
@@ -867,9 +994,34 @@ namespace
             }
             printf("%s\n", text.c_str());
         }
+        {
+            std::vector<std::pair<uint64_t, uint32_t>> list;
+            for (const auto& [what, count] : others) list.push_back({ count, what });
+            std::sort(list.rbegin(), list.rend());
+            printf("scan census, the others:");
+            for (size_t i = 0; i < list.size() && i < 16; i++)
+                printf(" %s%04X x%llu", list[i].second >= 0x30000 ? "op " : list[i].second >= 0x10000 ? "type " : "reg ",
+                       list[i].second & 0xFFFF, (unsigned long long)list[i].first);
+            printf("\n");
+            others.clear();
+            std::vector<std::pair<uint64_t, uint32_t>> lengths;
+            for (const auto& [length, count] : runs) lengths.push_back({ count * length, length });
+            std::sort(lengths.rbegin(), lengths.rend());
+            printf("scan census, filler runs (length x runs):");
+            for (size_t i = 0; i < lengths.size() && i < 12; i++)
+                printf(" %u x%llu", lengths[i].second, (unsigned long long)(lengths[i].first / lengths[i].second));
+            printf("\n");
+            runs.clear();
+        }
         fflush(stdout);
         g_scanTally = ScanTally{};
     }
+
+    // COD3_SCANTIME=1 (a test): cycles the scan spends, by part.
+    struct ScanTimes { uint64_t total = 0, decide = 0, type0 = 0, constants = 0, other3 = 0, keep = 0, spanned = 0, packets = 0, scans = 0; };
+    ScanTimes g_scanTimes;
+    std::chrono::steady_clock::time_point g_scanTimesReported = std::chrono::steady_clock::now();
+    bool ScanTiming() { static const bool on = getenv("COD3_SCANTIME") != nullptr; return on; }
 
     // The device's packets after model.scanned up to `last` (the last word
     // to read), into the model; a record at each draw.
@@ -881,9 +1033,12 @@ namespace
         items.clear();
         StreamItem stretch{ 0, 0, false, 0 };      // the stretch being gathered, physical 0 for none
         uint32_t stretchHash = 0, stretchDwords = 0;
+        const bool timing = ScanTiming();
+        const uint64_t scanStart = timing ? __rdtsc() : 0;
         while (at <= last)
         {
             const uint32_t header = Guest::Read32(base, at);
+            if (timing) g_scanTimes.packets++;
             if (ExecutingNow())
             {
                 if (StillRun(base, at, header))
@@ -963,7 +1118,9 @@ namespace
                 }
                 else if (opcode == OpImLoad || opcode == OpImLoadImmediate)
                 {
+                    struct Lap { bool on; uint64_t p0; ~Lap() { if (on) g_scanTimes.type0 += __rdtsc() - p0; } } programLap{ timing, timing ? __rdtsc() : 0 };
                     const bool pixel = (word(0) & 1) != 0;
+                    if (opcode != OpImLoad) g_programImmediate++;
                     const Program program = opcode == OpImLoad
                         ? LoadedProgram(base, word(0) & ~3u, word(1) & 0xFFFF)
                         : LoadedProgram(base, Physical(at + 12), word(1) & 0xFFFF);
@@ -971,7 +1128,11 @@ namespace
                         if (passes & (1u << pass)) (pixel ? model.pixel : model.vertex)[pass] = program;
                 }
                 else if (opcode == OpDrawIndx || opcode == OpDrawIndx2)
+                {
+                    const uint64_t k0 = timing ? __rdtsc() : 0;
                     Keep(base, device, at + count * 4, word(opcode == OpDrawIndx ? 1 : 0), passes, model);
+                    if (timing) g_scanTimes.keep += __rdtsc() - k0;
+                }
             }
             ScanCensus(at, header, length);
             at += length * 4;
@@ -984,9 +1145,42 @@ namespace
         else if (ExecutingNow())
         {
             if (stretch.physical != 0) { stretch.mask = (uint64_t(stretchHash) << 32) | stretchDwords; items.push_back(stretch); }
+            const uint64_t s0 = timing ? __rdtsc() : 0;
             Spanned(items);
+            if (timing) g_scanTimes.spanned += __rdtsc() - s0;
         }
         model.scanned = last;
+        if (timing)
+        {
+            g_scanTimes.total += __rdtsc() - scanStart;
+            g_scanTimes.scans++;
+            const auto now = std::chrono::steady_clock::now();
+            if (now - g_scanTimesReported >= std::chrono::seconds(5))
+            {
+                g_scanTimesReported = now;
+                const ScanTimes& t = g_scanTimes;
+                const double m = 1e-6;
+                printf("scan time: %.1f M cycles in %llu scans, %llu packets: programs %.1f, keep %.1f, notes %.1f, the rest %.1f\n",
+                    t.total * m, (unsigned long long)t.scans, (unsigned long long)t.packets, t.type0 * m, t.keep * m, t.spanned * m,
+                    (t.total - t.type0 - t.keep - t.spanned) * m);
+                printf("scan time, keep: %llu records, %llu chunks copied; building %.1f, waiting for the lock %.1f, under it %.1f (M cycles)\n",
+                    (unsigned long long)g_keepCount, (unsigned long long)g_keepCopied, g_keepChunks * m, g_keepWait * m, g_keepLocked * m);
+                g_keepCount = g_keepCopied = g_keepChunks = g_keepWait = g_keepLocked = 0;
+                printf("scan time, programs: %llu loads (%llu immediate), %llu found in the memo, %.0f dwords each\n", (unsigned long long)g_programLoads,
+                    (unsigned long long)g_programImmediate, (unsigned long long)g_programHits, g_programLoads ? double(g_programDwords) / g_programLoads : 0.0);
+                g_programLoads = g_programHits = g_programDwords = g_programImmediate = 0;
+                for (uint32_t w = 0; w < 3; w++)
+                {
+                    printf("scan time, %s lists: max %u, by size", w == 0 ? "memory" : w == 1 ? "colour pass" : "Z pass", g_listMax[w]);
+                    for (uint32_t b = 0; b < 8; b++) printf(" %u", g_listHistogram[w][b]);
+                    printf("\n");
+                }
+                memset(g_listHistogram, 0, sizeof(g_listHistogram));
+                memset(g_listMax, 0, sizeof(g_listMax));
+                fflush(stdout);
+                g_scanTimes = ScanTimes{};
+            }
+        }
     }
 
     // Whether the model can read on from where it is to `last`: the same
@@ -1089,18 +1283,16 @@ bool NativeState::NativeRun(uint32_t physical, uint32_t dwords, std::vector<Item
             }
             return;
         }
+        for (const uint32_t key : draws)
         {
-            std::lock_guard<std::mutex> lock(g_mutex);
-            for (const uint32_t key : draws)
+            uint32_t lastWordValue;
+            uint64_t oldest;
+            if (!ReadRecordHead(key, lastWordValue, oldest) || !Whole(oldest, ArenaChunks / 4) ||
+                lastWordValue != Guest::Read32(Guest::Base, Guest::PhysicalAlias(key)))
             {
-                const int32_t slot = FindSlot(key);
-                if (slot < 0 || !Whole(g_records[slot].oldest, ArenaChunks / 4) ||
-                    g_records[slot].lastWordValue != Guest::Read32(Guest::Base, Guest::PhysicalAlias(key)))
-                {
-                    g_runs.unrecorded++;
-                    items.clear();
-                    return;
-                }
+                g_runs.unrecorded++;
+                items.clear();
+                return;
             }
         }
         // The rest (the end record the kick writes after what was read) is run
@@ -1159,28 +1351,22 @@ bool NativeState::Begin(uint32_t lastWordPhysical)
 {
     if (!DrawingNow()) return false;
     const uint32_t key = lastWordPhysical & 0x1FFFFFFF;
-    // What the image needs from the record, taken under the lock; the
+    // What the image needs from the record, a copy taken without a lock; the
     // chunks are read after it, and still there when the arena says so.
-    static uint64_t chunks[Chunks];
+    static Record record;
+    if (!ReadRecord(key, record)) return false;
+    if (Guest::Read32(Guest::Base, Guest::PhysicalAlias(lastWordPhysical)) != record.lastWordValue || !Whole(record.oldest)) return false;
+    const uint32_t select = uint32_t(Gpu::BinSelect());
+    const uint32_t pass = (select & ZBins) != 0 && (select & ColourBins) == 0 ? ZPass : ColourPass;
+    const uint64_t* chunks = record.chunks;
+    const uint64_t oldest = record.oldest;
     static std::vector<std::pair<uint16_t, uint32_t>> memory;
     static std::vector<std::pair<uint32_t, uint32_t>> passRegisters;
-    uint64_t oldest;
-    Program vertex, pixel;
-    {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        const int32_t slot = FindSlot(key);
-        if (slot < 0) return false;
-        const Record& record = g_records[slot];
-        if (Guest::Read32(Guest::Base, Guest::PhysicalAlias(lastWordPhysical)) != record.lastWordValue || !Whole(record.oldest)) return false;
-        const uint32_t select = uint32_t(Gpu::BinSelect());
-        const uint32_t pass = (select & ZBins) != 0 && (select & ColourBins) == 0 ? ZPass : ColourPass;
-        memcpy(chunks, record.chunks, sizeof(chunks));
-        oldest = record.oldest;
-        memory.assign(record.constantMemory.begin(), record.constantMemory.end());
-        passRegisters.assign(record.passRegisters[pass].begin(), record.passRegisters[pass].end());
-        vertex = record.vertex[pass];
-        pixel = record.pixel[pass];
-    }
+    memory.clear();
+    for (uint32_t i = 0; i < record.memoryCount; i++) memory.emplace_back(record.memoryIndex[i], record.memoryAddress[i]);
+    passRegisters.clear();
+    for (uint32_t i = 0; i < record.passCount[pass]; i++) passRegisters.emplace_back(record.passRegister[pass][i], record.passValue[pass][i]);
+    const Program vertex = record.vertex[pass], pixel = record.pixel[pass];
     // COD3_NATIVESKIPPS=hex: the draws of pixel programs whose hash starts
     // so are made from the register file (with COD3_NATIVE=1, which keeps
     // it whole), for telling a record's fault from the program's.
@@ -1327,12 +1513,12 @@ void NativeState::Check(uint32_t lastWordPhysical, uint32_t initiator, uint32_t 
     if (!CheckingNow()) return;
     const uint32_t key = lastWordPhysical & 0x1FFFFFFF;
     const std::atomic<uint32_t>* file = Gpu::RegisterFile();
+    static Record record;
+    const bool found = ReadRecord(key, record);
     std::lock_guard<std::mutex> lock(g_mutex);
     Tally& t = g_tally;
     t.checked++;
-    const int32_t slot = FindSlot(key);
-    if (slot < 0) { t.unmatched++; Report(); return; }
-    const Record& record = g_records[slot];
+    if (!found) { t.unmatched++; Report(); return; }
     if (Guest::Read32(Guest::Base, Guest::PhysicalAlias(lastWordPhysical)) != record.lastWordValue) { t.stale++; Report(); return; }
 
     // The pass the command processor is in: the Z pass when it runs the
@@ -1345,16 +1531,16 @@ void NativeState::Check(uint32_t lastWordPhysical, uint32_t initiator, uint32_t 
     if (!Whole(record.oldest)) { t.stale++; Report(); return; }
     uint32_t expected[ShadowWords];
     for (uint32_t c = 0; c < Chunks; c++) memcpy(expected + c * ChunkWords, ArenaAt(record.chunks[c]), ChunkLength(c) * 4);
-    for (const auto& [index, address] : record.constantMemory)
+    for (uint32_t m = 0; m < record.memoryCount; m++)
     {
-        const uint32_t reg = 0x4000 + index * 4u;
+        const uint32_t reg = 0x4000 + record.memoryIndex[m] * 4u, address = record.memoryAddress[m];
         for (uint32_t i = 0; i < 4; i++) expected[CopyIndex(reg + i)] = Guest::Read32(Guest::Base, Guest::PhysicalAlias(address + i * 4));
         t.memoryConstants++;
     }
-    for (const auto& [reg, value] : record.passRegisters[pass])
+    for (uint32_t p = 0; p < record.passCount[pass]; p++)
     {
-        const uint32_t at = CopyIndex(reg);
-        if (at < ShadowWords) expected[at] = value;
+        const uint32_t at = CopyIndex(record.passRegister[pass][p]);
+        if (at < ShadowWords) expected[at] = record.passValue[pass][p];
     }
 
     if (record.initiator != initiator) t.initiatorDiffers++;

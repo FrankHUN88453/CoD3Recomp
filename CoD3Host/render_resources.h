@@ -52,6 +52,8 @@ namespace RenderResources
     // A change takes effect at the next frame, when the targets are made
     // again at the new size: no frame is drawn half at each.
     void RequestScale(float scale);
+    // The shadow maps' size apart from the frame's scale (Settings::shadowQuality).
+    void RequestShadowQuality(int quality);
     float Scale();
 
     // Samples a pixel of the render targets: 1, 2, 4 or 8. A change takes

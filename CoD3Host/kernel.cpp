@@ -1,5 +1,6 @@
 #include "log.h"
 #include "kernel.h"
+#include "window.h"
 #include "write_watch.h"
 #include <unordered_map>
 #include "scheduler.h"
@@ -1010,16 +1011,32 @@ void Kernel::Exit(int code)
     // GetConsoleProcessList reports how many processes share this console.
     // One means the console was created for us, so nothing else will be left
     // to read the output after the process ends.
+    // Not once the game's window was up: the console goes with the game,
+    // and CoD3.log keeps what it said.
     DWORD processes[2] = {};
     const DWORD attached = GetConsoleProcessList(processes, 2);
-    if (attached <= 1)
+    if (attached <= 1 && !Window::EverOpened())
     {
         printf("\nPress Enter to close this window.\n");
         fflush(stdout);
         (void)getchar();
     }
+    // What is still buffered (a pipe's output is not flushed by ExitProcess).
+    fflush(stdout);
+    fflush(stderr);
     Log::Finish();
     ExitProcess(static_cast<UINT>(code));
+}
+
+void Kernel::Quit()
+{
+    printf("exit: the game was closed\n");
+    Log::Finish();
+    // Not ExitProcess: that stops the other threads where they stand and
+    // then runs the exit handlers, which print, and a thread stopped while
+    // it held the output's lock would hold them up for ever.
+    TerminateProcess(GetCurrentProcess(), 0);
+    ExitProcess(0);
 }
 
 void Kernel::Unimplemented(const char* name, PPCContext& ctx, uint8_t* base)

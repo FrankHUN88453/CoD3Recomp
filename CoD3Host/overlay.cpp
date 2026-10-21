@@ -319,14 +319,19 @@ namespace
                     ImGui::Combo("Anti-aliasing", &g_edit.antialiasing, aa, 6);
                     const char* qualities[] = { "Low", "Medium", "High" };
                     ImGui::Combo("Texture quality", &g_edit.textureQuality, qualities, 3);
+                    const char* aspects[] = { "16:9 (the console's)", "Fit the window", "21:9", "32:9" };
+                    ImGui::Combo("Aspect ratio", &g_edit.aspectRatio, aspects, 4);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(a level wider than 16:9: more to the sides, the HUD in the middle)");
+                    const char* shadows[] = { "As the frame", "Low (512)", "Medium (1024)", "High (2048)", "Ultra (4096)" };
+                    ImGui::Combo("Shadow quality", &g_edit.shadowQuality, shadows, 5);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(the shadow maps' size; the console's is 512)");
                     ImGui::SliderInt("Field of view", &g_edit.fov, 65, 100, g_edit.fov == 65 ? "65 (the game's own)" : "%d");
                     const char* details[] = { "The game's own", "Maximum" };
                     ImGui::Combo("Model detail", &g_edit.modelDetail, details, 2);
                     ImGui::SameLine();
                     ImGui::TextDisabled("(Maximum: the finest version of every model at any distance)");
-                    ImGui::Checkbox("Blur while aiming", &g_edit.aimBlur);
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("(the game's depth of field down the sights)");
                     ImGui::Checkbox("Console depth precision", &g_edit.consoleDepth);
                     ImGui::SameLine();
                     ImGui::TextDisabled("(no flickering surfaces; costs frame rate with MSAA; after a restart)");
@@ -361,6 +366,12 @@ namespace
                     ImGui::SameLine();
                     ImGui::TextDisabled("(the game's own; takes effect after a restart)");
                     ImGui::Checkbox("Controller support", &g_edit.controller);
+                    {
+                        const char* const prompts[] = { "Automatic (the last used)", "Controller", "Keyboard and mouse" };
+                        ImGui::Combo("Button prompts", &g_edit.buttonPrompts, prompts, 3);
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("(the buttons the game's hints and menus show)");
+                    }
                     ImGui::Separator();
                     ImGui::TextUnformatted("Keys");
                     if (ImGui::BeginTable("keys", 2, ImGuiTableFlags_SizingStretchProp))
@@ -529,20 +540,9 @@ namespace
 void Overlay::NoteFrame()
 {
     g_frames.fetch_add(1, std::memory_order_relaxed);
-    const uint32_t now = g_frontEndNow.exchange(0);
-    // The options page arriving from the main menu: the player pressed
-    // OPTIONS, and the settings come up over it. Not when it comes back
-    // from one of its own sub pages, and not while the menu is up already.
-    const bool wasMain = (g_frontEndLast & uint32_t(FrontEndText::MainMenu)) != 0;
-    const bool isOptions = (now & uint32_t(FrontEndText::OptionsMenu)) != 0;
-    const bool wasOptions = (g_frontEndLast & uint32_t(FrontEndText::OptionsMenu)) != 0;
-    if (isOptions && !wasOptions && wasMain && !g_open.load() && !g_console.load())
-    {
-        g_open.store(true);
-        g_capturing = -1;
-        g_editLoaded = false;
-    }
-    g_frontEndLast = now;
+    // The front end's pages are noted but no longer open the settings menu:
+    // the title's own OPTIONS stays the title's (F11 opens this one).
+    g_frontEndLast = g_frontEndNow.exchange(0);
 }
 
 void Overlay::NoteFrontEndText(FrontEndText text)

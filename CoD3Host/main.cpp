@@ -1,5 +1,6 @@
 #include "log.h"
 #include "installer.h"
+#include "updater.h"
 #include "kernel.h"
 #include "settings.h"
 #include <cstdlib>
@@ -39,14 +40,17 @@ namespace
 
     void Usage()
     {
-        printf("Usage: CoD3 [options]\n");
+        printf("Usage: CoD3SP_s [options]\n");
         printf("\n");
-        printf("With no options, the game starts if it is already installed next to\n");
-        printf("this program, and first time setup runs if it is not.\n");
+        printf("With no options, the game starts from its main folder (the extracted\n");
+        printf("disc, which also keeps the saves) if one is known, and first time setup\n");
+        printf("runs if not.\n");
         printf("\n");
-        printf("  --iso <file>      install from this disc image, no file picker\n");
-        printf("  --game <folder>   use this extracted folder where it is\n");
-        printf("  --copy <folder>   copy this extracted folder into game/\n");
+        printf("  --iso <file>      a fresh install from this disc image, no file picker\n");
+        printf("  --main <folder>   the main folder a fresh install goes into\n");
+        printf("  --game <folder>   the main folder of a game already installed\n");
+        printf("  --copy <folder>   copy this extracted folder into the main folder\n");
+        printf("  --no-update       do not look for a newer version this time\n");
         printf("  --list-iso <file> show what is inside a disc image and exit\n");
         printf("  --extract-one <iso> <path in iso> <output file>\n");
         printf("                    pull a single file out of a disc image\n");
@@ -145,14 +149,6 @@ namespace
         return 1;
     }
 
-    void ExplainIncompleteRuntime()
-    {
-        printf("\n");
-        printf("Note: this boots, renders, and reaches the loading screen. It does\n");
-        printf("not reach the menu: the title streams part of its archive and then\n");
-        printf("waits. What it waits for is reported as it runs. See STATUS.md.\n");
-        printf("\n");
-    }
 }
 
 namespace
@@ -162,6 +158,7 @@ namespace
 
 int main(int argc, char** argv)
 {
+    SetThreadDescription(GetCurrentThread(), L"guest main");
     Log::Start();
     // Every exit goes through Kernel::Exit, which waits for a key when this
     // program owns the console. Started from Explorer that is the difference
@@ -177,6 +174,7 @@ int Run(int argc, char** argv)
     // --- Command line ------------------------------------------------------
     Installer::Source source;
     bool installOnly = false;
+    bool noUpdate = false;
 
     for (int i = 1; i < argc; i++)
     {
@@ -217,6 +215,14 @@ int Run(int argc, char** argv)
             source.folder = fs::path(argv[++i]);
             source.copyFolder = true;
         }
+        else if (option == "--main" && hasValue)
+        {
+            source.main = fs::path(argv[++i]);
+        }
+        else if (option == "--no-update")
+        {
+            noUpdate = true;
+        }
         else
         {
             fprintf(stderr, "Unrecognised option: %s\n\n", option.c_str());
@@ -228,6 +234,12 @@ int Run(int argc, char** argv)
     Banner();
 
     const fs::path exeDirectory = ExecutableDirectory();
+
+    // The settings first (the updater reads them), then a newer version, if
+    // there is one: downloaded and started in this one's place.
+    Settings::Load(exeDirectory);
+    Updater::CleanUp();
+    if (!noUpdate) Updater::UpdateAndRestart();
 
     // --- Find the game, running first time setup if needed ----------------
     Installer::GameLocation game;
@@ -243,7 +255,7 @@ int Run(int argc, char** argv)
         return 1;
     }
 
-    printf("Game: %s\n\n", game.root.string().c_str());
+    printf("Main folder: %s\n\n", game.root.string().c_str());
 
     // Useful while the runtime is still missing: install the game without
     // watching the boot stop at the first kernel call.
@@ -253,14 +265,11 @@ int Run(int argc, char** argv)
         return 0;
     }
 
-    ExplainIncompleteRuntime();
-
     // --- Bring up the guest -----------------------------------------------
-    // The file imports resolve guest paths under the installed game, and put
-    // anything the title writes in a saves folder next to this program.
+    // The file imports resolve guest paths under the main folder, and put
+    // anything the title writes in its save folder.
     Guest::GameRoot = game.root;
-    Settings::Load(exeDirectory);
-    Kernel::InitializeFileSystem(exeDirectory);
+    Kernel::InitializeFileSystem(game.root, exeDirectory);
 
     if (!Guest::Initialize(game.executable.string().c_str()))
     {

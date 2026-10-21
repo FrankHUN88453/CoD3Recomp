@@ -141,7 +141,7 @@ if ($BuildLib -or $BuildHost) {
     if (Test-Path $Lib) {
         Write-Host ("    {0} ({1:N0} MB)" -f $Lib, ((Get-Item $Lib).Length / 1MB)) -ForegroundColor Green
     }
-    $Exe = Join-Path $Build 'CoD3Host\CoD3.exe'
+    $Exe = Join-Path $Build 'CoD3Host\CoD3SP_s.exe'
     if (Test-Path $Exe) {
         Write-Host ("    {0} ({1:N0} MB)" -f $Exe, ((Get-Item $Exe).Length / 1MB)) -ForegroundColor Green
     }

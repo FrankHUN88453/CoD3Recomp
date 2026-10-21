@@ -44,6 +44,7 @@ namespace
 
     float g_scale = 1.0f;
     float g_requestedScale = 1.0f;
+    int g_shadowQuality = 0, g_requestedShadowQuality = 0;   // the settings' shadow_quality: 0 as the frame, 1..4 the shadow map 512 .. 4096
     uint32_t g_samples = 1;
     uint32_t g_requestedSamples = 1;
     uint32_t g_mipSkip = 0, g_requestedMipSkip = 0;   // the texture quality: top levels left out
@@ -242,10 +243,27 @@ namespace
         return all || cls != 0 ? g_samples : 1;
     }
 
-    void HostSize(uint32_t pitch, uint32_t rows, uint32_t& width, uint32_t& height)
+    // A surface's scale: the frame's, but for the shadow maps the size the
+    // settings ask. They are the single sampled surfaces of a 560 pitch
+    // (a 512 square map; the half size smoke shares that pitch and is drawn
+    // finer with them) and of the frame's 1040 (the forest's 1024 square
+    // cascade): 512 is the console's, 1 times, up to 8 times for 4096, the
+    // cascade at most 4 times. A draw's colour and depth targets share the
+    // pitch and class, so they agree; the scissor and the resolves go by
+    // each target's own size (TargetSize).
+    float ScaleFor(uint32_t pitch, uint32_t cls)
     {
-        width = std::max(1u, uint32_t(std::lround(double(pitch) * g_scale)));
-        height = std::max(1u, uint32_t(std::lround(double(rows) * g_scale)));
+        if (g_shadowQuality <= 0 || cls != 0) return g_scale;
+        if (pitch == 560) return float(1 << (g_shadowQuality - 1));
+        if (pitch == 1040) return float(1 << std::min(g_shadowQuality - 1, 2));
+        return g_scale;
+    }
+
+    void HostSize(uint32_t pitch, uint32_t rows, uint32_t cls, uint32_t& width, uint32_t& height)
+    {
+        const double scale = ScaleFor(pitch, cls);
+        width = std::max(1u, uint32_t(std::lround(double(pitch) * scale)));
+        height = std::max(1u, uint32_t(std::lround(double(rows) * scale)));
     }
 
     // --- resolved surfaces -----------------------------------------------------------------------
@@ -802,10 +820,11 @@ bool RenderResources::BeginFrame(uint64_t frame)
         g_depthKeys.Clear();
         printf("render: the frame is drawn with %u sample%s a pixel\n", g_samples, g_samples == 1 ? "" : "s");
     }
-    if (g_requestedScale != g_scale)
+    if (g_requestedScale != g_scale || g_requestedShadowQuality != g_shadowQuality)
     {
         remade = true;
         g_scale = g_requestedScale;
+        g_shadowQuality = g_requestedShadowQuality;
         // The targets are made again at the new size as they are asked for.
         g_colorTargets.clear();
         g_depthTargets.clear();
@@ -898,6 +917,11 @@ bool RenderResources::Forget(uint32_t address, uint32_t size)
     return dropped;
 }
 
+void RenderResources::RequestShadowQuality(int quality)
+{
+    g_requestedShadowQuality = quality < 0 ? 0 : quality > 4 ? 4 : quality;
+}
+
 void RenderResources::RequestScale(float scale)
 {
     g_requestedScale = scale < 0.25f ? 0.25f : scale > 8.0f ? 8.0f : scale;
@@ -921,7 +945,7 @@ void RenderResources::TargetSize(uint32_t surface, uint32_t bytesPerSample, uint
 {
     const uint32_t pitch = PitchOf(surface);
     const uint32_t rows = TargetRows(pitch, ClassOf(surface), bytesPerSample);
-    HostSize(pitch, rows, width, height);
+    HostSize(pitch, rows, ClassOf(surface), width, height);
     scaleX = pitch != 0 ? float(width) / float(pitch) : 1.0f;
     scaleY = rows != 0 ? float(height) / float(rows) : 1.0f;
 }
@@ -941,7 +965,7 @@ RenderState::Handle RenderResources::ColorTargetFor(uint32_t colorInfo, uint32_t
     entry.target.pitch = pitch;
     entry.target.rows = TargetRows(pitch, cls, bytesPerSample);
     entry.cls = cls;
-    HostSize(pitch, entry.target.rows, entry.target.width, entry.target.height);
+    HostSize(pitch, entry.target.rows, cls, entry.target.width, entry.target.height);
     memcpy(entry.key, key, sizeof(entry.key));
     g_colorKeys.Insert(key, handle);
     if (pitch == 0 || entry.target.rows == 0) return handle;
@@ -982,7 +1006,7 @@ RenderState::Handle RenderResources::DepthTargetFor(uint32_t depthInfo, uint32_t
     entry.target.pitch = pitch;
     entry.target.rows = TargetRows(pitch, cls, 4);
     entry.cls = cls;
-    HostSize(pitch, entry.target.rows, entry.target.width, entry.target.height);
+    HostSize(pitch, entry.target.rows, cls, entry.target.width, entry.target.height);
     memcpy(entry.key, key, sizeof(entry.key));
     g_depthKeys.Insert(key, handle);
     if (pitch == 0 || entry.target.rows == 0) return handle;

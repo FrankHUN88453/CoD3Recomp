@@ -1026,7 +1026,7 @@ uint64_t XenosHlsl::Version()
     // A number that changes when the translation would, or when one of the
     // environment knobs that shape the HLSL is set: the disk cache keyed by
     // it then starts afresh rather than serving the other translation.
-    std::string text = "xenos_hlsl 2026-10-06 bswap packed flat3d fetch offsets alu pairs read first pixel params gradients dx dy depth offset pixel centre loop ids";
+    std::string text = "xenos_hlsl 2026-10-06 bswap packed flat3d fetch offsets alu pairs read first pixel params gradients dx dy depth offset pixel centre loop ids narrow 2d";
     text += Depth24() ? " depth 20e4 centroid" : " depth 32";
     if (const char* lanes = getenv("COD3_SCALARLANES")) { text += " lanes="; text += lanes; }
     if (const char* show = getenv("COD3_D3DSHOW")) { text += " show="; text += show; }
@@ -1152,7 +1152,10 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
         hlsl += " bool front : SV_IsFrontFace; };\n";
         hlsl += "struct Output { float4 c0 : SV_Target0; float4 c1 : SV_Target1; float4 c2 : SV_Target2; float4 c3 : SV_Target3;";
         if (out.writesDepth) hlsl += " float depth : SV_Depth;";
-        else if (cutDepth) hlsl += " float depth : SV_DepthLessEqual;";
+        // XENOS_NO_DEPTH compiles the program without it, for the draws
+        // whose depth test cannot see it (render_shaders.cpp); the program
+        // itself compiles as before.
+        else if (cutDepth) hlsl += "\n#ifndef XENOS_NO_DEPTH\n float depth : SV_DepthLessEqual;\n#endif\n";
         hlsl += " };\n";
         hlsl += "Output main(Input input) {\n";
         hlsl += "    float4 r[32];\n";
@@ -1237,7 +1240,7 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
         if (nanShow) hlsl += "    if (any(isnan(oC0)) || any(isinf(oC0))) oC0 = float4(1.0, 0.0, 1.0, 1.0);\n";
         hlsl += "    output.c0 = oC0; output.c1 = oC1; output.c2 = oC2; output.c3 = oC3;\n";
         if (out.writesDepth) hlsl += "    output.depth = oDepth4.x;\n";
-        else if (depth24) hlsl += "    output.depth = Depth20e4(input.position.z);\n";
+        else if (depth24) hlsl += "#ifndef XENOS_NO_DEPTH\n    output.depth = Depth20e4(input.position.z);\n#endif\n";
         hlsl += "    return output;\n}\n";
     }
     else
@@ -1261,6 +1264,9 @@ XenosHlsl::Translation XenosHlsl::Translate(const std::vector<uint32_t>& words, 
                 "      float centre = (vte & 0x10000u) ? 0.0 : 0.5;\n"
                 "      float W = targetSize.x, H = targetSize.y;\n"
                 "      float cx = p.x * (2.0 * xs / W) + ww * (2.0 * (xo + centre) / W - 1.0);\n"
+                // The 2D narrowed about the middle for a picture wider than
+                // 16:9 (viewportScale.w, 0 for none; widescreen.cpp).
+                "      if (viewportScale.w != 0.0) cx *= viewportScale.w;\n"
                 "      float cy = -(p.y * (2.0 * ys / H) + ww * (2.0 * (yo + centre) / H - 1.0));\n"
                 "      float cz = (vte & 0x200u) ? (p.z * zs + zo) * ww : (p.z * zs + zo * ww);\n"
                 // The polygon offset's constant part, in depth units, as the

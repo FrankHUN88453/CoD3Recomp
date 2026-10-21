@@ -10,6 +10,7 @@
 // creates a Direct3D object on a draw.
 
 #include "render.h"
+#include "widescreen.h"
 #include "render_state.h"
 #include "render_commands.h"
 #include "render_internal.h"
@@ -84,6 +85,7 @@ namespace
         Handle vertexShader = 0, pixelShader = 0;
         bool rectangles = false;
         bool flat = false;
+        bool psNoDepth = false;
         Handle blend = 0, depth = 0, rasterizer = 0;
         float blendFactor[4] = { -1, -1, -1, -1 };
         uint32_t stencilReference = 0xFFFFFFFFu;
@@ -397,6 +399,7 @@ namespace
                 (flags & D3D11_CREATE_DEVICE_DEBUG) ? ", with the debug layer" : "", g_tearing ? ", tearing allowed" : "");
         }
         RenderPipeline::Initialize(g_device.Get());
+        RenderInternal::SetPromptDevice(g_device.Get());
         RenderShaders::Initialize(g_device.Get());
         RenderResources::Initialize(g_device.Get(), g_context.Get());
         RenderStats::Initialize(g_device.Get(), g_context.Get());
@@ -658,6 +661,16 @@ namespace
         // COD3_FRAMEDUMP_UNTIL=N: nothing from the Nth present on.
         static const int until = []() { const char* t = getenv("COD3_FRAMEDUMP_UNTIL"); return t ? int(strtol(t, nullptr, 10)) : INT_MAX; }();
         static int presents = 0;
+        // A frame logged in full is kept too, by its swap (with
+        // COD3_SHADOWDUMP's maps of the same frame).
+        if (FrameLogged())
+        {
+            uint32_t lw = 0, lh = 0;
+            const std::vector<uint8_t> logged = ReadBack(back, lw, lh, 1);
+            char loggedName[512];
+            snprintf(loggedName, sizeof(loggedName), "%s-logged-%llu.bmp", path, (unsigned long long)g_swaps.load(std::memory_order_relaxed));
+            if (!logged.empty()) WriteBmp(loggedName, logged, lw, lh);
+        }
         if (presents++ < from || presents > until) return;
         static int counter = 0;
         if ((counter++ % every) != 0) return;
@@ -811,13 +824,14 @@ namespace
         }
         {
             const bool flat = g_flatPixelShader && command.opaque;
-            if (g_bound.pixelShader != command.pixelShader || g_bound.flat != flat)
+            if (g_bound.pixelShader != command.pixelShader || g_bound.flat != flat || g_bound.psNoDepth != command.psNoDepth)
             {
                 ID3D11PixelShader* program = flat ? g_flatPixelShader.Get() : command.ps;
                 if (program == nullptr) program = g_depthOnlyPixelShader.Get();
                 g_context->PSSetShader(program, nullptr, 0);
                 g_bound.pixelShader = command.pixelShader;
                 g_bound.flat = flat;
+                g_bound.psNoDepth = command.psNoDepth;
                 RenderStats::Frame().shaderSwitches++;
             }
         }
@@ -1184,11 +1198,97 @@ namespace
                 const int slot = command.sourceSamples >= 8 ? 3 : command.sourceSamples >= 4 ? 2 : 1;
                 copy = command.fromDepth ? g_copyDepthMS[slot].Get() : g_copyColourMS[slot].Get();
             }
-            if (copy != nullptr)
+            // COD3_SHADOWFORCE=v: the shadow maps' resolves (the 512 square
+            // depth ones) filled with v instead, for a test of what reads them.
+            static const char* const force = getenv("COD3_SHADOWFORCE");
+            if (force != nullptr && command.fromDepth && command.guestWidth == 512 && command.guestHeight == 512)
             {
-                DrawQuad(command.source, command.sourceWidth, command.sourceHeight, command.x0, command.y0, float(command.width), float(command.height),
+                const float v = float(atof(force));
+                const float fill[4] = { v, v, v, v };
+                g_context->ClearRenderTargetView(command.destination, fill);
+            }
+            else if (copy != nullptr)
+            {
+                // COD3_SHADOWFLIP=u|v|uv: the shadow maps' resolves mirrored, for a test.
+                static const char* const flip = getenv("COD3_SHADOWFLIP");
+                float x0 = command.x0, y0 = command.y0, w = float(command.width), h = float(command.height);
+                if (flip != nullptr && command.fromDepth && command.guestWidth == 512 && command.guestHeight == 512)
+                {
+                    if (strchr(flip, 'u') != nullptr) { x0 += w; w = -w; }
+                    if (strchr(flip, 'v') != nullptr) { y0 += h; h = -h; }
+                }
+                DrawQuad(command.source, command.sourceWidth, command.sourceHeight, x0, y0, w, h,
                          command.destination, viewport, copy, g_pointSampler.Get());
                 if (command.readBack) ReadBackDepth(command);
+                // COD3_SHADOWDUMP=dir: the first few shadow maps' resolves
+                // (512 square, depth) written there as pictures, with their
+                // lowest and highest values said.
+                static const char* const dump = getenv("COD3_SHADOWDUMP");
+                static int dumped = 0;
+                if (dump != nullptr && command.fromDepth && command.guestWidth == 512 && command.guestHeight == 512 &&
+                    (command.logged || (dumped < 6 && RenderInternal::Swaps() > 2000)))
+                {
+                    ComPtr<ID3D11Resource> resource;
+                    command.destinationResource->GetResource(&resource);
+                    ComPtr<ID3D11Texture2D> texture;
+                    resource.As(&texture);
+                    D3D11_TEXTURE2D_DESC desc{};
+                    texture->GetDesc(&desc);
+                    desc.Usage = D3D11_USAGE_STAGING;
+                    desc.BindFlags = 0;
+                    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+                    desc.MiscFlags = 0;
+                    ComPtr<ID3D11Texture2D> staging;
+                    if (SUCCEEDED(g_device->CreateTexture2D(&desc, nullptr, &staging)))
+                    {
+                        g_context->CopyResource(staging.Get(), texture.Get());
+                        D3D11_MAPPED_SUBRESOURCE mapped{};
+                        if (SUCCEEDED(g_context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped)))
+                        {
+                            float lowest = 1e30f, highest = -1e30f;
+                            std::vector<uint8_t> grey(size_t(desc.Width) * desc.Height);
+                            for (uint32_t y = 0; y < desc.Height; y++)
+                                for (uint32_t x = 0; x < desc.Width; x++)
+                                {
+                                    const float v = desc.Format == DXGI_FORMAT_R32_FLOAT || desc.Format == DXGI_FORMAT_R32G32_FLOAT
+                                        ? reinterpret_cast<const float*>(static_cast<const uint8_t*>(mapped.pData) + y * mapped.RowPitch)[x * (desc.Format == DXGI_FORMAT_R32G32_FLOAT ? 2 : 1)]
+                                        : float(static_cast<const uint8_t*>(mapped.pData)[y * mapped.RowPitch + x * 4]) / 255.0f;
+                                    lowest = std::min(lowest, v);
+                                    highest = std::max(highest, v);
+                                    grey[size_t(y) * desc.Width + x] = uint8_t(std::clamp(v, 0.0f, 1.0f) * 255.0f);
+                                }
+                            g_context->Unmap(staging.Get(), 0);
+                            char path[512];
+                            snprintf(path, sizeof(path), "%s\\shadow-%d-%08X.pgm", dump, dumped, command.destinationBase);
+                            if (FILE* f = fopen(path, "wb"))
+                            {
+                                fprintf(f, "P5\n%u %u\n255\n", desc.Width, desc.Height);
+                                fwrite(grey.data(), 1, grey.size(), f);
+                                fclose(f);
+                            }
+                            // In a logged frame its values too, as floats (a
+                            // little-endian PFM, rows from the top).
+                            if (command.logged && desc.Format == DXGI_FORMAT_R32_FLOAT)
+                            {
+                                snprintf(path, sizeof(path), "%s\\shadow-%llu-%08X.pfm", dump, (unsigned long long)RenderInternal::Swaps(), command.destinationBase);
+                                if (FILE* f = fopen(path, "wb"))
+                                {
+                                    fprintf(f, "Pf\n%u %u\n-1.0\n", desc.Width, desc.Height);
+                                    if (SUCCEEDED(g_context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped)))
+                                    {
+                                        for (uint32_t y = 0; y < desc.Height; y++)
+                                            fwrite(static_cast<const uint8_t*>(mapped.pData) + y * mapped.RowPitch, 4, desc.Width, f);
+                                        g_context->Unmap(staging.Get(), 0);
+                                    }
+                                    fclose(f);
+                                }
+                            }
+                            printf("render: shadow map %d (to %08X) format %d %ux%u: depth %g .. %g\n", dumped, command.destinationBase, int(desc.Format),
+                                desc.Width, desc.Height, lowest, highest);
+                            dumped++;
+                        }
+                    }
+                }
             }
         }
         if (command.colorClear)
@@ -1310,8 +1410,10 @@ namespace
         const bool fxaa = (AntiAliasing(settings) == 1 || AntiAliasing(settings) == 5) && g_fxaaPixelShader;
         if (frame != nullptr && frame->resource != nullptr)
         {
-            // Sixteen by nine, as the console sends it, centred.
-            const float aspect = 16.0f / 9.0f;
+            // Sixteen by nine, as the console sends it, centred; in a level
+            // wider when the settings ask (widescreen.cpp).
+            Widescreen::SetWindowSize(clientWidth, clientHeight);
+            const float aspect = Widescreen::PictureAspect();
             float width = float(clientWidth), height = width / aspect;
             if (height > clientHeight) { height = float(clientHeight); width = height * aspect; }
             const D3D11_VIEWPORT viewport{ std::floor((clientWidth - width) * 0.5f), std::floor((clientHeight - height) * 0.5f), std::floor(width), std::floor(height), 0.0f, 1.0f };
@@ -1386,9 +1488,9 @@ namespace
             if (scale < 0.25f) scale = 0.25f;
         }
         RenderResources::RequestScale(scale);
-        // The blur while aiming: COD3_AIMBLUR=0|1 over the settings.
-        static const int aimBlurOverride = []() { const char* t = getenv("COD3_AIMBLUR"); return t ? (t[0] == '0' ? 0 : 1) : -1; }();
-        RenderCommands::SetAimBlur(aimBlurOverride >= 0 ? aimBlurOverride != 0 : settings.aimBlur);
+        // COD3_SHADOWQUALITY=0..4 over the settings.
+        static const int shadowOverride = []() { const char* t = getenv("COD3_SHADOWQUALITY"); return t ? int(strtol(t, nullptr, 10)) : -1; }();
+        RenderResources::RequestShadowQuality(shadowOverride >= 0 ? shadowOverride : settings.shadowQuality);
         // The texture quality: COD3_TEXQUALITY=0|1|2 over the settings.
         static const int qualityOverride = []() { const char* t = getenv("COD3_TEXQUALITY"); return t ? int(strtol(t, nullptr, 10)) : -1; }();
         const int quality = qualityOverride >= 0 ? qualityOverride : settings.textureQuality;

@@ -1,13 +1,17 @@
-// Resources compiled into CoD3.exe.
+// Resources compiled into CoD3SP_s.exe.
 //
 // The first icon in the file is the one Explorer, the taskbar and the window
-// use, which is why it has the lowest identifier.
+// use, which is why it has the lowest identifier. The version comes from
+// cod3_version.h, which CMake writes (CoD3Host/CMakeLists.txt); the libraries
+// the executable carries are in embedded_libraries.rc beside it.
+
+#include "cod3_version.h"
 
 1 ICON "CoD3.ico"
 
 1 VERSIONINFO
-FILEVERSION     0,1,0,0
-PRODUCTVERSION  0,1,0,0
+FILEVERSION     COD3_VERSION_MAJOR,COD3_VERSION_MINOR,COD3_VERSION_PATCH,0
+PRODUCTVERSION  COD3_VERSION_MAJOR,COD3_VERSION_MINOR,COD3_VERSION_PATCH,0
 FILEOS          0x4L
 FILETYPE        0x1L
 BEGIN
@@ -16,11 +20,11 @@ BEGIN
         BLOCK "040904B0"
         BEGIN
             VALUE "FileDescription", "Call of Duty 3, statically recompiled"
-            VALUE "FileVersion",     "0.1.0.0"
-            VALUE "InternalName",    "CoD3"
-            VALUE "OriginalFilename","CoD3.exe"
+            VALUE "FileVersion",     COD3_VERSION_TEXT
+            VALUE "InternalName",    "CoD3SP_s"
+            VALUE "OriginalFilename","CoD3SP_s.exe"
             VALUE "ProductName",     "CoD3Recomp"
-            VALUE "ProductVersion",  "0.1.0.0"
+            VALUE "ProductVersion",  COD3_VERSION_TEXT
         END
     END
     BLOCK "VarFileInfo"

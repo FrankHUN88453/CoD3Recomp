@@ -76,6 +76,7 @@ namespace
 
     void AudioPump()
     {
+        SetThreadDescription(GetCurrentThread(), L"audio");
         // Guest code runs on this thread, so it needs a context and a stack of
         // its own, exactly like a thread the title created itself.
         const uint32_t stackTop = Guest::AllocateStack(128u << 10);

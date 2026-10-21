@@ -1,4 +1,4 @@
-"""Runs CoD3.exe under a minimal debugger and reports exceptions.
+"""Runs the game (the build's CoD3SP_s.exe) under a minimal debugger and reports exceptions.
 
 A vectored handler inside the process sees most faults, but not the one
 that ends the process without dispatch: this sees every one from outside,
@@ -126,6 +126,9 @@ def main():
     # checks every allocation: the host's frame rate measured that way was
     # a different one from the player's. _NO_DEBUG_HEAP=0 keeps it.
     env.setdefault("_NO_DEBUG_HEAP", "1")
+    # A test never updates itself from GitHub (updater.cpp): it would put a
+    # release where the build under test was.
+    env.setdefault("COD3_NOUPDATE", "1")
 
     # The build's executable and its symbols, installed next to the game.
     # A test installs and runs them as CoD3-test.exe, so it never replaces
@@ -164,11 +167,14 @@ def main():
         os.makedirs(scratch, exist_ok=True)
         env.setdefault("COD3_SAVES", os.path.join(scratch, "saves"))
         env.setdefault("COD3_LOG", os.path.join(scratch, "CoD3.log"))
-    build = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "build", "CoD3Host")
+    # DEBUGRUN_BUILD: the folder of another build's executable (and .pdb) to
+    # run, an older one for an A/B measurement, say.
+    build = os.environ.get("DEBUGRUN_BUILD") or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "build", "CoD3Host")
     # The symbols go with an install that stays (CoD3.exe, CoD3-test.exe);
     # a probe finds them where the build left them, by the path inside the
-    # executable.
-    for name, target in (("CoD3.exe", stem + ".exe"), ("CoD3.pdb", stem + ".pdb")):
+    # executable. The build makes CoD3SP_s.exe; builds before it, CoD3.exe.
+    built = "CoD3SP_s" if os.path.exists(os.path.join(build, "CoD3SP_s.exe")) else "CoD3"
+    for name, target in ((built + ".exe", stem + ".exe"), (built + ".pdb", stem + ".pdb")):
         source = os.path.join(build, name)
         if name.endswith(".pdb") and not keeps:
             stale = os.path.join(os.path.dirname(exe), target)

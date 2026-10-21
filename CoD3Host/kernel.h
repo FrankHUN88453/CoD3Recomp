@@ -45,9 +45,17 @@ namespace Kernel
     // and everything printed goes with it.
     [[noreturn]] void Exit(int code);
 
-    // Prepares the saves folder. Reads resolve against Guest::GameRoot, which
-    // the installer has already located.
-    void InitializeFileSystem(const std::filesystem::path& exeDirectory);
+    // The player closed the game (the window, or Quit in the title's main
+    // menu): the process ends at once, the console it was given with it,
+    // with no key waited for. The title's own threads are stopped where
+    // they are, as switching a console off stops them; what it saved is on
+    // disk already and the log is flushed first.
+    [[noreturn]] void Quit();
+
+    // Prepares the saves folder: the main folder's save folder (the saves of
+    // earlier builds, next to the executable, copied over once). Reads
+    // resolve against Guest::GameRoot, which the installer has located.
+    void InitializeFileSystem(const std::filesystem::path& mainFolder, const std::filesystem::path& exeDirectory);
 
     // A content package the title has mounted under a root name ("save:")
     // is a folder here; paths under the name resolve into it, for reading

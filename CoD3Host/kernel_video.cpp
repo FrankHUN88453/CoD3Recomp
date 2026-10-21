@@ -22,6 +22,7 @@
 #include "scheduler.h"
 #include "gpu.h"
 #include "render.h"
+#include "pc_prompts.h"
 #include "settings.h"
 #include "window.h"
 #include "pool_trace.h"
@@ -133,7 +134,12 @@ namespace
         const bool level = Kernel::Stats().filesOpened.load(std::memory_order_relaxed) >= 40;
         const bool usual = armed == 0x82130098u || armed == 0x821300C8u ||
                            armed == 0x822F4A10u || armed == 0x0BADF00Du;
-        if (raised < 40 || (level && (!usual || inLevel.fetch_add(1) < 40)))
+        // An unusual callback is said too, but only its first few times:
+        // the levels arm 0x82302D50 for every frame's command buffers, and
+        // saying each (a line and a flush a few times a frame) was a
+        // write to the log on the command processor's thread.
+        static std::atomic<int> unusual{ 0 };
+        if (raised < 40 || (level && (usual ? inLevel.fetch_add(1) < 40 : unusual.fetch_add(1) < 40)))
         {
             printf("gpu: interrupt %llu on cpu %u, pending mask 0x%02X, callback "
                    "0x%08X%s\n", (unsigned long long)raised, cpu, pending, armed,
@@ -172,6 +178,7 @@ namespace
 
     void CommandThread()
     {
+        SetThreadDescription(GetCurrentThread(), L"gpu commands");
         VideoState& video = Video();
 
         // The handler this thread raises is guest code, so it needs a context
@@ -443,6 +450,7 @@ namespace
 
     void VideoThread()
     {
+        SetThreadDescription(GetCurrentThread(), L"vblank");
         VideoState& video = Video();
         // The seconds below are the wall clock's, whatever rate the blanks
         // come at (COD3_VBLANK).
@@ -1280,6 +1288,9 @@ PPC_FUNC(__imp__VdSwap)
     // piece of information the window needs to show a real frame, so it is
     // decoded here and handed over.
     const uint32_t fetchConstant = ctx.r4.u32;
+    // The key caps the button prompts are drawn as, for what is up now (the
+    // menus' update, where this was, does not run in a level).
+    PcPrompts::Frame(base);
 
     // Every argument, the first few times. Only the fetch constant was ever
     // read, and a swap the console performs is more than a picture: the first

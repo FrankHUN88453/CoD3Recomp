@@ -146,6 +146,7 @@ namespace
 
     void ClockThread()
     {
+        SetThreadDescription(GetCurrentThread(), L"clock");
         while (g_clockRunning.load(std::memory_order_acquire))
         {
             const uint32_t now = Milliseconds();

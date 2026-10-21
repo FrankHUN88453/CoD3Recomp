@@ -61,9 +61,17 @@ namespace RenderShaders
         bool writesDepth = false;
         std::vector<uint8_t> bytecode;     // kept for the stream out probe
         uint32_t hlslBytes = 0;
+        // A pixel program once more without the depth it puts out (the
+        // console's precision, xenos_hlsl.cpp), for the draws whose depth
+        // test cannot see it: built when a draw first wants it.
+        std::atomic<uint8_t> noDepthState{ 0 };   // 0 not asked, 1 building, 2 ready, 3 failed
+        ID3D11PixelShader* noDepth = nullptr;
     };
 
     const Program* Get(Handle handle);
+    // A pixel program's variant without its depth output: the shader once
+    // built, nothing until then (the first ask queues the build).
+    ID3D11PixelShader* NoDepthVariant(Handle handle);
     uint64_t HashOf(Handle handle);
     // The hash a program of that microcode is known by.
     uint64_t HashMicrocode(const uint8_t* words, uint32_t sizeDwords);

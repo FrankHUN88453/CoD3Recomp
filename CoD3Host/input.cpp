@@ -1,5 +1,8 @@
 #include "input.h"
 #include "kernel.h"
+#include "menu_mouse.h"
+#include "video_menu.h"
+#include "sprint.h"
 #include "window.h"
 #include "overlay.h"
 #include "settings.h"
@@ -9,6 +12,8 @@
 #include <chrono>
 #include <cstdio>
 #include <mutex>
+#include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -81,6 +86,7 @@ namespace
     // clicking in the window and given back with Escape, because a window that
     // swallows the pointer without asking cannot be left.
     std::atomic<bool> g_mouseHeld{ false };
+    std::atomic<bool> g_padLast{ false };   // the pad was the last used (Input::PadPrompts)
     POINT g_centre{};
 
     void SetHold(bool hold)
@@ -285,7 +291,7 @@ namespace
     // A held trigger or stick: which (0 and 1 the left and right trigger,
     // 2 to 5 the left stick's x and y and the right stick's x and y) and how
     // far, as a fraction of full, negative for left and down.
-    struct ScriptedHold { double at, until; int control; float amount; };
+    struct ScriptedHold { double at, until; int control; float amount; uint16_t buttons = 0; };
     std::vector<ScriptedHold> g_holds;
     bool g_scriptParsed = false;
     std::chrono::steady_clock::time_point g_scriptStart;
@@ -297,6 +303,7 @@ namespace
             { "x", PadX }, { "y", PadY }, { "up", PadUp }, { "down", PadDown },
             { "left", PadLeft }, { "right", PadRight },
             { "ls", PadLeftShoulder }, { "rs", PadRightShoulder },
+            { "l3", PadLeftThumb }, { "r3", PadRightThumb },
         };
         for (const auto& entry : names) if (name == entry.first) return entry.second;
         return 0;
@@ -340,6 +347,13 @@ namespace
                         if (rest[2] == '-') amount = -amount;
                         const int control = 2 + (rest[0] == 'r' ? 2 : 0) + (rest[1] == 'y' ? 1 : 0);
                         g_holds.push_back({ press.at, press.at + atof(rest.c_str() + slash + 1), control, amount });
+                        continue;
+                    }
+                    // A button held: "back/3" holds Back for three seconds.
+                    if (const size_t slash = rest.find('/'); slash != std::string::npos)
+                    {
+                        if (const uint16_t button = ButtonNamed(rest.substr(0, slash)); button != 0)
+                            g_holds.push_back({ press.at, press.at + atof(rest.c_str() + slash + 1), 6, 0.0f, button });
                         continue;
                     }
                     size_t from = 0;
@@ -391,6 +405,7 @@ namespace
             case 3: pad.thumbLY = stick; break;
             case 4: pad.thumbRX = stick; break;
             case 5: pad.thumbRY = stick; break;
+            case 6: pad.buttons |= hold.buttons; break;
             }
         }
     }
@@ -401,6 +416,56 @@ namespace
         for (ScriptedPress& press : g_script)
             if (press.begun && press.readsLeft > 0 && (buttons & press.buttons) == press.buttons)
                 press.readsLeft--;
+    }
+
+    // The left button in a menu of the title's, as menu_mouse.cpp says of
+    // what is under the pointer: A over the entry highlighted there (or the
+    // chapter chosen); over an arrow, an option's value or a chapter of the
+    // strip the cross's left or right, pressed as many times as it says,
+    // each press a few frames long with a gap after it, and again and again
+    // while the button stays down on an arrow, as a held cross repeats.
+    // Timed rather than counted in reads: the reads come every few
+    // milliseconds, or on every poll while a script runs.
+    uint16_t MenuClicks(bool down)
+    {
+        using Clock = std::chrono::steady_clock;
+        constexpr auto PressFor = std::chrono::milliseconds(60), Gap = std::chrono::milliseconds(60);
+        constexpr auto RepeatAfter = std::chrono::milliseconds(450);
+        static bool wasDown = false;
+        static int direction = 0, pressesLeft = 0;
+        static Clock::time_point downAt, pressAt;
+        const auto now = Clock::now();
+        const MenuMouse::Click click = MenuMouse::ClickUnderPointer();
+        if (down && !wasDown)
+        {
+            downAt = now;
+            if (click.direction != 0 && pressesLeft == 0)
+            {
+                direction = click.direction;
+                pressesLeft = std::max(1, click.steps);
+                pressAt = now;
+            }
+        }
+        else if (down && click.direction != 0 && click.steps == 1 && pressesLeft == 0 && now - downAt >= RepeatAfter)
+        {
+            direction = click.direction;
+            pressesLeft = 1;
+            pressAt = now;
+        }
+        wasDown = down;
+        uint16_t buttons = 0;
+        if (pressesLeft > 0)
+        {
+            if (now - pressAt >= PressFor + Gap)
+            {
+                pressesLeft--;
+                pressAt = now;
+            }
+            if (pressesLeft > 0 && now - pressAt < PressFor) buttons |= direction < 0 ? PadLeft : PadRight;
+        }
+        else if (down && click.takes)
+            buttons |= PadA;
+        return buttons;
     }
 
     // The keyboard and mouse stand in for a pad. Only while the title's own
@@ -416,12 +481,18 @@ namespace
             if (text == nullptr) text = getenv("COD3_BACKGROUND");   // a run nobody is playing
             return text != nullptr && text[0] != 0 && text[0] != '0';
         }();
-        if (ignored) return pad;
+        if (ignored)
+        {
+            Sprint::Hold(false);
+            if (MenuMouse::MenuUp()) pad.buttons |= MenuClicks(MenuMouse::ScriptedClick());
+            return pad;
+        }
         if (!Window::HasFocus() || Overlay::IsOpen())
         {
             // Out of focus, or the settings menu is up and the keys and the
             // mouse are its.
             if (g_mouseHeld.load()) SetHold(false);
+            Sprint::Hold(false);
             return pad;
         }
 
@@ -437,6 +508,16 @@ namespace
         // also Start, so the pause menu opens with the pointer free to leave.
         const bool inLevel = Kernel::Stats().filesOpened.load(std::memory_order_relaxed) >= 40;
         const bool escapeDown = Down(VK_ESCAPE);
+        // A menu of the title's own up in a level (the pause menu, a mission's
+        // end) is pointed at (menu_mouse.cpp): the pointer is let go while it
+        // is up and taken again when it goes, for looking around.
+        const bool menuUp = MenuMouse::MenuUp();
+        {
+            static bool wasUp = false;
+            if (inLevel && menuUp && !wasUp && g_mouseHeld.load()) SetHold(false);
+            if (inLevel && !menuUp && wasUp && !g_mouseHeld.load()) SetHold(true);
+            wasUp = menuUp;
+        }
         // Start is held for a few reads after Escape frees the pointer, so
         // the title's own poll, which is slower than these reads, sees it.
         static int startReadsLeft = 0;
@@ -446,7 +527,7 @@ namespace
             static bool takenForLevel = false;
             if (!inLevel) takenForLevel = false;
             const bool firstTime = inLevel && !takenForLevel;
-            if (Down(VK_F1) || Down(VK_MBUTTON) || firstTime || (inLevel && Down(VK_LBUTTON) && !escapeDown))
+            if (Down(VK_F1) || Down(VK_MBUTTON) || firstTime || (inLevel && !menuUp && Down(VK_LBUTTON) && !escapeDown))
             {
                 SetHold(true);
                 if (inLevel) takenForLevel = true;
@@ -454,16 +535,21 @@ namespace
         }
 
         const bool held = g_mouseHeld.load();
+        {
+            const int sprintKey = Settings::Get().keys[Settings::Sprint];
+            Sprint::Hold(inLevel && held && !menuUp && sprintKey != 0 && Down(sprintKey));
+        }
 
         // The keys, where the console's buttons are on a keyboard, from the
         // settings menu: jump is A, crouch B, use and reload X, weapon Y,
-        // melee the right stick pressed, sprint the left, the grenade the
-        // right bumper and the smoke the left, objectives left on the cross,
-        // pause Start. The arrows and Enter always walk the menus.
+        // melee the right stick pressed, the binoculars the left (the
+        // game's single player layout, xenon_a.cfg), the grenade the right
+        // bumper and the smoke the left, the objectives Back held, pause
+        // Start. Sprinting is not a button of the console's single player
+        // (below). The arrows and Enter always walk the menus.
         const Settings::Values keys = Settings::Get();
         struct Mapping { int key; uint16_t button; };
         const Mapping mappings[] = {
-            { VK_RETURN, PadStart },
             { VK_UP, PadUp }, { VK_DOWN, PadDown },
             { VK_LEFT, PadLeft }, { VK_RIGHT, PadRight },
             { keys.keys[Settings::Jump], PadA },
@@ -471,14 +557,19 @@ namespace
             { keys.keys[Settings::Use], PadX }, { keys.keys[Settings::Reload], PadX },
             { keys.keys[Settings::Weapon], PadY },
             { keys.keys[Settings::Melee], PadRightThumb },
-            { keys.keys[Settings::Sprint], PadLeftThumb },
+            { keys.keys[Settings::Binoculars], PadLeftThumb },
             { keys.keys[Settings::Grenade], PadRightShoulder },
             { keys.keys[Settings::Smoke], PadLeftShoulder },
-            { keys.keys[Settings::Objectives], PadLeft },
+            { keys.keys[Settings::Objectives], PadBack },
         };
 
         for (const Mapping& mapping : mappings)
             if (mapping.key != 0 && Down(mapping.key)) pad.buttons |= mapping.button;
+        // Enter is Start, and in a menu of the title's own A, as its prompts
+        // say (pc_prompts.cpp): Start and A at once took an entry and closed
+        // the pause menu together. The title screen wants Start.
+        const bool titleScreen = MenuMouse::TitleScreen();
+        if (Down(VK_RETURN)) pad.buttons |= (menuUp && !held) ? uint16_t(PadA | (titleScreen ? PadStart : 0)) : PadStart;
         // Pause, when it is not the Escape that frees the mouse (below).
         if (inLevel && keys.keys[Settings::Pause] != 0 && keys.keys[Settings::Pause] != VK_ESCAPE && Down(keys.keys[Settings::Pause]))
             pad.buttons |= PadStart;
@@ -489,31 +580,50 @@ namespace
         {
             static int wheelReadsLeft = 0;
             const int wheel = Window::TakeWheel();
-            if (wheel != 0) wheelReadsLeft = 8;
+            if (wheel != 0 && VideoMenu::Active()) VideoMenu::Wheel(wheel);
+            else if (wheel != 0) wheelReadsLeft = 8;
             if (wheelReadsLeft > 0) { pad.buttons |= PadY; wheelReadsLeft--; }
         }
 
         // The title's first screen waits for Start, and asking a player to know
         // that is asking them to guess. While the mouse is free, which is every
         // menu, Space is Start as well as A.
-        if (!held && Down(VK_SPACE)) pad.buttons |= PadStart;
-        if (!held && Down(VK_ESCAPE) && !inLevel) pad.buttons |= PadBack;
+        if (!held && Down(VK_SPACE) && (!menuUp || titleScreen)) pad.buttons |= PadStart;
+        // In a menu of the title's own, Escape goes back as its B does, once
+        // a press (the press that let the pointer go and opened the pause
+        // menu is not one), held for a few reads so the title's poll sees it.
+        {
+            static bool escapeWasDown = false;
+            static int backReadsLeft = 0;
+            if (!held && menuUp && escapeDown && !escapeWasDown && startReadsLeft == 0) backReadsLeft = 6;
+            escapeWasDown = escapeDown;
+            if (backReadsLeft > 0) { pad.buttons |= PadB; backReadsLeft--; }
+        }
+        if (!held && Down(VK_ESCAPE) && !inLevel && !menuUp) pad.buttons |= PadBack;
         if (inLevel && startReadsLeft > 0) { pad.buttons |= PadStart; startReadsLeft--; }
 
         // Driving a menu with the mouse.
         //
         // The menus are built for a pad: a highlight that moves up and down and
-        // a button that takes it. There is no way to ask the title what is
-        // under the pointer, so pointing at an entry cannot select it. What can
-        // be done is to make the mouse do what the pad does. Moving it up or
-        // down steps the highlight, one step per movement rather than one per
-        // pixel, and the left button takes the entry. It is not pointing and
-        // clicking, but it is a menu driven with the mouse.
-        if (!held && !inLevel)
+        // a button that takes it. Where the title's menu is known
+        // (menu_mouse.cpp) the entry under the pointer is highlighted and the
+        // left button takes it, only over it. Elsewhere (the screens that are
+        // not menus of its menu systems) the mouse does what the pad does:
+        // moving it up or down steps the highlight, one step per movement
+        // rather than one per pixel, and the left button takes the entry.
+        if (!held && (!inLevel || menuUp))
         {
-            if (Down(VK_LBUTTON)) pad.buttons |= PadA;
-            if (Down(VK_RBUTTON)) pad.buttons |= PadBack;
-            pad.buttons |= MenuStep();
+            if (menuUp)
+            {
+                pad.buttons |= MenuClicks(Down(VK_LBUTTON) || MenuMouse::ScriptedClick());
+                if (Down(VK_RBUTTON)) pad.buttons |= PadB;
+            }
+            else
+            {
+                if (Down(VK_LBUTTON)) pad.buttons |= PadA;
+                if (Down(VK_RBUTTON)) pad.buttons |= PadBack;
+                pad.buttons |= MenuStep();
+            }
         }
 
         // Moving. WASD is the left stick so it is analogue, and the arrows stay
@@ -540,6 +650,8 @@ namespace
 
     std::mutex g_mutex;
     Input::Pad g_pad{};
+    uint64_t g_pressedAt[16] = {};     // when each button last went down (GetTickCount64)
+    uint16_t g_unfiltered = 0;         // the buttons before the VIDEO page took its own (video_menu.cpp)
     uint32_t g_packet = 1;
     std::chrono::steady_clock::time_point g_lastRead;
 
@@ -579,11 +691,30 @@ namespace
             const char* text = getenv("COD3_NOPAD");
             return text != nullptr && text[0] != 0 && text[0] != '0';
         }();
+        // Which the player used last, the pad or the keyboard and mouse, for
+        // the buttons the prompts show (pc_prompts.cpp): a pad's button, a
+        // trigger or a stick well off centre on one side; a key, a button
+        // of the mouse or the pointer moving on the other.
+        bool padUsed = false, padThere = false;
+        bool keysUsed = fromKeyboard != 0 || pad.thumbLX != 0 || pad.thumbLY != 0 || pad.thumbRX != 0 || pad.thumbRY != 0 ||
+                        pad.leftTrigger != 0 || pad.rightTrigger != 0;
+        if (Window::HasFocus())
+        {
+            static POINT lastPointer{};
+            POINT pointer{};
+            if (GetCursorPos(&pointer) && (pointer.x != lastPointer.x || pointer.y != lastPointer.y) && !g_mouseHeld.load()) keysUsed = true;
+            lastPointer = pointer;
+            if (Down(VK_LBUTTON) || Down(VK_RBUTTON) || Down(VK_MBUTTON)) keysUsed = true;
+        }
         if (g_getState != nullptr && !padIgnored && Settings::Get().controller)
         {
             XInputState state{};
             if (g_getState(0, &state) == ERROR_SUCCESS)
             {
+                padThere = true;
+                const auto off = [](int16_t v) { return v > 9000 || v < -9000; };
+                padUsed = state.gamepad.buttons != 0 || state.gamepad.leftTrigger > 40 || state.gamepad.rightTrigger > 40 ||
+                          off(state.gamepad.thumbLX) || off(state.gamepad.thumbLY) || off(state.gamepad.thumbRX) || off(state.gamepad.thumbRY);
                 fromPad = state.gamepad.buttons;
                 pad.buttons |= state.gamepad.buttons;
                 pad.leftTrigger = std::max(pad.leftTrigger, state.gamepad.leftTrigger);
@@ -601,6 +732,15 @@ namespace
             }
         }
 
+        if (!padThere) g_padLast.store(false);
+        else if (padUsed) g_padLast.store(true);
+        else if (keysUsed) g_padLast.store(false);
+
+        // The VIDEO page of the title's options takes the presses while it
+        // is up (video_menu.cpp).
+        g_unfiltered = pad.buttons;
+        VideoMenu::FilterPad(pad);
+
         if (!Same(pad, g_pad))
         {
             // Where a button came from, the first few times it changes:
@@ -613,6 +753,9 @@ namespace
                     pad.buttons, fromKeyboard, fromScript, fromPad, Window::HasFocus() ? 1 : 0);
                 fflush(stdout);
             }
+            if (const uint16_t pressed = pad.buttons & ~g_pad.buttons; pressed != 0)
+                for (int bit = 0; bit < 16; bit++)
+                    if (pressed & (1u << bit)) g_pressedAt[bit] = GetTickCount64();
             g_pad = pad;
             g_packet++;
         }
@@ -623,13 +766,28 @@ Input::Pad Input::State()
 {
     Refresh();
     std::lock_guard<std::mutex> lock(g_mutex);
-    ScriptedRead(g_pad.buttons);
+    // A scripted press lasts two reads that saw it, the VIDEO page's too.
+    ScriptedRead(g_unfiltered);
     return g_pad;
 }
 
 uint16_t Input::Buttons()
 {
     return State().buttons;
+}
+
+uint64_t Input::PressedAt(uint16_t button)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    for (int bit = 0; bit < 16; bit++)
+        if (button & (1u << bit)) return g_pressedAt[bit];
+    return 0;
+}
+
+double Input::ScriptSeconds()
+{
+    if (!g_scriptParsed) return 0.0;
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - g_scriptStart).count();
 }
 
 bool Input::MouseHeld()
@@ -640,7 +798,15 @@ bool Input::MouseHeld()
 bool Input::TakeLook(long& dx, long& dy)
 {
     bool raw = false;
-    return TakeMovement(dx, dy, raw);
+    const bool taken = TakeMovement(dx, dy, raw);
+    if (taken && (dx != 0 || dy != 0)) g_padLast.store(false);
+    return taken;
+}
+
+bool Input::PadPrompts()
+{
+    const int chosen = Settings::Get().buttonPrompts;
+    return chosen == 1 || (chosen == 0 && g_padLast.load(std::memory_order_relaxed));
 }
 
 void Input::LookTaken() { g_lookTakenAt.store(GetTickCount64(), std::memory_order_relaxed); }

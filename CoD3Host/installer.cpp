@@ -13,8 +13,8 @@ namespace fs = std::filesystem;
 
 namespace
 {
-    // A folder chosen once and used where it is, instead of copied, is
-    // remembered here next to the executable.
+    // The main folder chosen, remembered next to the executable; and the
+    // folder earlier builds' setup made next to it.
     constexpr wchar_t kPathFile[] = L"game.path";
     constexpr wchar_t kGameFolder[] = L"game";
     constexpr wchar_t kManifest[] = L".cod3install";
@@ -216,91 +216,83 @@ bool Installer::IsGameFolder(const fs::path& folder)
     return true;
 }
 
-bool Installer::Locate(const fs::path& exeDirectory, const Source& source,
-                       GameLocation& out, std::string& error)
+namespace
 {
-    error.clear();
-    std::error_code ec;
-
-    // 1. A game folder next to the executable is the normal case.
-    const fs::path installed = exeDirectory / kGameFolder;
-    if (IsGameFolder(installed))
+    // The main folder chosen, remembered next to the executable.
+    bool Remember(const fs::path& pathFile, const fs::path& main, std::string& error)
     {
-        out.root = installed;
-        out.executable = installed / "default.xex";
+        FILE* f = nullptr;
+        if (_wfopen_s(&f, pathFile.c_str(), L"w") != 0 || f == nullptr)
+        {
+            error = "cannot write game.path next to the executable (is its folder read only?)";
+            return false;
+        }
+        fprintf(f, "%s\n", Utf8(main.wstring()).c_str());
+        fclose(f);
+        return true;
+    }
+
+    bool Found(const fs::path& main, Installer::GameLocation& out)
+    {
+        out.root = main;
+        out.executable = main / "default.xex";
         ReportXexMismatch(out.executable);
         return true;
     }
 
-    // 2. Or a folder the user chose to keep where it is.
-    const fs::path pathFile = exeDirectory / kPathFile;
-    if (fs::is_regular_file(pathFile, ec))
+    bool AskYes(const char* question)
     {
-        FILE* f = nullptr;
-        if (_wfopen_s(&f, pathFile.c_str(), L"r") == 0 && f != nullptr)
-        {
-            char buffer[1024] = {};
-            if (fgets(buffer, sizeof(buffer), f) != nullptr)
-            {
-                std::string line(buffer);
-                while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
-                const fs::path referenced = fs::u8path(line);
-                if (IsGameFolder(referenced))
-                {
-                    fclose(f);
-                    out.root = referenced;
-                    out.executable = referenced / "default.xex";
-                    ReportXexMismatch(out.executable);
-                    return true;
-                }
-                printf("game.path points at %s, which no longer holds the game.\n", line.c_str());
-                printf("Running setup again.\n\n");
-            }
-            fclose(f);
-        }
-    }
-
-    // 3. First run.
-    PrintRule();
-    printf(" Call of Duty 3 - first time setup\n");
-    PrintRule();
-    printf("\n");
-
-    std::string choice;
-    if (!source.iso.empty())
-    {
-        choice = "1";
-    }
-    else if (!source.folder.empty())
-    {
-        choice = source.copyFolder ? "2" : "3";
-    }
-    else
-    {
-        printf("The game's data files are not included with this program and have to\n");
-        printf("come from your own copy of the disc. This only happens once.\n");
-        printf("\n");
-        printf("  1  Extract from an Xbox 360 disc image (.iso)\n");
-        printf("  2  Copy from a folder you already extracted\n");
-        printf("  3  Use a folder you already extracted, where it is (copies nothing)\n");
-        printf("  q  Quit\n");
-        printf("\n");
-        printf("Choice: ");
+        printf("%s [y/N]: ", question);
         fflush(stdout);
-
-        choice = ReadLine();
-        printf("\n");
+        const std::string answer = ReadLine();
+        return answer == "y" || answer == "Y" || answer == "yes" || answer == "Yes";
     }
 
-    if (choice == "q" || choice == "Q" || choice.empty())
-        return false;   // deliberate cancellation, no error
+    // Whether a folder has anything in it (a missing one has nothing).
+    bool HasEntries(const fs::path& folder)
+    {
+        std::error_code ec;
+        if (!fs::is_directory(folder, ec)) return false;
+        return fs::directory_iterator(folder, ec) != fs::directory_iterator();
+    }
 
-    if (choice == "1")
+    // The main folder a fresh install goes into: the one named on the command
+    // line, else one the user picks. One that already holds things is used
+    // only if the user says so (the disc's files go straight into it).
+    bool ChooseInstallFolder(const Installer::Source& source, fs::path& main, std::string& error)
+    {
+        main = source.main;
+        if (main.empty())
+        {
+            printf("Choose the main folder to install the game into (an empty folder is best)...\n");
+            if (!PickWithDialog(true, L"Choose the main folder to install Call of Duty 3 into", main))
+                return false;
+            printf("  %s\n\n", Utf8(main.wstring()).c_str());
+            if (HasEntries(main) && !Installer::IsGameFolder(main))
+            {
+                printf("That folder is not empty. The game's files and its save folder\n");
+                printf("would go in beside what is already there.\n");
+                if (!AskYes("Install into it anyway?")) return false;
+                printf("\n");
+            }
+        }
+        std::error_code ec;
+        fs::create_directories(main, ec);
+        if (ec)
+        {
+            error = "cannot create " + Utf8(main.wstring()) + ": " + ec.message();
+            return false;
+        }
+        return true;
+    }
+
+    // A fresh install from a disc image into `main`.
+    bool InstallFromImage(const Installer::Source& source, const fs::path& main, std::string& error)
     {
         fs::path iso = source.iso;
         if (iso.empty())
         {
-            printf("Choose the disc image...\n");
+            printf("Choose your Xbox 360 disc image of the game...\n");
             if (!PickWithDialog(false, L"Select the Call of Duty 3 disc image", iso))
                 return false;
         }
@@ -310,7 +302,7 @@ bool Installer::Locate(const fs::path& exeDirectory, const Source& source,
         if (!image.Open(iso, error))
             return false;
 
-        printf("  filesystem: %s at offset 0x%llX\n\n",
+        printf("  filesystem: %s at offset 0x%llX\n",
             image.FormatName(), (unsigned long long)image.BaseOffset());
 
         std::vector<XDvdFs::Entry> files;
@@ -333,19 +325,19 @@ bool Installer::Locate(const fs::path& exeDirectory, const Source& source,
             return false;
         }
         printf("  contents:   %zu files, %s\n", files.size(), Bytes(contentBytes).c_str());
-        if (xexEntry->size != ExpectedXexSize)
+        if (xexEntry->size != Installer::ExpectedXexSize)
         {
             error = "the image holds a " + std::to_string(xexEntry->size) +
                     " byte default.xex, but this build was recompiled from a " +
-                    std::to_string(ExpectedXexSize) +
+                    std::to_string(Installer::ExpectedXexSize) +
                     " byte one. A different region or revision will not run.";
             return false;
         }
         printf("  executable: matches the one this build was recompiled from\n\n");
 
-        printf("Extracting to %s\n", Utf8(installed.wstring()).c_str());
+        printf("Extracting to %s\n", Utf8(main.wstring()).c_str());
         uint64_t lastReported = 0;
-        if (!image.ExtractAll(installed,
+        if (!image.ExtractAll(main,
                 [&](const XDvdFs::Progress& p)
                 {
                     if (p.bytesDone - lastReported < (8u << 20) && p.filesDone != p.filesTotal)
@@ -358,48 +350,133 @@ bool Installer::Locate(const fs::path& exeDirectory, const Source& source,
             return false;
         }
         printf("\n");
-        WriteManifest(installed, "iso", iso);
+        WriteManifest(main, "iso", iso);
+        return true;
     }
-    else if (choice == "2" || choice == "3")
+}
+
+bool Installer::Locate(const fs::path& exeDirectory, const Source& source,
+                       GameLocation& out, std::string& error)
+{
+    error.clear();
+    std::error_code ec;
+    const fs::path pathFile = exeDirectory / kPathFile;
+
+    // A main folder named on the command line, used where it is.
+    if (!source.folder.empty() && !source.copyFolder)
     {
-        fs::path folder = source.folder;
-        if (folder.empty())
+        if (!IsGameFolder(source.folder))
         {
-            printf("Choose the folder holding default.xex...\n");
-            if (!PickWithDialog(true, L"Select the extracted Call of Duty 3 folder", folder))
+            error = "that folder has no default.xex and sp folder, so it is not the main "
+                    "folder of an installed Call of Duty 3";
+            return false;
+        }
+        if (!Remember(pathFile, source.folder, error)) return false;
+        return Found(source.folder, out);
+    }
+
+    if (source.iso.empty() && source.folder.empty())
+    {
+        // 1. The main folder chosen before, remembered next to the executable.
+        if (fs::is_regular_file(pathFile, ec))
+        {
+            FILE* f = nullptr;
+            if (_wfopen_s(&f, pathFile.c_str(), L"r") == 0 && f != nullptr)
+            {
+                char buffer[1024] = {};
+                const bool read = fgets(buffer, sizeof(buffer), f) != nullptr;
+                fclose(f);
+                if (read)
+                {
+                    std::string line(buffer);
+                    while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
+                    const fs::path referenced = fs::u8path(line);
+                    if (IsGameFolder(referenced)) return Found(referenced, out);
+                    printf("game.path points at %s, which no longer holds the game.\n", line.c_str());
+                    printf("Running setup again.\n\n");
+                }
+            }
+        }
+        // 2. The executable in the main folder itself.
+        if (IsGameFolder(exeDirectory)) return Found(exeDirectory, out);
+        // 3. A game folder next to the executable: the layout of earlier
+        // builds, which first time setup made.
+        if (IsGameFolder(exeDirectory / kGameFolder)) return Found(exeDirectory / kGameFolder, out);
+    }
+
+    // 4. First run: a fresh install, or a game already installed.
+    PrintRule();
+    printf(" Call of Duty 3 - first time setup\n");
+    PrintRule();
+    printf("\n");
+
+    std::string choice;
+    if (!source.iso.empty()) choice = "1";
+    else if (!source.folder.empty()) choice = "copy";
+    else
+    {
+        printf("Is this a fresh install, or is the game already installed?\n");
+        printf("\n");
+        printf("  1  Fresh install: extract the game from your own Xbox 360 disc image\n");
+        printf("     (.iso) into a main folder you choose\n");
+        printf("  2  Already installed: choose the game's main folder (the one that\n");
+        printf("     holds default.xex)\n");
+        printf("  q  Quit\n");
+        printf("\n");
+        printf("The game's data files are not included with this program; they come\n");
+        printf("from your own copy of the disc. Your saves are kept in the main\n");
+        printf("folder's save folder.\n");
+        printf("\n");
+        printf("Choice: ");
+        fflush(stdout);
+        choice = ReadLine();
+        printf("\n");
+    }
+
+    if (choice == "q" || choice == "Q" || choice.empty())
+        return false;   // deliberate cancellation, no error
+
+    fs::path main;
+    if (choice == "1")
+    {
+        // The image first, then the folder it goes into.
+        Source withImage = source;
+        if (withImage.iso.empty())
+        {
+            printf("Choose your Xbox 360 disc image of the game...\n");
+            if (!PickWithDialog(false, L"Select the Call of Duty 3 disc image", withImage.iso))
                 return false;
         }
-        printf("  %s\n\n", Utf8(folder.wstring()).c_str());
-
-        if (!IsGameFolder(folder))
+        if (!ChooseInstallFolder(source, main, error)) return false;
+        if (!InstallFromImage(withImage, main, error)) return false;
+    }
+    else if (choice == "2")
+    {
+        printf("Choose the game's main folder (the one that holds default.xex)...\n");
+        if (!PickWithDialog(true, L"Select the main folder of the installed Call of Duty 3", main))
+            return false;
+        printf("  %s\n\n", Utf8(main.wstring()).c_str());
+        if (!IsGameFolder(main))
+        {
+            error = "that folder has no default.xex and sp folder, so it is not the main "
+                    "folder of an installed Call of Duty 3";
+            return false;
+        }
+    }
+    else if (choice == "copy")
+    {
+        // --copy <folder>: an extracted folder copied into the main folder.
+        if (!IsGameFolder(source.folder))
         {
             error = "that folder has no default.xex and sp folder, so it is not an "
                     "extracted Call of Duty 3 disc";
             return false;
         }
-
-        if (choice == "3")
-        {
-            FILE* f = nullptr;
-            if (_wfopen_s(&f, pathFile.c_str(), L"w") != 0 || f == nullptr)
-            {
-                error = "cannot write game.path next to the executable";
-                return false;
-            }
-            fprintf(f, "%s\n", Utf8(folder.wstring()).c_str());
-            fclose(f);
-            printf("Remembered. The game will be read from there.\n\n");
-
-            out.root = folder;
-            out.executable = folder / "default.xex";
-            ReportXexMismatch(out.executable);
-            return true;
-        }
-
-        printf("Copying to %s\n", Utf8(installed.wstring()).c_str());
-        if (!CopyFolder(folder, installed, error))
+        if (!ChooseInstallFolder(source, main, error)) return false;
+        printf("Copying to %s\n", Utf8(main.wstring()).c_str());
+        if (!CopyFolder(source.folder, main, error))
             return false;
-        WriteManifest(installed, "folder", folder);
+        WriteManifest(main, "folder", source.folder);
     }
     else
     {
@@ -407,16 +484,17 @@ bool Installer::Locate(const fs::path& exeDirectory, const Source& source,
         return false;
     }
 
-    if (!IsGameFolder(installed))
+    if (!IsGameFolder(main))
     {
-        error = "setup finished but " + Utf8(installed.wstring()) +
+        error = "setup finished but " + Utf8(main.wstring()) +
                 " still does not hold default.xex and an sp folder";
         return false;
     }
+    // Remembered, unless the executable is in it (then it is found there).
+    if (fs::weakly_canonical(main, ec) != fs::weakly_canonical(exeDirectory, ec) && !Remember(pathFile, main, error))
+        return false;
 
-    printf("Setup complete.\n\n");
-    out.root = installed;
-    out.executable = installed / "default.xex";
-    ReportXexMismatch(out.executable);
-    return true;
+    printf("Setup complete. The main folder is %s\n", Utf8(main.wstring()).c_str());
+    printf("and your saves will be kept in its save folder.\n\n");
+    return Found(main, out);
 }

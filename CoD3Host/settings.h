@@ -14,7 +14,7 @@ namespace Settings
     // controls. The order is the order the menu lists them in.
     enum Action
     {
-        Fire, Aim, Jump, Crouch, Use, Reload, Weapon, Melee, Sprint, Grenade, Smoke,
+        Fire, Aim, Jump, Crouch, Use, Reload, Weapon, Melee, Sprint, Binoculars, Grenade, Smoke,
         Objectives, Pause, Forward, Backward, Left, Right,
         ActionCount
     };
@@ -38,7 +38,8 @@ namespace Settings
         int textureQuality = 2;       // 0 low (two mip levels dropped), 1 medium (one), 2 high (all)
         int fov = 65;                 // the title's cg_fov, 65 (its own) .. 100
         int modelDetail = 1;          // 0 the title's own level of detail (r_lodscale 1), 1 the most detailed models at every distance (r_lodscale 0)
-        bool aimBlur = true;          // the title's depth of field while aiming down the sights
+        int aspectRatio = 0;          // the picture's shape in a level: 0 the console's 16:9, 1 the window's, 2 21:9, 3 32:9 (widescreen.cpp)
+        int shadowQuality = 0;        // the shadow maps' size: 0 as the frame (the console's 512 times the frame's scale), 1 512, 2 1024, 3 2048, 4 4096 (render_resources.cpp)
         bool consoleDepth = true;     // depth cut to the console's 24 bit float precision (no flickering surfaces; costs with MSAA)
         bool nativeCommands = true;   // the draws' state taken from the game's own D3D calls, the command stream run only for what the GPU still does (docs/native-d3d11-plan.md, N3-N4; on by default since all fifteen levels ran on it; after a restart)
         bool watchWrites = true;      // still textures and vertex buffers known unchanged by their pages, not hashed every frame (write_watch.h; on by default; after a restart)
@@ -49,8 +50,10 @@ namespace Settings
         bool subtitles = true;        // the title's cg_subtitles (on by default there too)
         bool console = false;         // the key left of 1 opens the console (the host's: the title's own was left out of this build)
         bool controller = true;       // read a pad when one is there
+        int buttonPrompts = 0;        // the prompts' buttons: 0 as the last used (pad or keyboard and mouse), 1 the pad's, 2 the keys (pc_prompts.cpp)
         float mouseSensitivity = 1.0f;   // the look's, both axes, 0.05 .. 5: 1 is 0.066 degrees a count (mouse_look.cpp); look_sensitivity in the ini
         bool rawMouse = true;            // the mouse's own counts, not the pointer's travel
+        bool autoUpdate = true;          // on start, a newer release from GitHub downloaded and started (updater.cpp)
         int keys[ActionCount] = {};
     };
 

@@ -208,7 +208,7 @@ namespace
     // A job carries pointers: the deques the entries live in are appended
     // by the command thread while the workers run, and an entry once made
     // never moves.
-    struct Job { Program* program; const std::vector<uint32_t>* words; };
+    struct Job { Program* program; const std::vector<uint32_t>* words; bool noDepth = false; };
     std::deque<Job> g_queue;
     std::vector<std::thread> g_workers;
 
@@ -308,8 +308,81 @@ namespace
         program.state.store(MakeShaderObject(program) ? State::Ready : State::Failed, std::memory_order_release);
     }
 
+    // A pixel program's variant without its depth output: the program's
+    // translation compiled with XENOS_NO_DEPTH, kept on disk beside the
+    // program's own file (the bytecode alone after a header).
+    std::string NoDepthCachePath(uint64_t hash)
+    {
+        std::string path = CachePath(hash, true);
+        path.insert(path.size() - 4, ".nodepth");
+        return path;
+    }
+
+    void BuildNoDepth(const Job& job)
+    {
+        Program& program = *job.program;
+        std::vector<uint8_t> bytecode;
+        const std::string path = g_cacheDirectory.empty() ? std::string() : NoDepthCachePath(program.hash);
+        if (!path.empty())
+            if (FILE* in = fopen(path.c_str(), "rb"))
+            {
+                CacheHeader header{};
+                if (fread(&header, sizeof(header), 1, in) == 1 && header.magic == CacheMagic && header.version == CacheVersion &&
+                    header.translator == g_translatorVersion && header.bytecodeBytes > 0 && header.bytecodeBytes < (16u << 20))
+                {
+                    bytecode.resize(header.bytecodeBytes);
+                    if (fread(bytecode.data(), 1, bytecode.size(), in) != bytecode.size()) bytecode.clear();
+                }
+                fclose(in);
+            }
+        if (bytecode.empty())
+        {
+            const XenosHlsl::Translation translation = XenosHlsl::Translate(*job.words, true);
+            if (!translation.ok || g_compile == nullptr) { program.noDepthState.store(3, std::memory_order_release); return; }
+            const D3D_SHADER_MACRO defines[] = { { "XENOS_NO_DEPTH", "1" }, { nullptr, nullptr } };
+            ID3DBlob* code = nullptr;
+            ID3DBlob* errors = nullptr;
+            const HRESULT hr = g_compile(translation.hlsl.data(), translation.hlsl.size(), "pixel program without depth", defines, nullptr, "main",
+                "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errors);
+            if (errors) errors->Release();
+            if (FAILED(hr) || code == nullptr)
+            {
+                if (code) code->Release();
+                program.noDepthState.store(3, std::memory_order_release);
+                return;
+            }
+            bytecode.assign(static_cast<const uint8_t*>(code->GetBufferPointer()), static_cast<const uint8_t*>(code->GetBufferPointer()) + code->GetBufferSize());
+            code->Release();
+            if (!path.empty())
+            {
+                const std::string partial = path + ".part";
+                if (FILE* out = fopen(partial.c_str(), "wb"))
+                {
+                    CacheHeader header{};
+                    header.magic = CacheMagic;
+                    header.version = CacheVersion;
+                    header.translator = g_translatorVersion;
+                    header.bytecodeBytes = uint32_t(bytecode.size());
+                    const bool written = fwrite(&header, sizeof(header), 1, out) == 1 && fwrite(bytecode.data(), 1, bytecode.size(), out) == bytecode.size();
+                    fclose(out);
+                    if (written) MoveFileExA(partial.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
+                    else DeleteFileA(partial.c_str());
+                }
+            }
+        }
+        ID3D11PixelShader* shader = nullptr;
+        if (FAILED(g_device->CreatePixelShader(bytecode.data(), bytecode.size(), nullptr, &shader)) || shader == nullptr)
+        {
+            program.noDepthState.store(3, std::memory_order_release);
+            return;
+        }
+        program.noDepth = shader;
+        program.noDepthState.store(2, std::memory_order_release);
+    }
+
     void Worker()
     {
+        SetThreadDescription(GetCurrentThread(), L"shader compiler");
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
         for (;;)
         {
@@ -320,12 +393,13 @@ namespace
                 job = g_queue.front();
                 g_queue.pop_front();
             }
-            Build(job);
+            if (job.noDepth) BuildNoDepth(job);
+            else Build(job);
             g_pending.fetch_sub(1, std::memory_order_relaxed);
         }
     }
 
-    void Enqueue(Program* program, const std::vector<uint32_t>* words, bool front)
+    void Enqueue(Program* program, const std::vector<uint32_t>* words, bool front, bool noDepth = false)
     {
         std::lock_guard<std::mutex> lock(g_queueMutex);
         if (g_workers.empty())
@@ -337,7 +411,7 @@ namespace
         }
         // The stream's programs go first: a draw is waiting on them, and
         // the precompile's can take their turn after.
-        const Job job{ program, words };
+        const Job job{ program, words, noDepth };
         if (front) g_queue.push_front(job); else g_queue.push_back(job);
         g_pending.fetch_add(1, std::memory_order_relaxed);
         g_queueWake.notify_one();
@@ -438,6 +512,19 @@ RenderState::Handle RenderShaders::Current(bool pixel) { return g_current[pixel 
 const RenderShaders::Program* RenderShaders::Get(Handle handle)
 {
     return handle != 0 && handle <= g_programs.size() ? &g_programs[handle - 1] : nullptr;
+}
+
+ID3D11PixelShader* RenderShaders::NoDepthVariant(Handle handle)
+{
+    if (handle == 0 || handle > g_programs.size()) return nullptr;
+    Program& program = g_programs[handle - 1];
+    const uint8_t state = program.noDepthState.load(std::memory_order_acquire);
+    if (state == 2) return program.noDepth;
+    if (state != 0 || !program.pixel || program.writesDepth) return nullptr;
+    // Asked for once, behind the programs draws are waiting on.
+    program.noDepthState.store(1, std::memory_order_relaxed);
+    Enqueue(&program, &g_microcode[handle - 1].words, false, true);
+    return nullptr;
 }
 
 uint64_t RenderShaders::HashMicrocode(const uint8_t* words, uint32_t sizeDwords) { return HashBytes(words, size_t(sizeDwords) * 4); }

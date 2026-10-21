@@ -1,6 +1,7 @@
 // XMA decoding through FFmpeg, loaded at run time. See xma.h.
 
 #include "xma.h"
+#include "embedded_libraries.h"
 
 #include <cstdio>
 #include <cstring>
@@ -48,7 +49,14 @@ namespace
 
     HMODULE LoadFrom(const wchar_t* name)
     {
-        // Beside the executable first, then the usual install, then the path.
+        // The libraries the executable carries first (written out once, the
+        // ones avcodec needs beside it), then beside the executable, then
+        // the usual install, then the path.
+        if (const std::wstring& embedded = EmbeddedLibraries::Folder(); !embedded.empty())
+        {
+            const std::wstring path = embedded + L"\\" + name;
+            if (HMODULE module = LoadLibraryExW(path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH)) return module;
+        }
         wchar_t exe[MAX_PATH];
         if (GetModuleFileNameW(nullptr, exe, MAX_PATH) != 0)
         {

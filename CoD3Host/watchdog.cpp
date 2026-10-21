@@ -165,6 +165,7 @@ namespace
 
     void WatchdogThread()
     {
+        SetThreadDescription(GetCurrentThread(), L"watchdog");
         uint64_t lastFrames = 0;
         auto lastChange = std::chrono::steady_clock::now();
         bool reported = false;

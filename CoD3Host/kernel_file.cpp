@@ -287,15 +287,42 @@ void Kernel::UnmountContent(const std::string& rootName)
     g_mounts.erase(lowered);
 }
 
-void Kernel::InitializeFileSystem(const fs::path& exeDirectory)
+void Kernel::InitializeFileSystem(const fs::path& mainFolder, const fs::path& exeDirectory)
 {
-    g_savesRoot = exeDirectory / "saves";
+    std::error_code ec;
     // COD3_SAVES=path: the saves somewhere else, so a scripted test run
     // beside the installed game does not write over the player's saves.
     if (const char* saves = getenv("COD3_SAVES"); saves != nullptr && saves[0] != 0)
+    {
         g_savesRoot = fs::path(saves);
-    std::error_code ec;
+        fs::create_directories(g_savesRoot, ec);
+        return;
+    }
+    // The saves are kept in the main folder's save folder. Earlier builds
+    // kept them in a saves folder next to the executable: those are copied
+    // over once, when the save folder has nothing yet, and left where they
+    // were.
+    g_savesRoot = mainFolder / "save";
+    const fs::path old = exeDirectory / "saves";
+    const bool saveEmpty = !fs::exists(g_savesRoot, ec) || fs::directory_iterator(g_savesRoot, ec) == fs::directory_iterator();
+    if (saveEmpty && fs::is_directory(old, ec) && fs::directory_iterator(old, ec) != fs::directory_iterator())
+    {
+        fs::create_directories(g_savesRoot, ec);
+        fs::copy(old, g_savesRoot, fs::copy_options::recursive | fs::copy_options::skip_existing, ec);
+        if (ec) printf("Could not copy the saves from %s to %s: %s\n", old.string().c_str(), g_savesRoot.string().c_str(), ec.message().c_str());
+        else printf("Your saves were copied from %s to %s (the old folder is left as it was).\n", old.string().c_str(), g_savesRoot.string().c_str());
+        fflush(stdout);
+    }
     fs::create_directories(g_savesRoot, ec);
+    if (ec || !fs::is_directory(g_savesRoot, ec))
+    {
+        // A main folder that cannot be written (a read only drive): the saves
+        // stay next to the executable.
+        printf("The main folder's save folder cannot be made (%s); the saves are kept in %s.\n", ec.message().c_str(), old.string().c_str());
+        fflush(stdout);
+        g_savesRoot = old;
+        fs::create_directories(g_savesRoot, ec);
+    }
 }
 
 // NTSTATUS NtCreateFile(HANDLE* handle, ACCESS_MASK access,

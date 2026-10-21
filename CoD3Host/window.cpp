@@ -30,6 +30,8 @@ namespace
     constexpr int Height = 720;
 
     std::atomic<bool> g_running{ false };
+    std::atomic<bool> g_closedByPlayer{ false };
+    std::atomic<bool> g_everOpened{ false };        // the game's window was made: an exit needs no key to keep the console readable    // the window was closed (its close button, Alt+F4, Quit), not by the program
     std::atomic<HWND> g_window{ nullptr };
     std::thread g_thread;
 
@@ -109,6 +111,7 @@ namespace
         }
         if (message == WM_CLOSE || message == WM_DESTROY)
         {
+            if (message == WM_CLOSE) g_closedByPlayer.store(true);
             g_running.store(false);
             PostQuitMessage(0);
             return 0;
@@ -164,6 +167,7 @@ namespace
 
     void WindowThread()
     {
+        SetThreadDescription(GetCurrentThread(), L"window");
         WNDCLASSEXW windowClass{};
         windowClass.cbSize = sizeof(windowClass);
         windowClass.lpfnWndProc = WindowProc;
@@ -194,6 +198,7 @@ namespace
         }
 
         g_window.store(window);
+        g_everOpened.store(true);
 
         // The mouse's own movement, for the look. The window is the target
         // and no flag is set, so the reports come only while it is in front:
@@ -276,6 +281,10 @@ namespace
 
         g_window.store(nullptr);
         DestroyWindow(window);
+        // The game is the window: closed, the process ends, and the console
+        // it was given with it (main's thread runs the title and never
+        // returns to end it).
+        if (g_closedByPlayer.load()) Kernel::Quit();
     }
 }
 
@@ -293,6 +302,13 @@ void Window::Close()
 }
 
 bool Window::IsOpen() { return g_running.load(); }
+
+bool Window::EverOpened() { return g_everOpened.load(); }
+
+void Window::RequestClose()
+{
+    if (const HWND window = static_cast<HWND>(g_window.load()); window != nullptr) PostMessageW(window, WM_CLOSE, 0, 0);
+}
 
 void* Window::Handle() { return g_window.load(); }
 

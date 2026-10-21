@@ -182,6 +182,7 @@ namespace RenderState
         Handle vertexShader = 0, pixelShader = 0;
         ID3D11VertexShader* vs = nullptr;
         ID3D11PixelShader* ps = nullptr;
+        bool psNoDepth = false;         // ps is the program's variant without its depth output
         bool rectangles = false;       // through the rectangle list geometry program
         bool opaque = false;           // no blending: the flat debug view may replace the pixel program
 
@@ -282,6 +283,8 @@ namespace RenderState
         uint32_t readBackPitch = 0;     // texels, before the tiling's alignment
         uint32_t readBackEndian = 0;    // RB_COPY_DEST_INFO bits 0..2
         uint32_t guestWidth = 0, guestHeight = 0;
+        uint32_t destinationBase = 0;   // the guest address resolved to, for the logs
+        bool logged = false;            // made in a frame logged in full (COD3_SHADOWDUMP)
 
         bool bindingsLost = false;
     };

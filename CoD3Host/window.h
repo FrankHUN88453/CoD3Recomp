@@ -10,6 +10,10 @@ namespace Window
     void Open();
     void Close();
     bool IsOpen();
+    // Closes the window as its close button does, which ends the game.
+    void RequestClose();
+    // The window was made at some time in this run.
+    bool EverOpened();
 
     // Whether the title's own window is the one in front. Keyboard input is
     // only taken when it is, so typing elsewhere is not read as a button.

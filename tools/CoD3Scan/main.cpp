@@ -84,6 +84,17 @@ int main(int argc, char** argv)
         if (s.name == ".pdata") pdata = &s;
     }
 
+    // ---- The whole image to a file (--dump FILE), as it sits at its base -------
+    if (argc >= 4 && strcmp(argv[2], "--dump") == 0)
+    {
+        FILE* out = fopen(argv[3], "wb");
+        if (out == nullptr) { fmt::println("ERROR: cannot write {}", argv[3]); return 1; }
+        fwrite(image.data.get(), 1, image.size, out);
+        fclose(out);
+        fmt::println("\nimage written to {} (0x{:X} bytes from 0x{:X})", argv[3], image.size, image.base);
+        return 0;
+    }
+
     if (pdata == nullptr)
         fmt::println("\n!! WARNING: no .pdata section - Recompiler::Analyse would crash.");
     else

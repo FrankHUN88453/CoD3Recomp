@@ -97,6 +97,11 @@ namespace
         StartArguments* arguments = static_cast<StartArguments*>(parameter);
         const StartArguments start = *arguments;
         delete arguments;
+        // Named by where it starts and the hardware thread it asked for, for
+        // a debugger's or a profiler's list of threads.
+        wchar_t name[48];
+        swprintf(name, 48, L"guest %08X hw%d", start.startAddress, start.processor);
+        SetThreadDescription(GetCurrentThread(), name);
 
         // A fresh processor context. The alignment matters: PPCContext is
         // declared alignas(0x40) and the vector registers are loaded with

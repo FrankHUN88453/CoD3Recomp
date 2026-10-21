@@ -31,6 +31,9 @@ namespace Input
 
     // The Xbox button mask the pad is currently reporting.
     uint16_t Buttons();
+    // When a button last went down (GetTickCount64, 0 for never), however
+    // briefly it stayed (a scripted press lasts two of the title's reads).
+    uint64_t PressedAt(uint16_t button);
 
     // Whether the mouse is being held by the window and turned into the right
     // stick. Clicking in the window takes it; Escape gives it back.
@@ -42,6 +45,15 @@ namespace Input
     // takes the look this frame, so the mouse stays off the right stick.
     bool TakeLook(long& dx, long& dy);
     void LookTaken();
+
+    // Whether the prompts show the pad's buttons: as the settings say, or
+    // (automatic) when the pad was used last rather than the keyboard and
+    // mouse (pc_prompts.cpp).
+    bool PadPrompts();
+
+    // Seconds since the pad script (COD3_PAD) started counting, for the
+    // other test scripts to keep the same time.
+    double ScriptSeconds();
 
     // Changes only when the buttons do. Titles use it to tell a held button
     // from a new press without comparing states themselves.

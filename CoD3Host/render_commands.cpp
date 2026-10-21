@@ -14,6 +14,7 @@
 #include "render_shaders.h"
 #include "render_resources.h"
 #include "render_stats.h"
+#include "widescreen.h"
 #include "gpu.h"
 #include "kernel.h"
 
@@ -38,18 +39,18 @@ namespace
 {
     // --- what a draw was not made for ---------------------------------------------------------------
 
-    enum SkipReason { SkipBackendOff, SkipPrimitive, SkipProgram, SkipProgramBuilding, SkipProgramOnRequest, SkipPitch, SkipTarget, SkipScissor, SkipBuffer, SkipAimBlur, SkipCount };
-    const char* const SkipNames[SkipCount] = { "render backend off", "primitive type", "program", "program building", "program skipped on request", "no surface pitch", "no target", "empty scissor", "vertex buffer", "aim blur off" };
+    enum SkipReason { SkipBackendOff, SkipPrimitive, SkipProgram, SkipProgramBuilding, SkipProgramOnRequest, SkipPitch, SkipTarget, SkipScissor, SkipBuffer, SkipDepthOfField, SkipCount };
+    const char* const SkipNames[SkipCount] = { "render backend off", "primitive type", "program", "program building", "program skipped on request", "no surface pitch", "no target", "empty scissor", "vertex buffer", "depth of field" };
 
-    // The title's depth of field while aiming: the frame downsampled to a
-    // quarter (10e0411b), blurred (0925661f), and blended back over the
-    // frame by depth (56ccd878), the weapon nearer than the plane staying
-    // sharp. When the settings say, the last of the three is left out and
-    // the frame stays as it was before it: the scene and the weapon,
-    // sharp. The two before it still run, so the surface they make is
-    // there for anything else that reads it.
-    bool g_aimBlur = true;
-    bool IsAimBlurProgram(uint64_t hash)
+    // The title's depth of field while aiming, its only blur of the
+    // frame: the frame downsampled to a quarter (10e0411b), blurred
+    // (0925661f), and blended back over the frame by depth (56ccd878), the
+    // weapon nearer than the plane staying sharp. The PC game has none:
+    // the last of the three is never drawn, and the frame stays as it was
+    // before it, the scene and the weapon sharp. The two before it still
+    // run, so the surface they make is there for anything else that reads
+    // it (leaving them out too once showed a stray rectangle).
+    bool IsDepthOfFieldProgram(uint64_t hash)
     {
         return hash == 0x56ccd878c09e55bbull;
     }
@@ -196,7 +197,7 @@ namespace
             return false;
         }
         if (vs->skipped) { Skip(SkipProgramOnRequest); return false; }
-        if (!g_aimBlur && IsAimBlurProgram(ps->hash)) { Skip(SkipAimBlur); return false; }
+        if (IsDepthOfFieldProgram(ps->hash)) { Skip(SkipDepthOfField); return false; }
         out.vs = static_cast<ID3D11VertexShader*>(vs->shader);
         out.ps = static_cast<ID3D11PixelShader*>(ps->shader);
         return true;
@@ -222,6 +223,29 @@ namespace
         return state.modeControl == 5 && !runProgram;
     }
     constexpr RenderState::Handle NoPixelProgram = 0xFFFFFFFFu;
+
+    // Whether a draw's depth test cannot see the depth its pixel program
+    // puts out: the console's precision (xenos_hlsl.cpp) is cut into it for
+    // the tests and the writes, and a program that puts out a depth costs
+    // the host its depth compression, and every later pass that reads the
+    // depth pays for it (with every program cutting, a sixth of the GPU's
+    // frame at 200% with MSAA 4x; this gave back 10% of the frame rate,
+    // 23% without the MSAA). Unseen with
+    // no depth test (RB_DEPTHCONTROL bit 1) or one that always passes; and
+    // with a greater or equal test that writes nothing, which the cut, one
+    // that lowers a depth by less than the 24 bit format's step, can only
+    // change for a layer lying in a surface, letting it through. Such a
+    // draw runs the program's variant without the output.
+    // COD3_DEPTHVARIANT=0 never, 1 the first two only, 2 all three (the default).
+    bool DepthUnseen(uint32_t depthControl)
+    {
+        static const int level = []() { const char* t = getenv("COD3_DEPTHVARIANT"); return t ? int(strtol(t, nullptr, 10)) : 2; }();
+        if (level <= 0) return false;
+        if ((depthControl & 2) == 0) return true;
+        if ((depthControl & 4) != 0) return false;
+        const uint32_t function = (depthControl >> 4) & 7;
+        return function == 7 || (function == 6 && level >= 2);
+    }
 
     bool Targets(const RenderState::Snapshot& state, const RenderShaders::Program* vs, const RenderShaders::Program* ps, DrawCommand& out, float& scaleY)
     {
@@ -347,6 +371,8 @@ namespace
                 binding.samplerSlot = uint8_t(fetch.sampler);
                 if (resolved) binding.view = RenderResources::ResolvedAt(words[1] & 0xFFFFF000u)->resource;
                 else binding.view = RenderResources::TextureView(texture, fetch.dimension);
+                // The button icons drawn as keys (render_prompts.cpp).
+                if (ID3D11ShaderResourceView* keys = RenderInternal::PromptTexture(words[1] & 0xFFFFF000u)) binding.view = keys;
                 CheckView(binding.view, words, resolved, texture, fetch.slot, stage);
                 binding.sampler = RenderPipeline::SamplerObject(RenderPipeline::Sampler(words));
                 constants.textureSize[fetch.slot][0] = float(width);
@@ -563,6 +589,11 @@ namespace
                         for (size_t i = 0; i < map.size(); i++)
                             printf(" c%u=(%.4g %.4g %.4g %.4g)", unsigned(map[i]),
                                 values[i * 4], values[i * 4 + 1], values[i * 4 + 2], values[i * 4 + 3]);
+                        // A program reading the file by a0 has it all:
+                        // its first constants and its last.
+                        if (map.empty())
+                            for (uint32_t i = 0; i < 256; i = i == 47 ? 248 : i + 1)
+                                printf(" c%u=(%.4g %.4g %.4g %.4g)", i, values[i * 4], values[i * 4 + 1], values[i * 4 + 2], values[i * 4 + 3]);
                         printf("\n");
                         fflush(stdout);
                     }
@@ -594,6 +625,40 @@ namespace
         out.drawAt = g_uploaded.drawAt;
         out.drawBytes = DrawBytes;
         return true;
+    }
+
+    // A picture wider than 16:9 in a level (widescreen.cpp): the 2D, drawn
+    // by its two programs with the vertices in clip space (the HUD's and the
+    // menus' pictures and words, and their flat quads), narrowed about the
+    // middle by the stretch so it keeps its shape, except a quad across the
+    // whole width (a fade, a flash, a shade), which spreads with the
+    // picture. The scale the vertex program takes (viewportScale.w), 0 for
+    // none.
+    float TwoDNarrowing(const RenderShaders::Program* vs)
+    {
+        if (vs == nullptr || (vs->hash != 0xe5a81a7a7ac567d1ull && vs->hash != 0x96d61d11e6027be0ull)) return 0.0f;
+        const float k = Widescreen::Stretch();
+        if (k <= 1.0f) return 0.0f;
+        for (const XenosHlsl::VertexFetch& fetch : vs->vertexFetches)
+        {
+            uint32_t word0, word1;
+            RenderState::ReadVertexFetch(fetch.slot, word0, word1);
+            const uint32_t dwords = (word1 >> 2) & 0xFFFFFFu;
+            if (fetch.stride == 0 || dwords == 0 || dwords > 64u * fetch.stride) break;
+            const uint32_t at = Guest::PhysicalAlias(word0 & ~3u);
+            float lowest = 1.0e9f, highest = -1.0e9f;
+            for (uint32_t v = 0; v + fetch.stride <= dwords; v += fetch.stride)
+            {
+                const uint32_t raw = Guest::Read32(Guest::Base, at + v * 4);
+                float x;
+                memcpy(&x, &raw, 4);
+                lowest = std::min(lowest, x);
+                highest = std::max(highest, x);
+            }
+            if (lowest <= -0.98f && highest >= 0.98f) return 0.0f;
+            break;
+        }
+        return 1.0f / k;
     }
 
     // COD3_INDEXCHECK=1: an indexed draw whose indices reach outside the
@@ -971,6 +1036,10 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
     const RenderShaders::Program* ps;
     if (!Programs(out, vs, ps)) return false;
     if (DepthOnlyMode(state)) { out.ps = nullptr; out.pixelShader = NoPixelProgram; }
+    else if (DepthUnseen(state.depthControl) && XenosHlsl::Depth24() && !ps->writesDepth)
+    {
+        if (ID3D11PixelShader* variant = RenderShaders::NoDepthVariant(out.pixelShader)) { out.ps = variant; out.psNoDepth = true; }
+    }
     if (state.pitch == 0) { Skip(SkipPitch); return false; }
 
     RenderStats::Enter(RenderStats::SectionTargets);
@@ -1038,6 +1107,7 @@ bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCom
     constants.viewportScale[1] = state.viewport[2]; constants.viewportOffset[1] = state.viewport[3];
     constants.viewportScale[2] = state.viewport[4]; constants.viewportOffset[2] = state.viewport[5];
     constants.viewportOffset[3] = depthOffset;
+    constants.viewportScale[3] = TwoDNarrowing(vs);
     constants.targetSize[0] = float(state.pitch);
     constants.targetSize[1] = float(out.targetHeight) / scaleY;
     constants.targetSize[2] = 1.0f / float(state.pitch);
@@ -1176,12 +1246,29 @@ bool RenderCommands::PrepareResolve(ResolveCommand& out)
             out.sourceSamples = color->samples;
             format = color->format;
         }
-        RenderResources::Resolved* surface = RenderResources::ResolvedFor(state.destBase, hostWidth, hostHeight, format, fromDepth);
+        // COD3_SHADOWREMAP=from:to (hex): a resolve to one address made to
+        // another instead, and one to that other left out; for a test.
+        uint32_t destination = state.destBase;
+        static const char* const remap = getenv("COD3_SHADOWREMAP");
+        if (remap != nullptr)
+        {
+            uint32_t from = 0, to = 0;
+            if (sscanf(remap, "%x:%x", &from, &to) == 2)
+            {
+                if ((destination & 0x1FFFFFFFu) == (to & 0x1FFFFFFFu)) return false;
+                if ((destination & 0x1FFFFFFFu) == (from & 0x1FFFFFFFu)) destination = to;
+            }
+        }
+        RenderResources::Resolved* surface = RenderResources::ResolvedFor(destination, hostWidth, hostHeight, format, fromDepth);
         if (surface == nullptr) return false;
         surface->guestWidth = width;
         surface->guestHeight = height;
         out.copy = true;
         out.fromDepth = fromDepth;
+        out.guestWidth = width;
+        out.guestHeight = height;
+        out.destinationBase = state.destBase;
+        out.logged = RenderInternal::FrameLogged();
         out.destination = surface->view;
         out.destinationResource = surface->resource;
         out.x0 = hostX0;
@@ -1230,7 +1317,6 @@ bool RenderCommands::PrepareResolve(ResolveCommand& out)
     return out.copy || out.colorClear || out.depthClear;
 }
 
-void RenderCommands::SetAimBlur(bool drawn) { g_aimBlur = drawn; }
 
 void RenderCommands::ReportSkips()
 {

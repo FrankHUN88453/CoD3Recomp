@@ -14,7 +14,7 @@ functions, every instruction translated. All 179 Xbox 360 kernel imports are
 implemented, memory mapped I/O reaches the GPU register file, and a command
 processor decodes the packets the graphics driver queues.
 
-`CoD3.exe` installs the game from your own disc image and boots it into a window.
+`CoD3SP_s.exe` installs the game from your own disc image and boots it into a window.
 The first level, Saint-Lô, is playable: the menus, the loading screen, the
 opening cutscene and the fighting run at the title's own 60 frames a second
 on the host's GPU through a Direct3D 11 renderer built for a PC (see
@@ -38,6 +38,27 @@ The keyboard and mouse stand in for the console's pad. In a level the window
 takes the mouse and looks with it; Escape gives it back and pauses; a click
 takes it again. Every key can be changed in the settings menu.
 
+The game's own menus are pointed at: the entry under the pointer is
+highlighted and a click takes it, the right button or Escape goes back. The
+arrows either side of an option's value are clicked as the cross's left
+and right are pressed (and again while held), a click on the value is the
+next one, a slider's halves step it down and up, the questions' Yes and No
+are clicked, and so are the chapter select's arrows and pictures (a picture
+beside the chosen one goes to it, the chosen one starts it). A menu that
+opens in a level (the pause menu, a mission's end) lets the pointer go
+while it is up, and the window takes it again when it closes.
+
+The main menu's XBOX LIVE MARKETPLACE is QUIT, which closes the game; so
+does closing the window, and the console window it was started with closes
+with it.
+
+The prompts follow what is played with: after a key or the mouse the
+game's button icons are drawn as the keys the settings give each button
+(Enter and Escape in the menus), and the hints that name the sticks or the
+buttons in words name the mouse and the keys; after the controller they are
+the console's again. The settings menu can also hold them to one or the
+other (Controls, Button prompts).
+
 The look reads the mouse's own movement, the counts its device reports,
 rather than following the pointer across the screen: Windows' pointer
 speed and its "enhance pointer precision" do not reach it, so the same
@@ -54,24 +75,34 @@ turns that off for anyone who wants the pointer's travel back.
 | F | change weapon |
 | V | melee |
 | G / 4 | grenade / smoke |
-| Shift | sprint |
-| Tab | objectives |
+| Shift | sprint (the multiplayer's, whose commands the single player had left empty, put back; the stance figure shows the breath left, as the multiplayer's does) |
+| B | binoculars |
+| Tab | objectives (held) |
 | Escape | pause |
 | Enter, arrows | the menus |
 | F11 | settings menu |
 | F12 | screenshot into `screenshots/`, the next two frames' draws into `CoD3.log`, and a small picture after each draw of the next frame (`screenshots/*-draws.bin`): press it when something looks wrong |
 | ` (the key left of 1) | the console, when the settings' Gameplay page turns it on |
 
-The settings menu (F11, and it opens by itself when OPTIONS is chosen in
-the title's main menu, over the title's own options page) has the window
+The game's own OPTIONS has a VIDEO page beside GAMEPLAY, CONTROLS, SOUND
+and SCREEN, in its own look: the resolution, the window mode, the aspect
+ratio, the resolution scale, the field of view, the anti aliasing, the
+texture filtering, anisotropy and quality, the shadow quality, the model
+detail, vertical sync and the frame rate, each
+changed with the arrows (the list scrolls with the wheel). The aspect ratio
+makes a level wider than the console's 16:9 (21:9, 32:9, or as the window
+is): more is seen to either side, and the HUD keeps its shape in the
+middle. The shadow quality sets the shadow maps' size apart from the
+frame's (the console's are 512 square).
+
+The settings menu (F11) has the window
 mode (windowed or borderless full screen; Alt+Enter switches too), the
 resolution (the desktop's by default; the window is made that size, full
 screen scales it, and the frame is drawn at it) and the resolution scale
 in per cent of it, the texture filtering
 and anisotropy, anti aliasing (MSAA 2x to 8x, FXAA, or both), the
-texture quality, the field of view (65 to 100), the model detail (the
-game's own level of detail, or the finest model at every distance), the
-blur while aiming,
+texture quality, the shadow quality, the aspect ratio, the field of view (65 to 100), the model detail (the
+game's own level of detail, or the finest model at every distance),
 vertical sync, the frame rate in a level (unlimited by default: a level
 is played at what the machine can do, around a hundred frames a second
 where the console had sixty, while the menus keep 60 and the films
@@ -88,7 +119,7 @@ executable as well as to its console, and the run before is kept as
 thread stood (`COD3_LOG=0` turns it off, `COD3_LOG=path` puts it
 elsewhere). The same settings can be forced
 from the environment for a run: `COD3_SCALE`, `COD3_TEXTURE_FILTER`,
-`COD3_RESSCALE`, `COD3_ANISO`, `COD3_AA`, `COD3_TEXQUALITY`, `COD3_MODELDETAIL`, `COD3_AIMBLUR`, `COD3_VSYNC`, `COD3_UNLOCKFPS`, `COD3_FULLSCREEN`;
+`COD3_RESSCALE`, `COD3_ANISO`, `COD3_AA`, `COD3_TEXQUALITY`, `COD3_MODELDETAIL`, `COD3_VSYNC`, `COD3_UNLOCKFPS`, `COD3_FULLSCREEN`;
 `COD3_EXEC="command;command"` runs the title's console commands at start;
 `COD3_RENDER_STATS=1` prints the renderer's counters once a second and
 `COD3_RENDER_PROFILE=1` where a draw's microseconds go.
@@ -137,29 +168,47 @@ code is recompiled, runs them, and reports any register that comes out wrong.
 
 ## Running
 
-`CoD3.exe` looks for a `game` folder next to itself. If it is not there, first
-time setup runs and offers three ways to supply the game:
+`CoD3SP_s.exe` is the whole program: FFmpeg's libraries, for the sound and
+the films, are built into it and unpacked into
+`%LOCALAPPDATA%\CoD3Recomp\libraries` when it starts. On its first start it
+asks in its console window whether this is a fresh install or the game is
+already installed:
 
-1. Extract from an Xbox 360 disc image. XGD1, XGD2, XGD3 and stripped images are
-   all recognised.
-2. Copy from a folder you already extracted.
-3. Use a folder you already extracted, where it is, copying nothing. The path is
-   remembered in `game.path`.
+1. Fresh install: choose your Xbox 360 disc image (XGD1, XGD2, XGD3 and
+   stripped images are all recognised), then the main folder to extract it
+   into.
+2. Already installed: choose the game's main folder, the one that holds
+   `default.xex`.
+
+The main folder is the game folder: the game's files, and the saves in its
+`save` folder. Its path is remembered in `game.path` beside the executable.
+An executable put in the main folder itself, or beside the `game` folder
+earlier builds made, finds it without asking; the first time, the saves of
+an earlier build (its `saves` folder beside the executable) are copied into
+an empty `save` folder, and the old folder is left as it was.
 
 Setup checks that the disc holds a `default.xex` of the same size as the one
 this build was recompiled from, before writing several gigabytes.
 
-Started from Explorer, the window waits for a key before closing, so the output
-can be read. Started from a shell it exits straight away and leaves the prompt
-alone.
+At every start the executable asks GitHub whether a newer release is out.
+If one is, it downloads that release's `CoD3SP_s.exe`, puts it in its own
+place (the one it replaces is kept as `CoD3SP_s.exe.old` until the next
+start) and starts it. `--no-update`, `auto_update = 0` under `[game]` in
+`CoD3Recomp.ini` or `COD3_NOUPDATE=1` leave it as it is.
+
+Started from Explorer, a run that ends before the game's window opens (the
+setup, an error) waits for a key before closing, so the output can be read;
+once the game is up, closing its window (or QUIT) ends it at once, the
+console window with it, and `CoD3.log` keeps what was printed. Started from
+a shell it exits straight away and leaves the prompt alone.
 
 The picker dialogs can be skipped:
 
 ```
-CoD3.exe --iso "D:\path\Call of Duty 3.iso"
-CoD3.exe --game "D:\path\Call of Duty 3 (USA, Europe)"
-CoD3.exe --list-iso "D:\path\Call of Duty 3.iso"
-CoD3.exe --help
+CoD3SP_s.exe --iso "D:\path\Call of Duty 3.iso" --main "D:\Games\CoD3"
+CoD3SP_s.exe --game "D:\Games\CoD3"
+CoD3SP_s.exe --list-iso "D:\path\Call of Duty 3.iso"
+CoD3SP_s.exe --help
 ```
 
 A level can be started straight from the main menu, the way the chapter

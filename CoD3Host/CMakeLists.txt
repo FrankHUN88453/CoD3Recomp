@@ -60,6 +60,12 @@ add_executable(CoD3 WIN32
     "input.cpp"
     "mouse_look.cpp"
     "cpu_depth.cpp"
+    "menu_mouse.cpp"
+    "pc_prompts.cpp"
+    "render_prompts.cpp"
+    "sprint.cpp"
+    "video_menu.cpp"
+    "widescreen.cpp"
     "settings.cpp"
     "overlay.cpp"
     "../thirdparty/imgui/imgui.cpp"
@@ -78,11 +84,30 @@ add_executable(CoD3 WIN32
     "watchdog.cpp"
     "modules.cpp"
     "coroutines.cpp"
+    "embedded_libraries.cpp"
+    "updater.cpp"
     "resources/CoD3.rc")
 
 # A console application: setup is interactive and the import trap has to be
-# readable. WIN32 above is overridden here deliberately.
-set_target_properties(CoD3 PROPERTIES WIN32_EXECUTABLE OFF)
+# readable. WIN32 above is overridden here deliberately. The file it makes is
+# CoD3SP_s.exe (the target keeps its name for the build commands).
+set_target_properties(CoD3 PROPERTIES WIN32_EXECUTABLE OFF OUTPUT_NAME "CoD3SP_s")
+
+# The version, which the updater holds against the newest release on GitHub
+# (updater.cpp) and the executable's version information shows: one header
+# for both, written here. Raised with each release (its tag is v<version>).
+set(COD3_VERSION_MAJOR 0)
+set(COD3_VERSION_MINOR 5)
+set(COD3_VERSION_PATCH 0)
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/cod3_version.h"
+"#pragma once
+// Written by CMake (CoD3Host/CMakeLists.txt).
+#define COD3_VERSION_MAJOR ${COD3_VERSION_MAJOR}
+#define COD3_VERSION_MINOR ${COD3_VERSION_MINOR}
+#define COD3_VERSION_PATCH ${COD3_VERSION_PATCH}
+#define COD3_VERSION_TEXT \"${COD3_VERSION_MAJOR}.${COD3_VERSION_MINOR}.${COD3_VERSION_PATCH}\"
+")
+set(CMAKE_RC_FLAGS "${CMAKE_RC_FLAGS} /I\"${CMAKE_CURRENT_BINARY_DIR}\"")
 
 target_link_libraries(CoD3 PRIVATE
     CoD3RecompLib   # the recompiled game code
@@ -95,7 +120,8 @@ target_link_libraries(CoD3 PRIVATE
     dxgi
     d3dcompiler     # the menu's own shaders (Dear ImGui)
     windowscodecs   # screenshots as PNG
-    shell32)
+    shell32
+    winhttp)        # the updater
 
 # Decompiled functions, from a CoD3Decomp checkout beside this repository (or
 # wherever COD3_DECOMP_DIR says): each takes the place of the recompiled
@@ -119,6 +145,39 @@ if (COD3_FFMPEG_INCLUDE)
     message(STATUS "CoD3: XMA decoding through FFmpeg, headers at ${COD3_FFMPEG_INCLUDE}")
     target_include_directories(CoD3 PRIVATE "${COD3_FFMPEG_INCLUDE}")
     target_compile_definitions(CoD3 PRIVATE COD3_HAVE_FFMPEG_HEADERS=1)
+
+    # Its libraries go inside the executable (embedded_libraries.cpp): packed
+    # by embed_pack at build time into resources from 3001 on, written out
+    # once at run time. Without them beside the headers the executable looks
+    # for them beside itself, as before.
+    get_filename_component(COD3_FFMPEG_BIN "${COD3_FFMPEG_INCLUDE}/../bin" ABSOLUTE)
+    file(GLOB COD3_FFMPEG_AVCODEC "${COD3_FFMPEG_BIN}/avcodec-*.dll")
+    file(GLOB COD3_FFMPEG_AVUTIL "${COD3_FFMPEG_BIN}/avutil-*.dll")
+    file(GLOB COD3_FFMPEG_SWRESAMPLE "${COD3_FFMPEG_BIN}/swresample-*.dll")
+    if (COD3_FFMPEG_AVCODEC AND COD3_FFMPEG_AVUTIL AND COD3_FFMPEG_SWRESAMPLE)
+        add_executable(embed_pack "tools/embed_pack.cpp")
+        set(embeddedRc "// Written by CMake: the libraries carried inside the executable.\n")
+        set(embeddedBins "")
+        set(resourceId 3001)
+        foreach(library ${COD3_FFMPEG_AVUTIL} ${COD3_FFMPEG_SWRESAMPLE} ${COD3_FFMPEG_AVCODEC})
+            get_filename_component(libraryName "${library}" NAME)
+            set(packed "${CMAKE_CURRENT_BINARY_DIR}/embedded/${libraryName}.bin")
+            add_custom_command(OUTPUT "${packed}"
+                COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/embedded"
+                COMMAND embed_pack "${library}" "${packed}" "${libraryName}"
+                DEPENDS embed_pack "${library}"
+                COMMENT "Packing ${libraryName} into the executable")
+            list(APPEND embeddedBins "${packed}")
+            string(APPEND embeddedRc "${resourceId} RCDATA \"${packed}\"\n")
+            math(EXPR resourceId "${resourceId} + 1")
+            message(STATUS "CoD3: ${libraryName} goes inside the executable")
+        endforeach()
+        file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/embedded_libraries.rc" "${embeddedRc}")
+        target_sources(CoD3 PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/embedded_libraries.rc")
+        set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/embedded_libraries.rc" PROPERTIES OBJECT_DEPENDS "${embeddedBins}")
+    else()
+        message(STATUS "CoD3: no FFmpeg libraries beside its headers; the executable looks for them beside itself")
+    endif()
 else()
     message(STATUS "CoD3: no FFmpeg headers, XMA sound will be silent")
 endif()

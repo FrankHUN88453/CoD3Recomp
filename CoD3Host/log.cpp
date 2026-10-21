@@ -32,6 +32,7 @@ namespace
 
     void Copier(HANDLE readEnd, HANDLE file, HANDLE console)
     {
+        SetThreadDescription(GetCurrentThread(), L"log");
         char buffer[8192];
         DWORD got = 0;
         uint64_t inFile = 0;

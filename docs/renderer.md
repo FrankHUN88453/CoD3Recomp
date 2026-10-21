@@ -255,17 +255,16 @@ texture filtering and anisotropy, anti aliasing,
 texture quality (Low and Medium leave the top two or one mip levels of
 every texture out on upload), the field of view (the title's own
 `cg_fov`, 65 to 100, in the config at start and on the command buffer
-when it changes), the blur while aiming (the title's depth of field down
-the sights: three draws downsample the frame to a quarter, blur it and
-blend it back over the frame by depth; the last of them is left out when
-the setting is off, and the frame stays sharp with the weapon on it),
-vertical sync, the fps and stats panels. What the
+when it changes), vertical sync, the fps and stats panels. What the
 title has no knob for is not offered: its shadow map is one resolution
 (it already scales with the frame), its post processing is one chain,
-and there is no `r_shadow` or `r_glow` in its console. From
+and there is no `r_shadow` or `r_glow` in its console. The title's depth
+of field down the sights is not drawn at all (three draws downsample the
+frame to a quarter, blur it and blend it back by depth; the last of them
+is always left out, and the frame stays sharp with the weapon on it). From
 the environment, over the menu: `COD3_SCALE`, `COD3_TEXTURE_FILTER=native|
 bilinear|trilinear|anisotropic`, `COD3_ANISO=1..16`, `COD3_VSYNC=0|1`,
-`COD3_AA=0|fxaa|msaa2|msaa4|msaa8|msaa4fxaa`, `COD3_TEXQUALITY=0|1|2`, `COD3_AIMBLUR=0|1`,
+`COD3_AA=0|fxaa|msaa2|msaa4|msaa8|msaa4fxaa`, `COD3_TEXQUALITY=0|1|2`,
 `COD3_FULLSCREEN=0|1`, `COD3_NOMIPS=1`, `COD3_NOPIXELGEN=1`,
 `COD3_VBLANK=N` (vertical blanks a second), `COD3_UNLOCKFPS=0|1`, `COD3_NOMIDFRAME=1` (vertex buffers looked at once a frame), `COD3_DEPTHMODEPS=1` (run the pixel program in the depth only mode), `COD3_MISSAUDIT=1` (name changes the sampled fingerprints miss), `COD3_DRAWLOG_PSDUMP=hash`, `COD3_DRAWLOG=path` (one line a draw, every frame: pass, programs, buffer and constant looks, depth and blend), `COD3_SKIPLOG=1` (frames whose skipped draws differ), `COD3_FRAMEDUMP_SHRINK=N`, `COD3_NOPOLYOFFSET=1`, `COD3_NOPREDICATE=1` (every predicated packet run), `COD3_OLDGRADIENTS=1`
 
