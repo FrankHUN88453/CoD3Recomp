@@ -7,6 +7,7 @@
 #include "heap_trace.h"
 #include "kernel.h"
 
+#include <cstdio>
 #include <cstdlib>
 
 // --- a destructor that runs twice ------------------------------------------------------------------
@@ -69,11 +70,38 @@ PPC_FUNC(sub_823F04B0)
 // the threshold goes to nought when the loop starts: the load is finished
 // by then, and a press skips the rest. COD3_NOFILMSKIP=1 keeps the
 // console's way.
+// In co-op (COD3_COOP) the film is shared (coop.cpp, 0.5.231): the host's
+// A skips it only once the joining copy has loaded too, and the joining
+// copy's film ends when the host's does (its own A does nothing).
+// COD3_SKIPFILMS=1, outside co-op: the film stops by itself once loaded.
+bool CoopFilmActive();
+bool CoopFilmStop(bool pressed);
+void CoopFilmEnded();
+namespace { thread_local bool t_inFilm = false; }
 extern "C" PPC_FUNC(__imp__sub_824EEBA0);
 PPC_FUNC(sub_824EEBA0)
 {
     static const bool consoleWay = getenv("COD3_NOFILMSKIP") != nullptr;
     if (!consoleWay) Guest::Write32(base, 0x82A2A258u, 0);   // 0.0f
+    t_inFilm = true;
     __imp__sub_824EEBA0(ctx, base);
+    t_inFilm = false;
+    if (CoopFilmActive()) CoopFilmEnded();
+}
+extern "C" PPC_FUNC(__imp__sub_824D0470);
+PPC_FUNC(sub_824D0470)
+{
+    if (!t_inFilm) { __imp__sub_824D0470(ctx, base); return; }
+    static const bool coop = CoopFilmActive();
+    static const bool autoSkip = [] { const char* t = getenv("COD3_SKIPFILMS"); return t != nullptr && t[0] != '0'; }();
+    if (coop)
+    {
+        __imp__sub_824D0470(ctx, base);
+        const bool pressed = (ctx.r3.u32 & 0xFF) == 1;
+        ctx.r3.u64 = CoopFilmStop(pressed) ? 1 : 0;
+        return;
+    }
+    if (autoSkip) { ctx.r3.u64 = 1; return; }
+    __imp__sub_824D0470(ctx, base);
 }
 #endif

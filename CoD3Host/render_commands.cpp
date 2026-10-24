@@ -68,11 +68,42 @@ namespace
     {
         return hash == 0x56ccd878c09e55bbull;
     }
+    // 0.5.234: the death flash. Justin's first death on Marseille (0.5.233,
+    // frame 7 logged, screenshots 155906): after the depth of field's
+    // downsample (10e0411b) and blur (0925661f) the title draws 56ccd878,
+    // which lays the blurred quarter size frame back over the whole view,
+    // then cc16ad46 reads that frame twice at an offset: the "double
+    // vision". With the blur while aiming off, 56ccd878 was left out
+    // ("aim blur off x71" in the skips), so the two copies were the sharp
+    // frame: two of every star icon and two bodies, the "split screen"
+    // glimpse. While the player is down nothing is in his hands, so the
+    // ghost outline the setting is there for cannot happen: drawn then.
+    std::atomic<bool> g_playerDown{ false };
+    // 0.5.248: the binoculars at the eyes (the host's player). Justin: the
+    // sides of the binocular view are black at times, not at others, with
+    // the HD textures off too. While they are up the depth of field pass is
+    // drawn (it may be what lays the black round the lenses) and the draws
+    // left out are counted by reason, said when they come down.
+    std::atomic<bool> g_binocularsUp{ false };
+    uint64_t g_upSkips[SkipCount] = {};
+    uint64_t g_upFrames = 0;
+    // 0.5.249: a list of the next draws, one line each, for the binocular
+    // sides (Justin: at the x2 zoom he sees through them): DumpDraws.
+    std::atomic<int> g_dumpLeft{ 0 };
+    int g_dumpIndex = 0;
+    RenderState::Snapshot g_dumpState;
+    uint64_t g_dumpVs = 0, g_dumpPs = 0;
+    // 0.5.252: a negative count lists only the flat (depth test off) draws
+    // of the next 8000: the HUD and overlays, the binoculars' mask among
+    // them (0.5.249's lists were the first 700 draws: all world).
+    bool g_dumpHud = false;
+    int g_dumpScan = 0;
     uint64_t g_skips[SkipCount] = {};
 
     void Skip(SkipReason reason)
     {
         g_skips[reason]++;
+        if (g_binocularsUp.load(std::memory_order_relaxed)) g_upSkips[reason]++;
         RenderStats::Frame().skipped++;
     }
 
@@ -128,6 +159,13 @@ namespace
     // From a draw's record: the file as it was when it last went up, by
     // stage, and whether a program's constants differ from it now.
     uint32_t g_sentFile[2][1024];
+    // 0.5.386: whether g_sentFile holds what went up for the stage. Only
+    // the draws' records (the native command lists) read it, so with them
+    // off the copy was a second memcpy of every upload for nothing; it is
+    // kept only while records are in use, and a stage whose copy was not
+    // kept goes up whole at the first recorded draw. COD3_ALWAYSSENTFILE=1:
+    // kept always, as before.
+    bool g_sentValid[2] = { false, false };
     // COD3_CONSTCHECK: what each stage's last upload packed.
     std::vector<uint32_t> g_packedShadow[2];
     bool RecordChanged(uint32_t stage, const std::vector<uint16_t>& map, const uint32_t* file)
@@ -192,6 +230,7 @@ namespace
         out.pixelShader = RenderShaders::Current(true);
         vs = RenderShaders::Get(out.vertexShader);
         ps = RenderShaders::Get(out.pixelShader);
+        if (g_dumpLeft.load(std::memory_order_relaxed) > 0) { g_dumpVs = vs ? vs->hash : 0; g_dumpPs = ps ? ps->hash : 0; }
         if (vs == nullptr || ps == nullptr) { Skip(SkipProgram); return false; }
         const RenderShaders::State vsState = vs->state.load(std::memory_order_acquire);
         const RenderShaders::State psState = ps->state.load(std::memory_order_acquire);
@@ -211,7 +250,7 @@ namespace
             return false;
         }
         if (vs->skipped) { Skip(SkipProgramOnRequest); return false; }
-        if (!g_aimBlur && IsAimBlurProgram(ps->hash)) { Skip(SkipAimBlur); return false; }
+        if (!g_aimBlur && IsAimBlurProgram(ps->hash) && !g_playerDown.load(std::memory_order_relaxed) && !g_binocularsUp.load(std::memory_order_relaxed)) { Skip(SkipAimBlur); return false; }
         out.vs = static_cast<ID3D11VertexShader*>(vs->shader);
         out.ps = static_cast<ID3D11PixelShader*>(ps->shader);
         return true;
@@ -440,7 +479,7 @@ namespace
     // The draw's buffers that want the part it reads looked at again
     // (RenderResources::NeedsRangeLook), for LookRanges once its indices
     // are known.
-    struct RangeLook { Handle buffer; uint32_t physical; uint32_t stride; };
+    struct RangeLook { Handle buffer; uint32_t physical; uint32_t stride; bool wholeIfUnknown = false; };
     std::vector<RangeLook> g_rangeLooks;
     std::vector<RangeLook> g_verifyBuffers;   // verify mode: every buffer the draw reads
 
@@ -469,7 +508,7 @@ namespace
             DrawCommand::Buffer& binding = out.buffers[out.bufferCount++];
             binding.slot = uint8_t(fetch.slot);
             binding.view = view;
-            if (RenderResources::NeedsRangeLook(buffer)) g_rangeLooks.push_back(RangeLook{ buffer, word0 & ~3u, fetch.stride });
+            if (RenderResources::NeedsRangeLook(buffer)) g_rangeLooks.push_back(RangeLook{ buffer, word0 & ~3u, fetch.stride, RenderResources::MidFrameRangeLook(buffer) });
             if (verify) g_verifyBuffers.push_back(RangeLook{ buffer, word0 & ~3u, fetch.stride });
         }
         return true;
@@ -527,11 +566,22 @@ namespace
     void LookRanges(const RenderState::Snapshot& state, const DrawCommand& out)
     {
         uint32_t lowest, highest;
-        if (!DrawVertexRange(state, out, lowest, highest)) return;
+        if (!DrawVertexRange(state, out, lowest, highest))
+        {
+            // 0.5.374: a mid-frame buffer kept by its copy is compared whole
+            // when the draw's vertices can't be told.
+            for (const RangeLook& look : g_rangeLooks)
+                if (look.wholeIfUnknown) RenderResources::LookRange(look.buffer, look.physical, 0, 0xFFFFFFFFu);
+            return;
+        }
         const int64_t offset = state.indexOffset;
         for (const RangeLook& look : g_rangeLooks)
         {
-            if (look.stride == 0) continue;
+            if (look.stride == 0)
+            {
+                if (look.wholeIfUnknown) RenderResources::LookRange(look.buffer, look.physical, 0, 0xFFFFFFFFu);
+                continue;
+            }
             const int64_t strideBytes = int64_t(look.stride) * 4;
             auto send = [&](int64_t first, int64_t last)
             {
@@ -663,7 +713,7 @@ namespace
             need[stage] = std::min(256u, std::max(16u, (count + 15) & ~15u));
             // The file's span the program reads, for the dirty check.
             const uint32_t readFirst = map.empty() ? 0 : map.front(), readEnd = map.empty() ? 256 : map.back() + 1u;
-            const bool dirty = record ? RecordChanged(stage, map, file) : g_pendingFirst[stage] < readEnd && g_pendingEnd[stage] > readFirst;
+            const bool dirty = record ? (!g_sentValid[stage] || RecordChanged(stage, map, file)) : g_pendingFirst[stage] < readEnd && g_pendingEnd[stage] > readFirst;
             upload[stage] = g_uploaded.floatAt[stage] == 0xFFFFFFFFu || g_uploaded.floatProgram[stage] != handles[stage] || dirty;
             // COD3_CONSTCHECK=1: a stage whose upload is skipped held against
             // what the upload before it packed: a constant that differs is
@@ -719,10 +769,13 @@ namespace
                 // uploads anyway, so the rest of the file need not be kept
                 // (a whole 4 KB a draw was most of the command processor's
                 // copying).
+                static const bool alwaysSent = getenv("COD3_ALWAYSSENTFILE") != nullptr;
+                const bool keepSent = record || alwaysSent;
+                g_sentValid[stage] = keepSent;
                 if (map.empty())
                 {
                     memcpy(words, from, 4096);
-                    memcpy(g_sentFile[stage], from, 4096);
+                    if (keepSent) memcpy(g_sentFile[stage], from, 4096);
                 }
                 else
                 {
@@ -733,7 +786,7 @@ namespace
                         size_t run = 1;
                         while (i + run < map.size() && map[i + run] == map[i] + run) run++;
                         memcpy(words + i * 4, from + map[i] * 4u, run * 16);
-                        memcpy(g_sentFile[stage] + map[i] * 4u, from + map[i] * 4u, run * 16);
+                        if (keepSent) memcpy(g_sentFile[stage] + map[i] * 4u, from + map[i] * 4u, run * 16);
                         i += run;
                     }
                 }
@@ -1130,12 +1183,52 @@ namespace
     }
 }
 
+namespace RenderCommands { bool PrepareDrawInner(uint32_t initiator, uint32_t indexBase, RenderState::DrawCommand& out); }
+
+void RenderCommands::DumpDraws(const char* why, int count)
+{
+    if (g_dumpLeft.load(std::memory_order_relaxed) > 0) return;
+    g_dumpHud = count < 0;
+    if (g_dumpHud) count = -count;
+    g_dumpScan = 8000;
+    printf("render: draw list (%s), the next %d %sdraws: index, vs, ps, primitive, indices, colour mask, depth control, stencil, blend 0, scissor, result\n",
+           why, count, g_dumpHud ? "flat (no depth test) " : "");
+    fflush(stdout);
+    g_dumpIndex = 0;
+    g_dumpLeft.store(count, std::memory_order_relaxed);
+}
+
 bool RenderCommands::PrepareDraw(uint32_t initiator, uint32_t indexBase, DrawCommand& out)
+{
+    if (g_dumpLeft.load(std::memory_order_relaxed) <= 0) return PrepareDrawInner(initiator, indexBase, out);
+    uint64_t before[SkipCount];
+    memcpy(before, g_skips, sizeof before);
+    g_dumpVs = g_dumpPs = 0;
+    g_dumpState = RenderState::Snapshot();
+    const bool drawn = PrepareDrawInner(initiator, indexBase, out);
+    const char* result = drawn ? "drawn" : "nothing";
+    for (int i = 0; i < SkipCount; i++) if (g_skips[i] != before[i]) result = SkipNames[i];
+    const RenderState::Snapshot& s = g_dumpState;
+    if (g_dumpHud && (s.depthControl & 2u))
+    {
+        g_dumpIndex++;
+        if (--g_dumpScan <= 0) { g_dumpLeft.store(0, std::memory_order_relaxed); printf("render: draw list done (8000 draws looked at)\n"); fflush(stdout); }
+        return drawn;
+    }
+    printf("  draw %d: vs %016llx ps %016llx prim %u n %u mask %08X depth %08X stencil %08X blend %08X scissor %08X %08X: %s\n", g_dumpIndex++,
+        (unsigned long long)g_dumpVs, (unsigned long long)g_dumpPs, s.primitive, s.indexCount, s.colorMask, s.depthControl, s.stencilRefMask,
+        s.blendControl[0], s.scissorTopLeft, s.scissorBottomRight, result);
+    if (g_dumpLeft.fetch_sub(1, std::memory_order_relaxed) == 1) { printf("render: draw list done\n"); fflush(stdout); }
+    return drawn;
+}
+
+bool RenderCommands::PrepareDrawInner(uint32_t initiator, uint32_t indexBase, DrawCommand& out)
 {
     SkipFrameCheck();
     RenderStats::Enter(RenderStats::SectionState);
     RenderState::Snapshot state;
     RenderState::Read(initiator, indexBase, state);
+    if (g_dumpLeft.load(std::memory_order_relaxed) > 0) g_dumpState = state;
     if (state.indexCount == 0) return false;
     if (state.modeControl == 0) { Skip(SkipBackendOff); return false; }
     // EDRAM mode 5 is drawn as colour and depth like mode 4: Xenia calls
@@ -1605,6 +1698,33 @@ void RenderCommands::SetRendering(bool sharpShadows, bool fastShadowMaps, bool f
     g_sharpShadows = sharpShadows;
     g_fastShadowMaps = fastShadowMaps;
     g_foliageCoverage = foliageCoverage;
+}
+
+void RenderCommands::SetPlayerDown(bool down)
+{
+    if (g_playerDown.exchange(down, std::memory_order_relaxed) == down) return;
+    printf("render: the host's player is %s: the depth of field pass %s\n", down ? "down" : "up again",
+           down ? "is drawn for the death view's blur" : "follows the blur while aiming setting again");
+    fflush(stdout);
+}
+
+void RenderCommands::SetBinocularsUp(bool up)
+{
+    if (up) g_upFrames++;
+    if (g_binocularsUp.exchange(up, std::memory_order_relaxed) == up) return;
+    static int said = 0;
+    if (up)
+    {
+        for (uint64_t& n : g_upSkips) n = 0;
+        g_upFrames = 1;
+        if (said < 40) { printf("render: binoculars up: the depth of field pass is drawn while they are\n"); fflush(stdout); }
+        return;
+    }
+    if (said++ >= 40) return;
+    printf("render: binoculars down after %llu frames; draws left out meanwhile:", (unsigned long long)g_upFrames);
+    for (int i = 0; i < SkipCount; i++) if (g_upSkips[i] != 0) printf(" %s x%llu;", SkipNames[i], (unsigned long long)g_upSkips[i]);
+    printf("\n");
+    fflush(stdout);
 }
 
 void RenderCommands::ReportSkips()

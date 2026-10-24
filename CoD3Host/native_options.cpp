@@ -7,6 +7,10 @@
 #include <cstdio>
 #include <cstring>
 #include <initializer_list>
+#include <chrono>
+#include <filesystem>
+#include <cstdlib>
+#include <string>
 
 namespace {
 void Restore(uint8_t* base,uint32_t preferences) {
@@ -16,6 +20,82 @@ void Restore(uint8_t* base,uint32_t preferences) {
     for(uint32_t offset:{92u,96u,100u}) Guest::Write32(base,preferences+offset,settings.nativeVolume/2);
 }
 }
+#ifndef COD3_MP
+// --- single player: the Options kept between plays (0.5.233) ---
+// The campaign's options live in its state block at 0x82A8E610 (the block
+// the title also hands to the next mission through the launch data):
+// +60..+107 hold the sensitivities, volumes and the switches, +400 the
+// brightness (a float, 1.0 by default; the Gamma screen's).
+// A new game process built them from the defaults each time ("brightness
+// and sound reset after every play"). Now they are written to
+// saves\options-sp.bin whenever they change (checked once a second) and put
+// back when the block is built in the first 30 s of a process that was not
+// relaunched for a next mission (that one has them in its launch data).
+// COD3_NOSAVEOPTIONS=1 turns it off.
+namespace {
+constexpr uint32_t SpState=0x82A8E610, SpFrom=60, SpSize=48, SpBright=400;
+// what is kept: the 48 bytes, then the brightness
+void SpRead(const uint8_t* base,uint8_t* out) { memcpy(out,base+SpState+SpFrom,SpSize); memcpy(out+SpSize,base+SpState+SpBright,4); }
+std::filesystem::path SpOptionsFile() {
+    std::filesystem::path root=Kernel::SavesRoot();
+    if(root.empty()) return {};
+    return root/"options-sp.bin";
+}
+double Uptime() {
+    static const auto start=std::chrono::steady_clock::now();
+    return std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
+}
+bool SpOptionsOff() { return getenv("COD3_NOSAVEOPTIONS")!=nullptr; }
+void SpOptionsRestore(uint8_t* base,uint32_t preferences) {
+    if(preferences!=SpState || SpOptionsOff() || getenv("COD3_LAUNCHDATA") || Uptime()>30) return;
+    const std::filesystem::path file=SpOptionsFile();
+    if(file.empty()) return;
+    FILE* in=_wfopen(file.c_str(),L"rb");
+    if(!in) return;
+    uint8_t saved[SpSize+4]; const size_t got=fread(saved,1,SpSize+4,in); fclose(in);
+    if(got!=SpSize && got!=SpSize+4) return;
+    memcpy(base+SpState+SpFrom,saved,SpSize);
+    if(got==SpSize+4) {
+        uint32_t raw; memcpy(&raw,saved+SpSize,4); raw=_byteswap_ulong(raw);   // (kept as the guest holds it)
+        float f; memcpy(&f,&raw,4);
+        if(f>=0.2f && f<=3.0f) memcpy(base+SpState+SpBright,saved+SpSize,4);
+    }
+    uint32_t b=Guest::Read32(base,SpState+SpBright); float bright; memcpy(&bright,&b,4);
+    printf("native options: restored the saved options (volume %u/50, brightness %.2f)\n",
+        Guest::Read32(base,SpState+92),bright); fflush(stdout);
+}
+}
+// called once a frame (coop.cpp's Com_EventLoop hook)
+void NativeOptionsPoll(uint8_t* base) {
+    if(SpOptionsOff()) return;
+    static double last=0; static bool have=false; static uint8_t seen[SpSize+4];
+    const double now=Uptime();
+    if(now<30 || now-last<1.0) return;   // (after the boot's own building of the block)
+    last=now;
+    if(!have) {
+        auto text=[&](uint32_t at){ std::string t; for(int i=0;i<40;i++){ const char c=char(base[at+i]); if(c<32||c>126) break; t+=c; } return t; };
+        printf("native options: state +60..+107:");
+        for(uint32_t o=SpFrom;o<SpFrom+SpSize;o+=4) printf(" %08X",Guest::Read32(base,SpState+o));
+        printf(" (+76 is from \"%s\")\n",text(0x8206EBCCu).c_str()); fflush(stdout);
+        printf("native options: state +352..+411:");
+        for(uint32_t o=352;o<412;o+=4) printf(" %08X",Guest::Read32(base,SpState+o));
+        printf("\n"); fflush(stdout);
+    }
+    uint8_t current[SpSize+4]; SpRead(base,current);
+    if(have && memcmp(current,seen,SpSize+4)==0) return;
+    const bool first=!have;
+    memcpy(seen,current,SpSize+4); have=true;
+    const std::filesystem::path file=SpOptionsFile();
+    if(file.empty()) return;
+    if(first && std::filesystem::exists(file)) return;   // (the saved ones were put back: nothing new yet)
+    FILE* out=_wfopen(file.c_str(),L"wb");
+    if(!out) return;
+    fwrite(current,1,SpSize+4,out); fclose(out);
+    uint32_t b=Guest::Read32(base,SpState+SpBright); float bright; memcpy(&bright,&b,4);
+    printf("native options: saved the options (volume %u/50, brightness %.2f)\n",
+        Guest::Read32(base,SpState+92),bright); fflush(stdout);
+}
+#endif
 #ifdef COD3_MP
 extern "C" PPC_FUNC(__imp__sub_82506E78);
 PPC_FUNC(sub_82506E78)
@@ -37,6 +117,9 @@ PPC_FUNC(sub_824D9C50)
     Guest::Write32(base,preferences+68,100);
     Guest::Write32(base,preferences+72,100);
     for(uint32_t offset:{92u,96u,100u}) Guest::Write32(base,preferences+offset,25);
+#ifndef COD3_MP
+    SpOptionsRestore(base,preferences);
+#endif
     static std::atomic<unsigned> reports{0};
     if(reports.fetch_add(1)<12) {
         printf("native options: defaults at %08X: controller %u/%u, volume%u/50\n",preferences,

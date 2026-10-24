@@ -51,6 +51,11 @@
 #include <mutex>
 #include <thread>
 
+void BotsOnRoster(const uint8_t* packet, int size, unsigned int from);   // bots.cpp (0.5.194)
+void BotsOnStates(const uint8_t* packet, int size, unsigned int from);   // bots.cpp (0.5.207)
+void MpFixesOnPlanePacket(const uint8_t* packet, int size, unsigned int from);   // mp_fixes.cpp (0.5.275): the UAV plane
+void BotsAsk(int count);   // bots.cpp: bots wanted (clamped to the player limit's room)
+
 // The originals of the functions hooked below.
 extern "C" PPC_FUNC(__imp__sub_824D5A08);
 extern "C" PPC_FUNC(__imp__sub_824E9540);
@@ -128,8 +133,16 @@ namespace
     // never finished, made here (dom.cpp). One row so far; the rest blank.
     const Rule Page3[Rows] = {
         { "DOMINATION", { "MPFRONTEND_OFF", "ON (TEAM BATTLE, ROUEN)" }, 2 },
-        { "", { " " }, 1 }, { "", { " " }, 1 }, { "", { " " }, 1 }, { "", { " " }, 1 }, { "", { " " }, 1 },
+        // 0.5.277: bots as a match setting (Justin: anyone with the build who
+        // hosts turns bots on in the lobby). The host's server adds them at
+        // the match's start (bots.cpp BotsAsk, as the console's bot_add);
+        // the others get them from the host (the bots' roster). FILL: as
+        // many as the player limit leaves (22 at 24 players, 30 at 32).
+        { "BOTS", { "MPFRONTEND_OFF", "2", "4", "8", "12", "16", "22", "FILL" }, 8 },
+        { "", { " " }, 1 }, { "", { " " }, 1 }, { "", { " " }, 1 }, { "", { " " }, 1 },
     };
+    const int BotCounts[] = { 0, 2, 4, 8, 12, 16, 22, 99 };
+    int g_botChoice = 0;
     bool g_touched[3] = {};
 
     // Text the title is handed lives in guest memory for good: an element
@@ -248,12 +261,12 @@ namespace
         g_page = 2;
         SetText(ctx, base, Guest::Read32(base, menu + TitleText), "GAME MODES");
         SetText(ctx, base, Guest::Read32(base, menu + DescriptionText),
-                "DOMINATION: HOLD THE FIVE FLAGS. PICK TEAM BATTLE ON ROUEN");
+                "DOMINATION: HOLD THE FIVE FLAGS (TEAM BATTLE, ROUEN). BOTS: ADDED AT THE MATCH START");
         for (int row = 0; row < Rows; row++)
         {
             SetText(ctx, base, Guest::Read32(base, menu + RowLabels + 8 * row), Page3[row].label);
             Fill(ctx, base, Spinner(base, menu, row), Page3[row].choices, Page3[row].count,
-                 row == 0 ? Clamp(g_domination, Page3[row].count) : 0);
+                 row == 0 ? Clamp(g_domination, Page3[row].count) : row == 1 ? Clamp(g_botChoice, Page3[row].count) : 0);
         }
         HelpBar(ctx, base, menu);
     }
@@ -277,7 +290,7 @@ namespace
         {
             // Room for the largest (Domination's state, 89 bytes): a smaller
             // buffer makes Windows drop the datagram (WSAEMSGSIZE).
-            uint8_t packet[512];
+            uint8_t packet[2048];   // 0.5.275: 2048 (a 30-bot roster is 608 bytes)
             unsigned int from = 0;
             int got;
             while ((got = Net::SideReceive(packet, sizeof(packet), &from)) >= 4)
@@ -290,6 +303,12 @@ namespace
                 }
                 else if (got >= 8 && memcmp(packet, "C3DS", 4) == 0)
                     Domination::OnState(packet, got, from);
+                else if (got >= 8 && memcmp(packet, "C3BR", 4) == 0)
+                    BotsOnRoster(packet, got, from);   // 0.5.194: the host's bots (bots.cpp)
+                else if (got >= 8 && memcmp(packet, "C3BS", 4) == 0)
+                    BotsOnStates(packet, got, from);   // 0.5.207: their lives (bots.cpp)
+                else if (got >= 6 && (memcmp(packet, "C3UP", 4) == 0 || memcmp(packet, "C3UH", 4) == 0 || memcmp(packet, "C3UD", 4) == 0 || memcmp(packet, "C3KS", 4) == 0 || memcmp(packet, "C3KU", 4) == 0 || memcmp(packet, "C3KM", 4) == 0 || memcmp(packet, "C3MF", 4) == 0 || memcmp(packet, "C3MP", 4) == 0))
+                    MpFixesOnPlanePacket(packet, got, from);   // 0.5.275: the UAV plane on every machine (mp_fixes.cpp)
                 else if (got >= 10 && memcmp(packet, "C3R1", 4) == 0 && !g_chosen.load())
                 {
                     if (packet[4] >= 5 || packet[5] >= 3 || packet[6] >= 3 || packet[7] >= 3 || packet[8] >= 8) continue;
@@ -380,6 +399,13 @@ namespace
     {
         const uint32_t spinner = Spinner(base, menu, 0);
         g_domination = spinner ? Clamp(int16_t(Guest::Read16(base, spinner + SpinnerIndex)), Page3[0].count) : 0;
+        // 0.5.277: the bots' row: this machine hosts, its server adds them.
+        {
+            const uint32_t bots = Spinner(base, menu, 1);
+            g_botChoice = bots ? Clamp(int16_t(Guest::Read16(base, bots + SpinnerIndex)), Page3[1].count) : 0;
+            BotsAsk(BotCounts[g_botChoice]);
+            printf("lobby rules: bots %d (%s)\n", BotCounts[g_botChoice], Page3[1].choices[g_botChoice]);
+        }
         g_mine[0] = uint8_t(g_health); g_mine[1] = uint8_t(g_gravity); g_mine[2] = uint8_t(g_speed);
         g_mine[3] = Guest::Read8(base, Settings + FieldRespawnTime); g_mine[4] = Guest::Read8(base, Settings + FieldRoundLimit);
         g_mine[5] = Guest::Read8(base, Settings + FieldLastManStanding); g_mine[6] = uint8_t(g_domination);

@@ -12,7 +12,7 @@
 
 namespace Tuning
 {
-    inline std::atomic<bool> depthThread{ true };       // depth copies converted on a thread of their own (render_d3d11.cpp)
+    inline std::atomic<bool> depthThread{ false };   // 0.5.341: off by default (see settings.h)       // depth copies converted on a thread of their own (render_d3d11.cpp)
     inline std::atomic<bool> fastConstants{ true };     // constant packets stored as runs (gpu.cpp)
     inline std::atomic<bool> shaderLoadCache{ true };   // programs seen before matched without the byte-wise hash (render_shaders.cpp)
     inline std::atomic<bool> strongChangeCheck{ true }; // the eight lane fingerprint (render_resources.cpp)

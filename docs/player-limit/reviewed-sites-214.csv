@@ -1,0 +1,7 @@
+kind,address,classification,evidence
+loop_24,82217724,reviewed_indirect_call,24 is in r4; counter target comes from r11. Not a counted loop.
+loop_24,8221EFBC,reviewed_indirect_call,24 is in r3; counter target comes from r11. Not a counted loop.
+compare_24,824048B4,replaced_bounded_scan_214,Six-wide scan replaced by bounds-checked helper; active limit still 24.
+compare_24,8240480C,reviewed_pending_activation,Existing-client scan bound; leave 24 until coordinated activation.
+compare_24,824048E4,reviewed_pending_activation,Full-client rejection bound; leave 24 until coordinated activation.
+store_24,823F4B1C,reviewed_sentinel_pending,Writes no-local-player sentinel24 at session+0x5991; nearby25 also needs review.

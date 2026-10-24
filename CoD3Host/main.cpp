@@ -4,6 +4,8 @@
 #include "kernel.h"
 #include "settings.h"
 #include <cstdlib>
+#include <cstring>
+#include <windows.h>
 #include "scheduler.h"
 #include "sampler.h"
 #include "window.h"
@@ -167,6 +169,33 @@ namespace
 
 int main(int argc, char** argv)
 {
+#ifdef COD3_MP
+    // 0.5.215: the multiplayer program has no console of its own any more.
+    // --console (or COD3_CONSOLE=1) opens one, for watching the log live.
+    {
+        bool want = getenv("COD3_CONSOLE") != nullptr && strcmp(getenv("COD3_CONSOLE"), "0") != 0;
+        for (int i = 1; i < argc; i++) if (strcmp(argv[i], "--console") == 0) want = true;
+        // First time setup (no game folder beside the program yet) asks its
+        // questions in a console, so it gets one.
+        {
+            wchar_t exe[MAX_PATH] = {};
+            const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+            if (n > 0 && n < MAX_PATH)
+            {
+                const std::filesystem::path xex = std::filesystem::path(exe).parent_path() / L"game" / L"default.xex";
+                std::error_code ec;
+                if (!std::filesystem::is_regular_file(xex, ec)) want = true;
+            }
+        }
+        if (want && GetConsoleWindow() == nullptr && AllocConsole())
+        {
+            FILE* stream = nullptr;
+            freopen_s(&stream, "CONIN$", "r", stdin);     // 0.5.216: first, so stdout/stderr get descriptors 1 and 2
+            freopen_s(&stream, "CONOUT$", "w", stdout);
+            freopen_s(&stream, "CONOUT$", "w", stderr);
+        }
+    }
+#endif
     // Per-monitor DPI aware, before any window or screen size is asked for.
     // Without it, Windows display scaling above 100% hands this program a
     // smaller, virtual desktop (2560x1440 for a 4K screen at 150%): the swap
@@ -210,6 +239,10 @@ int Run(int argc, char** argv)
         if (option == "--install-only")
         {
             installOnly = true;
+        }
+        else if (option == "--console")
+        {
+            // 0.5.215: handled at the start of main (opens a console window).
         }
         else if (option == "--list-iso" && hasValue)
         {

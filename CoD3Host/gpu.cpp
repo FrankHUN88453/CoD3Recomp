@@ -14,6 +14,7 @@
 // Ahead of kernel.h, which pulls in ppc_context.h: the memory macros there are
 // guarded with #ifndef, so this file has to define its versions first or it
 // would redefine them.
+#include <emmintrin.h>
 #include "cod3_mmio.h"
 #include "modules.h"
 
@@ -120,6 +121,38 @@ namespace
         }
         std::atomic<uint32_t>* file = g_registerFile + index;
         for (uint32_t i = 0; i < count; i++) file[i].store(read(i), std::memory_order_relaxed);
+        static constexpr uint32_t ranges[3][2] = { { 0x4000, 0x4400 }, { 0x4400, 0x4800 }, { 0x4900, 0x4930 } };
+        const uint32_t end = index + count;
+        for (uint32_t range = 0; range < 3; range++)
+        {
+            const uint32_t first = std::max(index, ranges[range][0]), last = std::min(end, ranges[range][1]);
+            if (first < last) NoteConstantSpan(range, first - ranges[range][0], last - ranges[range][0]);
+        }
+    }
+
+    // 0.5.401: the same for a run read straight from guest memory (the
+    // constant packets' words, the type 0 runs): four words at a time,
+    // turned round with SSE2, instead of one load, swap and store each.
+    void WriteRegisterRunFrom(uint32_t index, uint32_t count, uint32_t guestAddress)
+    {
+        if (count == 0) return;
+        if (!PlainRegisterRuns() || index < 0x2000 || index + count > 0x5000)
+        {
+            WriteRegisterRun(index, count, [&](uint32_t i) { return Guest::Read32(Guest::Base, guestAddress + i * 4); });
+            return;
+        }
+        // The file's words are plain 32 bit stores under the atomics (x86).
+        uint32_t* file = reinterpret_cast<uint32_t*>(g_registerFile + index);
+        const uint8_t* from = Guest::Base + guestAddress;
+        uint32_t i = 0;
+        for (; i + 4 <= count; i += 4)
+        {
+            __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(from + i * 4));
+            v = _mm_or_si128(_mm_slli_epi16(v, 8), _mm_srli_epi16(v, 8));   // bytes in each half
+            v = _mm_or_si128(_mm_slli_epi32(v, 16), _mm_srli_epi32(v, 16));  // halves in each word
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(file + i), v);
+        }
+        for (; i < count; i++) file[i] = Guest::Read32(Guest::Base, guestAddress + i * 4);
         static constexpr uint32_t ranges[3][2] = { { 0x4000, 0x4400 }, { 0x4400, 0x4800 }, { 0x4900, 0x4930 } };
         const uint32_t end = index + count;
         for (uint32_t range = 0; range < 3; range++)
@@ -1696,6 +1729,23 @@ namespace
             fflush(stdout);
         }
 
+        // 0.5.380: register/padding packets need no diagnostic payload copy.
+        // Keep type-3 history (draws, waits, fences and indirect calls). Restore
+        // the complete old ring for stream-corruption diagnosis / comparison.
+        static const bool rememberAllPackets = []() {
+            const char* value = getenv("COD3_REMEMBERALLPACKETS");
+            return value != nullptr && value[0] != 0 && value[0] != '0';
+        }();
+
+        // 0.5.382: draw/constant/NOP history is also diagnostic only. Keep
+        // synchronization, indirect calls, unknown packets and the other
+        // type-3 operations. COD3_REMEMBERDRAWS=1 restores 380/381 history;
+        // COD3_REMEMBERALLPACKETS=1 restores the pre-380 complete ring.
+        static const bool rememberDrawPackets = []() {
+            const char* value = getenv("COD3_REMEMBERDRAWS");
+            return value != nullptr && value[0] != 0 && value[0] != '0';
+        }();
+
         uint32_t cursor = 0;
         uint32_t stepped = 0;
         while (cursor < dwords)
@@ -1717,6 +1767,7 @@ namespace
                 const uint32_t baseRegister = header & 0x7FFF;
                 const bool oneRegister = ((header >> 15) & 1) != 0;
 
+                if (rememberAllPackets)
                 {
                     uint32_t words[5];
                     uint32_t available = 0;
@@ -1836,12 +1887,21 @@ namespace
                 else
                 {
                 t_writeSource = "a type 0 packet in an indirect buffer";
-                for (uint32_t i = 0; i < count; i++)
+                // 0.5.373: a run of registers (most of the stream: each
+                // draw's state) goes through WriteRegisterRun, as the
+                // constant packets already did: straight into the file when
+                // it is 0x2000 up and no experiment is on, one at a time
+                // through WriteRegister otherwise. Marseille at 32 players:
+                // these one at a time writes were 9% of the command
+                // processor, 57 thousand a frame. COD3_SLOWREGISTERS=1: as before.
+                const uint32_t available = cursor + 1 < dwords ? std::min(count, dwords - (cursor + 1)) : 0;
+                if (!oneRegister)
+                    WriteRegisterRunFrom(baseRegister, available, base + (cursor + 1) * 4);
+                else
+                for (uint32_t i = 0; i < available; i++)
                 {
-                    if (cursor + 1 + i >= dwords) break;
                     const uint32_t value = Guest::Read32(Guest::Base, base + (cursor + 1 + i) * 4);
-                    const uint32_t target = oneRegister ? baseRegister : baseRegister + i;
-                    Gpu::WriteRegister(Gpu::ApertureBase + target * 4, value);
+                    Gpu::WriteRegister(Gpu::ApertureBase + baseRegister * 4, value);
                 }
                 local.registerWrites += count;
                 length = 1 + count;
@@ -1850,7 +1910,7 @@ namespace
             else if (type == 2)
             {
                 length = 1;
-                Remember(header, nullptr, 0);
+                if (rememberAllPackets) Remember(header, nullptr, 0);
             }
             else if (type == 3)
             {
@@ -1858,6 +1918,10 @@ namespace
                 const uint32_t count = ((header >> 16) & 0x3FFF) + 1;
                 length = 1 + count;
 
+                const bool drawStatePacket = opcode == OpDrawIndx || opcode == OpDrawIndx2
+                    || opcode == OpSetConstant || opcode == OpSetConstant2
+                    || opcode == OpSetShaderConstants || opcode == OpNop;
+                if (rememberAllPackets || rememberDrawPackets || !drawStatePacket)
                 {
                     uint32_t words[5];
                     uint32_t available = 0;
@@ -1972,7 +2036,7 @@ namespace
                         t_writeSource = "a SET_CONSTANT packet";
                         const uint32_t words = std::min(count - 1, dwords > cursor + 2 ? dwords - (cursor + 2) : 0u);
                         const uint32_t from = base + (cursor + 2) * 4;
-                        WriteRegisterRun(index, words, [&](uint32_t i) { return Guest::Read32(Guest::Base, from + i * 4); });
+                        WriteRegisterRunFrom(index, words, from);
                     }
                 }
                 else if ((opcode == OpSetConstant2 || opcode == OpSetShaderConstants) && cursor + 1 < dwords)
@@ -1988,7 +2052,7 @@ namespace
                         t_writeSource = "a SET_CONSTANT2 packet";
                         const uint32_t words = std::min(count - 1, dwords > cursor + 2 ? dwords - (cursor + 2) : 0u);
                         const uint32_t from = base + (cursor + 2) * 4;
-                        WriteRegisterRun(index, words, [&](uint32_t i) { return Guest::Read32(Guest::Base, from + i * 4); });
+                        WriteRegisterRunFrom(index, words, from);
                     }
                     else ReportOnce("SET_CONSTANT2 outside the constants, ignored", index, count);
                 }
@@ -2151,6 +2215,11 @@ uint64_t Mmio::Timebase()
     return uint64_t((ticks / frequency) * ConsoleFrequency
                   + (ticks % frequency) * ConsoleFrequency / frequency);
 }
+
+bool Mmio::g_callChecks = []() {
+    auto set = [](const char* name) { const char* t = getenv(name); return t != nullptr && t[0] != 0 && t[0] != '0'; };
+    return set("COD3_TRACECALL") || set("COD3_TRACETARGET") || set("COD3_TRACEMODULE");
+}();
 
 void Mmio::CallIndirect(PPCContext& ctx, uint8_t* base, uint32_t address)
 {

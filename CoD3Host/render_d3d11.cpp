@@ -26,6 +26,7 @@
 #include "tuning.h"
 #include "verify.h"
 #include "hdr_shaders.h"
+#include "render_queue.h"
 
 #include <algorithm>
 #include <atomic>
@@ -38,6 +39,10 @@
 #include <ctime>
 #include <filesystem>
 #include <condition_variable>
+#include <cstddef>
+#include <type_traits>
+#include <intrin.h>
+#include <smmintrin.h>
 #include <deque>
 #include <map>
 #include <memory>
@@ -51,6 +56,8 @@
 #include <dxgi1_6.h>
 #include <d3dcompiler.h>
 #include <wrl/client.h>
+
+#pragma comment(lib, "Synchronization.lib")   // WaitOnAddress, for the drawing thread
 
 using Microsoft::WRL::ComPtr;
 using RenderState::Handle;
@@ -376,6 +383,8 @@ namespace
 
     // --- starting --------------------------------------------------------------------------------
 
+    void StartDrawingThread();   // the drawing thread (0.5.391), below
+
     bool Start()
     {
         if (g_started) return !g_failed;
@@ -440,6 +449,7 @@ namespace
         RenderShaders::Precompile();
         RenderStats::BeginFrame();
         (void)RenderResources::BeginFrame(g_frame);
+        StartDrawingThread();
         fflush(stdout);
         return true;
     }
@@ -738,12 +748,26 @@ namespace
 
     // --- the draw ------------------------------------------------------------------------------------
 
+    // 0.5.394: by the processor's time stamp counter, not the system clock:
+    // two clock reads a draw were 2.7% of the command thread. The counter's
+    // rate is measured against the clock as the game runs (TscNanoseconds).
+    std::atomic<double> g_nanosecondsPerTick{ 0.3 };
+    void CalibrateTsc()
+    {
+        static uint64_t tsc0 = 0;
+        static std::chrono::steady_clock::time_point clock0;
+        const uint64_t tsc = __rdtsc();
+        const auto clock = std::chrono::steady_clock::now();
+        if (tsc0 == 0) { tsc0 = tsc; clock0 = clock; return; }
+        const double ns = double(std::chrono::duration_cast<std::chrono::nanoseconds>(clock - clock0).count());
+        if (ns > 2e8 && tsc > tsc0) g_nanosecondsPerTick.store(ns / double(tsc - tsc0), std::memory_order_relaxed);
+    }
     struct Timed
     {
         uint64_t& into;
-        std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
+        uint64_t started = __rdtsc();
         explicit Timed(uint64_t& i) : into(i) {}
-        ~Timed() { into += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count()); }
+        ~Timed() { into += uint64_t(double(__rdtsc() - started) * g_nanosecondsPerTick.load(std::memory_order_relaxed)); }
     };
 
     void BindTexture(int stage, uint32_t slot, ID3D11ShaderResourceView* view)
@@ -1028,20 +1052,20 @@ namespace
         }
         if (g_bound.rasterizer != command.rasterizer)
         {
-            g_context->RSSetState(RenderPipeline::RasterizerObject(command.rasterizer));
+            g_context->RSSetState(command.rasterizerObject);
             g_bound.rasterizer = command.rasterizer;
             RenderStats::Frame().pipelineSwitches++;
         }
         if (g_bound.blend != command.blend || memcmp(g_bound.blendFactor, command.blendFactor, sizeof(command.blendFactor)) != 0)
         {
-            g_context->OMSetBlendState(RenderPipeline::BlendObject(command.blend), command.blendFactor, 0xFFFFFFFF);
+            g_context->OMSetBlendState(command.blendObject, command.blendFactor, 0xFFFFFFFF);
             g_bound.blend = command.blend;
             memcpy(g_bound.blendFactor, command.blendFactor, sizeof(command.blendFactor));
             RenderStats::Frame().pipelineSwitches++;
         }
         if (g_bound.depth != command.depth || g_bound.stencilReference != command.stencilReference)
         {
-            g_context->OMSetDepthStencilState(RenderPipeline::DepthObject(command.depth), command.stencilReference);
+            g_context->OMSetDepthStencilState(command.depthObject, command.stencilReference);
             g_bound.depth = command.depth;
             g_bound.stencilReference = command.stencilReference;
             RenderStats::Frame().pipelineSwitches++;
@@ -1349,7 +1373,42 @@ namespace
                 if (d.column == nullptr)
                 {
                     const float* source = row + x0;
-                    for (uint32_t i = 0; i < n; i++)
+                    uint32_t i = 0;
+                    // 0.5.406: the float (20e4) depth four texels at a time
+                    // (SSE4.1), the common case: every texel above zero and
+                    // none below the 20e4 normal range, else the four go
+                    // one by one as before.
+                    if constexpr (FloatDepth)
+                        for (; i + 4 <= n; i += 4)
+                        {
+                            const __m128 z = _mm_loadu_ps(source + i);
+                            __m128i bits = _mm_castps_si128(z);
+                            const int positive = _mm_movemask_ps(_mm_cmpgt_ps(z, _mm_setzero_ps()));
+                            bits = _mm_min_epu32(bits, _mm_set1_epi32(0x3FFFFFF8));
+                            const __m128i low = _mm_cmplt_epi32(bits, _mm_set1_epi32(0x38800000));   // bits <= 0x3FFFFFF8: signed compare is safe
+                            if (positive != 15 || _mm_movemask_epi8(low) != 0)
+                            {
+                                for (uint32_t k = i; k < i + 4; k++)
+                                {
+                                    const uint32_t value = EncodeDepth<FloatDepth, Endian>(source[k]);
+                                    memcpy(block + inTile[k], &value, 4);
+                                }
+                                continue;
+                            }
+                            bits = _mm_add_epi32(bits, _mm_set1_epi32(int(0xC8000000u)));
+                            bits = _mm_add_epi32(bits, _mm_add_epi32(_mm_set1_epi32(3), _mm_and_si128(_mm_srli_epi32(bits, 3), _mm_set1_epi32(1))));
+                            __m128i value = _mm_slli_epi32(_mm_and_si128(_mm_srli_epi32(bits, 3), _mm_set1_epi32(0xFFFFFF)), 8);
+                            if constexpr (Endian == 1) value = _mm_or_si128(_mm_srli_epi32(_mm_and_si128(value, _mm_set1_epi32(int(0xFF00FF00u))), 8), _mm_slli_epi32(_mm_and_si128(value, _mm_set1_epi32(0x00FF00FF)), 8));
+                            else if constexpr (Endian == 2) value = _mm_shuffle_epi8(value, _mm_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12));
+                            else if constexpr (Endian == 3) value = _mm_or_si128(_mm_srli_epi32(value, 16), _mm_slli_epi32(value, 16));
+                            alignas(16) uint32_t out[4];
+                            _mm_store_si128(reinterpret_cast<__m128i*>(out), value);
+                            memcpy(block + inTile[i], &out[0], 4);
+                            memcpy(block + inTile[i + 1], &out[1], 4);
+                            memcpy(block + inTile[i + 2], &out[2], 4);
+                            memcpy(block + inTile[i + 3], &out[3], 4);
+                        }
+                    for (; i < n; i++)
                     {
                         const uint32_t value = EncodeDepth<FloatDepth, Endian>(source[i]);
                         memcpy(block + inTile[i], &value, 4);
@@ -2117,9 +2176,37 @@ namespace
         static const bool off = getenv("COD3_NOGAMMA") != nullptr;
         uint32_t table[256];
         uint64_t version = 0;
-        if (!off && Gpu::DisplayGamma(table, version) && version != g_gammaVersion)
+        // 0.5.249: the Brightness setting (F11, 50..150 %) bends the table:
+        // each entry raised to the power 100 / brightness, so black stays
+        // black, white white, and the middle comes up or down (as the
+        // campaign's own brightness slider does with the title's table).
+        static int brightnessWas = 100;
+        const int brightness = std::clamp(Settings::Get().brightness, 50, 150);
+        bool have = !off && Gpu::DisplayGamma(table, version);
+        if (!have && (brightness != 100 || brightness != brightnessWas))
+        {
+            for (uint32_t i = 0; i < 256; i++) { const uint32_t v = (i << 2) | (i >> 6); table[i] = v | (v << 10) | (v << 20); }
+            have = true;
+        }
+        if (have && (version != g_gammaVersion || brightness != brightnessWas))
         {
             g_gammaVersion = version;
+            if (brightness != brightnessWas) { printf("render: brightness %d%%\n", brightness); fflush(stdout); }
+            brightnessWas = brightness;
+            if (brightness != 100)
+            {
+                const double power = 100.0 / brightness;
+                for (uint32_t i = 0; i < 256; i++)
+                {
+                    uint32_t e = 0;
+                    for (int c = 0; c < 3; c++)
+                    {
+                        const double x = double((table[i] >> (10 * c)) & 0x3FF) / 1023.0;
+                        e |= uint32_t(std::lround(std::pow(x, power) * 1023.0)) << (10 * c);
+                    }
+                    table[i] = e;
+                }
+            }
             // The console's entries have blue in the low bits and red in the
             // high; the host's format the other way round.
             uint32_t texels[256];
@@ -2374,6 +2461,324 @@ namespace
     }
 }
 
+// --- the drawing thread (0.5.391, render_queue.h) ---------------------------------------------
+//
+// One queue, one writer (the command thread, holding g_mutex) and one
+// reader (the drawing thread). Records are 16-byte aligned in a ring of
+// QueueBytes: the writer's cursor runs ahead and is handed over (published)
+// at the end of each draw; the reader runs what is published and says how
+// far it got (consumed). Sync waits until consumed reaches the writer's
+// cursor: the drawing thread is then idle and the context is the caller's.
+
+namespace
+{
+    // 0.5.393: 4 MB, not 64: the drawing thread is a draw or two behind,
+    // and a queue that stays in the processor's cache costs the command
+    // thread far less to write than one that runs through 64 MB.
+    constexpr uint64_t QueueBytes = 4ull << 20;
+    // Handed over every PublishDraws draws (or sooner at a Sync), not every
+    // draw: each hand over moves cache lines between the two cores.
+    constexpr uint32_t PublishDraws = 8;
+    uint32_t g_unpublishedDraws = 0;
+    uint8_t* g_queue = nullptr;
+    bool g_queueOn = false;
+    bool g_queueActive = false;   // this frame's draws go to the drawing thread (set at each swap)
+    uint64_t g_queueWritten = 0;                     // the writer's cursor (under g_mutex)
+    std::atomic<uint64_t> g_queuePublished{ 0 };     // what the reader may run
+    std::atomic<uint64_t> g_queueConsumed{ 0 };      // what it has run
+    std::atomic<bool> g_drawerSleeping{ false };
+    DWORD g_drawerThreadId = 0;
+    thread_local bool t_deferring = false;
+    uint64_t g_queuedDraws = 0, g_queueSyncs = 0, g_queueSyncWaits = 0;
+    // The once a second "queue:" line (render profile runs): where the
+    // command thread waited for the drawing thread, and how busy that was.
+    constexpr int SyncSites = 16;
+    uint64_t g_qSyncBySite[SyncSites] = {}, g_qSyncCycles = 0, g_qSyncLag = 0;
+    std::atomic<uint64_t> g_qExecuted{ 0 }, g_qBusyCycles{ 0 }, g_qDrawCycles{ 0 }, g_qWriteCycles{ 0 };
+
+    enum : uint32_t { RecordWrap = 1, RecordDraw, RecordRing, RecordUpload };
+    struct RecordHeader { uint32_t type, bytes, pad0, pad1; };
+    struct RingRecord { ID3D11Buffer* buffer; uint32_t offset, size, discard, pad; };
+    struct UploadRecord { ID3D11Resource* resource; uint32_t subresource, hasBox, size, pad; D3D11_BOX box; uint32_t pad2; };
+    struct DrawRecord { uint32_t textureCount, bufferCount, hasBools, pad; };
+    static_assert(sizeof(RecordHeader) == 16, "record header");
+    static_assert(std::is_trivially_copyable<RenderState::DrawCommand>::value, "the draw is copied as bytes");
+
+    constexpr size_t DrawTexturesAt = offsetof(RenderState::DrawCommand, textures);
+    constexpr size_t DrawTextureCountAt = offsetof(RenderState::DrawCommand, textureCount);
+    constexpr size_t DrawBuffersAt = offsetof(RenderState::DrawCommand, buffers);
+    constexpr size_t DrawBufferCountAt = offsetof(RenderState::DrawCommand, bufferCount);
+    constexpr uint32_t BoolBytes = 256;   // the booleans' constant buffer, as UpdateSubresource reads it
+
+    void QueuePublish()
+    {
+        g_queuePublished.store(g_queueWritten, std::memory_order_seq_cst);
+        if (g_drawerSleeping.load(std::memory_order_seq_cst)) WakeByAddressSingle(&g_queuePublished);
+    }
+
+    void QueueWaitConsumed(uint64_t until)
+    {
+        uint32_t spins = 0;
+        while (g_queueConsumed.load(std::memory_order_acquire) < until)
+        {
+            if (++spins < 20000) _mm_pause();
+            else SwitchToThread();
+        }
+    }
+
+    // Room for a record of `payload` bytes after its header: where its
+    // payload goes. Everything given before it is complete, so it is
+    // published first if the writer has to wait for room.
+    uint8_t* QueueReserve(uint32_t type, uint32_t payload)
+    {
+        const uint32_t bytes = uint32_t((sizeof(RecordHeader) + payload + 15) & ~size_t(15));
+        uint64_t at = g_queueWritten % QueueBytes;
+        const uint64_t wrap = at + bytes > QueueBytes ? QueueBytes - at : 0;
+        if (g_queueWritten + wrap + bytes - g_queueConsumed.load(std::memory_order_acquire) > QueueBytes)
+        {
+            QueuePublish();
+            QueueWaitConsumed(g_queueWritten + wrap + bytes - QueueBytes);
+        }
+        if (wrap != 0)
+        {
+            RecordHeader* skip = reinterpret_cast<RecordHeader*>(g_queue + at);
+            skip->type = RecordWrap;
+            skip->bytes = uint32_t(wrap);
+            g_queueWritten += wrap;
+            at = 0;
+        }
+        RecordHeader* header = reinterpret_cast<RecordHeader*>(g_queue + at);
+        header->type = type;
+        header->bytes = bytes;
+        g_queueWritten += bytes;
+        return g_queue + at + sizeof(RecordHeader);
+    }
+
+    void QueueDraw(const RenderState::DrawCommand& command)
+    {
+        using Command = RenderState::DrawCommand;
+        const size_t textures = size_t(command.textureCount) * sizeof(Command::Texture);
+        const size_t buffers = size_t(command.bufferCount) * sizeof(Command::Buffer);
+        const bool bools = command.boolsChanged && command.bools != nullptr;
+        const size_t payload = sizeof(DrawRecord) + DrawTexturesAt + textures + (DrawBuffersAt - DrawTextureCountAt) + buffers +
+                               (sizeof(Command) - DrawBufferCountAt) + (bools ? BoolBytes : 0);
+        uint8_t* to = QueueReserve(RecordDraw, uint32_t(payload));
+        DrawRecord* record = reinterpret_cast<DrawRecord*>(to);
+        record->textureCount = command.textureCount;
+        record->bufferCount = command.bufferCount;
+        record->hasBools = bools ? 1 : 0;
+        to += sizeof(DrawRecord);
+        const uint8_t* from = reinterpret_cast<const uint8_t*>(&command);
+        memcpy(to, from, DrawTexturesAt); to += DrawTexturesAt;
+        memcpy(to, command.textures, textures); to += textures;
+        memcpy(to, from + DrawTextureCountAt, DrawBuffersAt - DrawTextureCountAt); to += DrawBuffersAt - DrawTextureCountAt;
+        memcpy(to, command.buffers, buffers); to += buffers;
+        memcpy(to, from + DrawBufferCountAt, sizeof(Command) - DrawBufferCountAt); to += sizeof(Command) - DrawBufferCountAt;
+        if (bools) memcpy(to, command.bools, BoolBytes);
+        g_queuedDraws++;
+    }
+
+    // The drawing thread's copy of the draw it is running.
+    RenderState::DrawCommand g_drawerCommand;
+
+    void RunRecord(const RecordHeader* header)
+    {
+        const uint8_t* body = reinterpret_cast<const uint8_t*>(header + 1);
+        switch (header->type)
+        {
+        case RecordRing:
+        {
+            const uint64_t started = __rdtsc();
+            const RingRecord* ring = reinterpret_cast<const RingRecord*>(body);
+            D3D11_MAPPED_SUBRESOURCE mapped{};
+            if (SUCCEEDED(g_context->Map(ring->buffer, 0, ring->discard ? D3D11_MAP_WRITE_DISCARD : D3D11_MAP_WRITE_NO_OVERWRITE, 0, &mapped)))
+            {
+                memcpy(static_cast<uint8_t*>(mapped.pData) + ring->offset, ring + 1, ring->size);
+                g_context->Unmap(ring->buffer, 0);
+            }
+            g_qWriteCycles.fetch_add(__rdtsc() - started, std::memory_order_relaxed);
+            break;
+        }
+        case RecordUpload:
+        {
+            const UploadRecord* upload = reinterpret_cast<const UploadRecord*>(body);
+            g_context->UpdateSubresource(upload->resource, upload->subresource, upload->hasBox ? &upload->box : nullptr, upload + 1, 0, 0);
+            break;
+        }
+        case RecordDraw:
+        {
+            using Command = RenderState::DrawCommand;
+            const DrawRecord* record = reinterpret_cast<const DrawRecord*>(body);
+            const uint8_t* from = body + sizeof(DrawRecord);
+            uint8_t* to = reinterpret_cast<uint8_t*>(&g_drawerCommand);
+            const size_t textures = size_t(record->textureCount) * sizeof(Command::Texture);
+            const size_t buffers = size_t(record->bufferCount) * sizeof(Command::Buffer);
+            memcpy(to, from, DrawTexturesAt); from += DrawTexturesAt;
+            memcpy(g_drawerCommand.textures, from, textures); from += textures;
+            memcpy(to + DrawTextureCountAt, from, DrawBuffersAt - DrawTextureCountAt); from += DrawBuffersAt - DrawTextureCountAt;
+            memcpy(g_drawerCommand.buffers, from, buffers); from += buffers;
+            memcpy(to + DrawBufferCountAt, from, sizeof(Command) - DrawBufferCountAt); from += sizeof(Command) - DrawBufferCountAt;
+            g_drawerCommand.bools = record->hasBools ? reinterpret_cast<const uint32_t*>(from) : nullptr;
+            g_drawerCommand.boolsChanged = record->hasBools != 0;
+            const uint64_t started = __rdtsc();
+            ExecuteDraw(g_drawerCommand);
+            RenderStats::Leave();
+            g_qDrawCycles.fetch_add(__rdtsc() - started, std::memory_order_relaxed);
+            g_qExecuted.fetch_add(1, std::memory_order_relaxed);
+            break;
+        }
+        default: break;
+        }
+    }
+
+    void DrawerMain()
+    {
+        SetThreadDescription(GetCurrentThread(), L"CoD3 drawing");
+        uint64_t read = 0;
+        for (;;)
+        {
+            uint64_t end = g_queuePublished.load(std::memory_order_acquire);
+            if (end == read)
+            {
+                // A short spin (the next draw is usually microseconds away),
+                // then asleep until the writer publishes.
+                // 0.5.394: about a third of a millisecond by the time stamp
+                // counter, whatever a pause costs on this processor: waking
+                // it was a system call for the command thread.
+                const uint64_t spinFrom = __rdtsc();
+                while (end == read && __rdtsc() - spinFrom < 1000000)
+                {
+                    _mm_pause();
+                    end = g_queuePublished.load(std::memory_order_acquire);
+                }
+                if (end == read)
+                {
+                    g_drawerSleeping.store(true, std::memory_order_seq_cst);
+                    end = g_queuePublished.load(std::memory_order_seq_cst);
+                    if (end == read) WaitOnAddress(&g_queuePublished, &read, sizeof(read), 2);
+                    g_drawerSleeping.store(false, std::memory_order_seq_cst);
+                    continue;
+                }
+            }
+            const uint64_t busyFrom = __rdtsc();
+            while (read < end)
+            {
+                const RecordHeader* header = reinterpret_cast<const RecordHeader*>(g_queue + read % QueueBytes);
+                RunRecord(header);
+                read += header->bytes;
+            }
+            g_qBusyCycles.fetch_add(__rdtsc() - busyFrom, std::memory_order_relaxed);
+            g_queueConsumed.store(read, std::memory_order_release);
+        }
+    }
+
+    void StartDrawingThread()
+    {
+        const char* setting = getenv("COD3_DRAWTHREAD");
+        if (setting != nullptr && setting[0] == '0') { printf("render: the drawing thread is off (COD3_DRAWTHREAD=0)\n"); return; }
+        g_queue = static_cast<uint8_t*>(VirtualAlloc(nullptr, SIZE_T(QueueBytes), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        if (g_queue == nullptr) return;
+        DWORD id = 0;
+        HANDLE thread = CreateThread(nullptr, 0, [](LPVOID) -> DWORD { DrawerMain(); return 0; }, nullptr, 0, &id);
+        if (thread == nullptr) { VirtualFree(g_queue, 0, MEM_RELEASE); g_queue = nullptr; return; }
+        SetThreadPriority(thread, THREAD_PRIORITY_ABOVE_NORMAL);
+        g_drawerThreadId = id;
+        RenderStats::SetDrawThread(thread);
+        g_queueOn = true;
+        printf("render: the drawing thread is on (Direct3D calls on their own thread; COD3_DRAWTHREAD=0 turns it off)\n");
+    }
+
+    // A draw the drawing thread can run: not one the logs, the checks or the
+    // HDR mode's scene pass look at from this thread.
+    bool Queueable(const RenderState::DrawCommand& command)
+    {
+        return command.ring && !command.logged && !command.layerQuery && !command.hdrScene &&
+               !RenderStats::DrawsTimed() && !FrameLogged() && g_picturesSwap.load(std::memory_order_relaxed) < 0;
+    }
+}
+
+bool RenderQueue::Deferring() { return t_deferring; }
+
+void RenderQueue::Sync(int site)
+{
+    if (!g_queueOn || GetCurrentThreadId() == g_drawerThreadId) return;
+    if (g_queueConsumed.load(std::memory_order_acquire) == g_queueWritten) return;
+    g_queueSyncs++;
+    g_qSyncBySite[unsigned(site) < SyncSites ? site : 0]++;
+    g_qSyncLag += g_queuedDraws - g_qExecuted.load(std::memory_order_relaxed);
+    const uint64_t started = __rdtsc();
+    if (g_queuePublished.load(std::memory_order_relaxed) != g_queueWritten) QueuePublish();
+    if (g_queueConsumed.load(std::memory_order_acquire) != g_queueWritten) g_queueSyncWaits++;
+    QueueWaitConsumed(g_queueWritten);
+    g_qSyncCycles += __rdtsc() - started;
+}
+
+namespace
+{
+    // Once a second, in render profile runs.
+    void QueueReport()
+    {
+        if (!g_queueOn || !RenderStats::Profiled()) return;
+        static auto lastTime = std::chrono::steady_clock::now();
+        static uint64_t lastTsc = __rdtsc();
+        const auto now = std::chrono::steady_clock::now();
+        const double seconds = std::chrono::duration<double>(now - lastTime).count();
+        if (seconds < 1.0) return;
+        const uint64_t tsc = __rdtsc();
+        const double perMs = double(tsc - lastTsc) / (seconds * 1000.0);
+        lastTime = now; lastTsc = tsc;
+        static uint64_t lastSyncs = 0;
+        const uint64_t syncs = g_queueSyncs - lastSyncs;
+        lastSyncs = g_queueSyncs;
+        printf("queue: %.0f syncs/s, command thread waited %.1f ms/s (avg %.0f draws behind); drawing thread busy %.1f ms/s (draws %.1f, ring writes %.1f); by site:",
+            syncs / seconds, g_qSyncCycles / perMs / seconds, syncs ? double(g_qSyncLag) / syncs : 0.0,
+            g_qBusyCycles.exchange(0) / perMs / seconds, g_qDrawCycles.exchange(0) / perMs / seconds, g_qWriteCycles.exchange(0) / perMs / seconds);
+        for (int i = 0; i < SyncSites; i++) if (g_qSyncBySite[i]) printf(" %d:%llu", i, (unsigned long long)g_qSyncBySite[i]);
+        printf("\n");
+        memset(g_qSyncBySite, 0, sizeof(g_qSyncBySite));
+        g_qSyncCycles = 0; g_qSyncLag = 0;
+    }
+}
+
+uint8_t* RenderQueue::RingWrite(ID3D11Buffer* buffer, bool discard, uint32_t offset, uint32_t bytes)
+{
+    RingRecord* record = reinterpret_cast<RingRecord*>(QueueReserve(RecordRing, uint32_t(sizeof(RingRecord) + bytes)));
+    record->buffer = buffer;
+    record->offset = offset;
+    record->size = bytes;
+    record->discard = discard ? 1 : 0;
+    return reinterpret_cast<uint8_t*>(record + 1);
+}
+
+void RenderQueue::Upload(ID3D11Resource* resource, unsigned subresource, const D3D11_BOX* box, const void* data, uint32_t bytes)
+{
+    if (box == nullptr && bytes == 0)
+    {
+        D3D11_RESOURCE_DIMENSION dimension{};
+        resource->GetType(&dimension);
+        if (dimension == D3D11_RESOURCE_DIMENSION_BUFFER)
+        {
+            D3D11_BUFFER_DESC desc{};
+            static_cast<ID3D11Buffer*>(resource)->GetDesc(&desc);
+            bytes = desc.ByteWidth;
+        }
+    }
+    // At once: not deferring, a size not worked out, or too big for the queue.
+    if (!t_deferring || bytes == 0 || bytes > RenderQueue::MaxRingWrite)
+    {
+        Sync(15);
+        g_context->UpdateSubresource(resource, subresource, box, data, 0, 0);
+        return;
+    }
+    UploadRecord* record = reinterpret_cast<UploadRecord*>(QueueReserve(RecordUpload, uint32_t(sizeof(UploadRecord) + bytes)));
+    record->resource = resource;
+    record->subresource = subresource;
+    record->hasBox = box != nullptr ? 1 : 0;
+    if (box != nullptr) record->box = *box;
+    record->size = bytes;
+    memcpy(record + 1, data, bytes);
+}
+
 void Render::MemoryFreed(uint32_t address, uint32_t size)
 {
     if (size == 0) return;
@@ -2396,7 +2801,28 @@ void Render::Draw(uint32_t initiator, uint32_t indexBase, uint32_t indexWord)
     Timed timed(RenderStats::Frame().drawNanoseconds);
     ForgetFreed();
     RenderState::DrawCommand command;
-    if (RenderCommands::PrepareDraw(initiator, indexBase, command)) ExecuteDraw(command);
+    // 0.5.391: worked out here, run on the drawing thread when it is on.
+    const bool queue = g_queueOn && g_queueActive;
+    t_deferring = queue;
+    const bool prepared = RenderCommands::PrepareDraw(initiator, indexBase, command);
+    t_deferring = false;
+    if (prepared)
+    {
+        command.blendObject = RenderPipeline::BlendObject(command.blend);
+        command.depthObject = RenderPipeline::DepthObject(command.depth);
+        command.rasterizerObject = RenderPipeline::RasterizerObject(command.rasterizer);
+        if (queue && Queueable(command)) QueueDraw(command);
+        else
+        {
+            RenderQueue::Sync(14);
+            ExecuteDraw(command);
+        }
+    }
+    if (g_queueOn && g_queuePublished.load(std::memory_order_relaxed) != g_queueWritten && ++g_unpublishedDraws >= PublishDraws)
+    {
+        g_unpublishedDraws = 0;
+        QueuePublish();
+    }
     RenderStats::Leave();
 }
 
@@ -2405,6 +2831,7 @@ void Render::Resolve()
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     if (!Start()) return;
     Timed timed(RenderStats::Frame().resolveNanoseconds);
+    RenderQueue::Sync(11);
     ForgetFreed();
     RenderState::ResolveCommand command;
     if (RenderCommands::PrepareResolve(command)) ExecuteResolve(command);
@@ -2433,6 +2860,11 @@ uint64_t Render::CurrentProgramHash(bool pixel)
 
 void Render::LogNextFrame()
 {
+    // 0.5.312: only with COD3_FRAME_LOGS=1. The screenshot key logged the
+    // next frames in full and pictured every draw (a 35 MB -draws.bin each
+    // time): Justin's game lagged badly at every screenshot.
+    static const bool wanted = []() { const char* t = getenv("COD3_FRAME_LOGS"); return t && t[0] == '1'; }();
+    if (!wanted) return;
     // A press while frames are being logged makes the run longer: starting
     // it again would cut the frame being logged short. (The first call also
     // reads the environment's choice, so it does not undo this.)
@@ -2466,6 +2898,33 @@ void Render::Swap(uint32_t frontBufferPhysical, uint32_t width, uint32_t height)
     (void)width; (void)height;
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
     if (!Start()) return;
+    RenderQueue::Sync(12);
+    CalibrateTsc();
+    QueueReport();
+    // COD3_DRAWTHREAD_TOGGLE=seconds: the drawing thread allowed and not in
+    // turns, logged as the benchmark's settings A and B.
+    // 0.5.395: and used only in frames heavy enough for the command thread
+    // to be what holds the frame (COD3_DRAWTHREAD_MIN draws, 4000; on from
+    // there, off again under three quarters of it; 0 = every frame). In
+    // lighter frames the game's own threads are what hold it, and the
+    // drawing thread's core is better left to them.
+    {
+        static bool wanted = true;
+        static const int toggle = []() { const char* t = getenv("COD3_DRAWTHREAD_TOGGLE"); return t ? atoi(t) : 0; }();
+        static auto since = std::chrono::steady_clock::now();
+        if (g_queueOn && toggle > 0 && std::chrono::steady_clock::now() - since >= std::chrono::seconds(toggle))
+        {
+            since = std::chrono::steady_clock::now();
+            wanted = !wanted;
+            printf("bench: setting %s (drawthread %s)\n", wanted ? "A" : "B", wanted ? "on when heavy" : "off");
+        }
+        static const uint32_t heavy = []() { const char* t = getenv("COD3_DRAWTHREAD_MIN"); return t ? uint32_t(atoi(t)) : 4000u; }();
+        static bool busy = false;
+        const uint32_t draws = uint32_t(RenderStats::Frame().draws);
+        if (draws >= heavy) busy = true;
+        else if (draws < heavy - heavy / 4) busy = false;
+        g_queueActive = wanted && busy;
+    }
     Overlay::NoteFrame();
     DebugProbe::Poll();
     PollDepthWritebacks();
@@ -2526,6 +2985,7 @@ void Render::PresentIdle()
     std::unique_lock<std::recursive_mutex> lock(g_mutex, std::try_to_lock);
     if (!lock.owns_lock()) return;
     if (!g_started || g_failed) return;
+    RenderQueue::Sync(13);
     PresentLocked(Settings::Get());
 }
 
@@ -2546,6 +3006,9 @@ void Render::Report()
         (unsigned long long)r.textureUploads, r.textureBytes / 1048576.0, (unsigned long long)r.bufferUploads, r.bufferBytes / 1048576.0,
         r.indexBytes / 1048576.0, r.constantBytes / 1048576.0);
     printf("        %u blend, %u depth, %u rasteriser states, %u samplers; scale %.3f\n", p.blendStates, p.depthStates, p.rasterizerStates, p.samplers, RenderResources::Scale());
+    if (g_queueOn)
+        printf("        drawing thread: %llu draws queued, %llu syncs (%llu waited)\n",
+            (unsigned long long)g_queuedDraws, (unsigned long long)g_queueSyncs, (unsigned long long)g_queueSyncWaits);
     RenderShaders::Report();
     RenderCommands::ReportSkips();
     fflush(stdout);

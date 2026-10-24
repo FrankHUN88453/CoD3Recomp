@@ -31,6 +31,21 @@ namespace RenderCommands
     // Whether the title's blur while aiming down the sights is drawn: its
     // depth of field pass, three draws the pixel programs name.
     void SetAimBlur(bool drawn);
+
+    // 0.5.234: whether the host's player is down (dead, waiting to respawn).
+    // While he is, the depth of field pass is drawn even with the blur while
+    // aiming off: the death view's "double vision" is built on it, and
+    // without it the two copies of the frame came out sharp.
+    void SetPlayerDown(bool down);
+
+    // 0.5.248: whether the host's player has the binoculars at his eyes
+    // (called every frame). While he has, the depth of field pass is drawn,
+    // and the draws left out are said when they come down.
+    void SetBinocularsUp(bool up);
+
+    // 0.5.249: the next count draws said one line each (programs, state,
+    // and drawn or why not), headed by why.
+    void DumpDraws(const char* why, int count);
     // The HDR mode's scene pass after the bloom's composite, and the bloom's
     // strength (one the game's own), from the settings at each frame's edge.
     void SetHdr(bool scenePass, float bloom, float hudGain);

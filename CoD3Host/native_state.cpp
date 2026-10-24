@@ -335,7 +335,7 @@ namespace
     // kick, read by the command processor after it.
     enum : uint8_t { NoStart = 0, StateStart = 1, RunStart = 2 };
     struct StreamPage { uint32_t header[0x4000]; uint8_t start[0x4000]; };
-    std::atomic<StreamPage*> g_streamPages[0x40000000 >> 16];   // with the extended window (kernel.h)
+    std::atomic<StreamPage*> g_streamPages[(Guest::ExtendedCpuLimit - Guest::ExtendedShift) >> 16];   // with the extended window (kernel.h; 0.5.287: to 0x47000000)
 
     StreamPage* PageOf(uint32_t physical, bool make)
     {

@@ -10,6 +10,7 @@
 #include <mutex>
 #include <vector>
 
+#include <Windows.h>
 #include <d3d11_1.h>
 #include <intrin.h>
 #include <wrl/client.h>
@@ -135,12 +136,38 @@ namespace
     }
 }
 
+// 0.5.226: multiplayer has the stats line, the draw sections and the
+// graphics card's time on by default (Justin's Marseille slowdown: the
+// game's own frame showed it is the drawing side); =0 turns one off.
+static bool RenderSwitch(const char* name)
+{
+    const char* t = getenv(name);
+#ifdef COD3_MP
+    return !(t && t[0] == '0');
+#else
+    return t != nullptr;
+#endif
+}
+
 void RenderStats::Initialize(ID3D11Device* device, ID3D11DeviceContext* context)
 {
     g_device = device;
     g_context = context;
-    g_gpuProfile = getenv("COD3_GPU_PROFILE") != nullptr;
-    g_drawsTimed = getenv("COD3_GPU_DRAWS") != nullptr;
+    g_gpuProfile = RenderSwitch("COD3_GPU_PROFILE");
+    // 0.5.228 timed every draw of one frame in eight, on in multiplayer, to
+    // find what made Marseille slow on the graphics card. 0.5.234: off
+    // again unless COD3_GPU_DRAWS=1. Its 0.5.233 log showed the card is not
+    // what holds Marseille back: the "gpu" time is the span from a frame's
+    // first command to its last on the card's clock, idle gaps included, so
+    // it is as long as the frame whenever the card waits on the drawing
+    // thread; and the draw by draw split put the same 7 to 13 microseconds
+    // on every small draw (the world's 35 triangle props as much as the
+    // depth only ones), which is the pace the commands arrive at, not what
+    // they cost. Each timed frame also took 5000 queries of that thread.
+    {
+        const char* t = getenv("COD3_GPU_DRAWS");
+        g_drawsTimed = t != nullptr && t[0] != '0';
+    }
     for (DrawFrame& frame : g_drawFrames)
     {
         if (!g_drawsTimed) break;
@@ -188,15 +215,19 @@ const char* RenderStats::SectionName(Section section)
 
 bool RenderStats::Profiled()
 {
-    static const bool wanted = getenv("COD3_RENDER_PROFILE") != nullptr;
+    static const bool wanted = RenderSwitch("COD3_RENDER_PROFILE");
     return wanted;
 }
 
 namespace
 {
-    uint64_t g_sectionStarted = 0;
-    RenderStats::Section g_section = RenderStats::SectionState;
+    // Per thread since 0.5.391: the drawing thread times its own sections.
+    thread_local uint64_t g_sectionStarted = 0;
+    thread_local RenderStats::Section g_section = RenderStats::SectionState;
+    void* g_drawThread = nullptr;
 }
+
+void RenderStats::SetDrawThread(void* thread) { g_drawThread = thread; }
 
 void RenderStats::Enter(RenderStats::Section section)
 {
@@ -221,7 +252,9 @@ void RenderStats::BeginFrame()
     {
         DrawFrame& frame = g_drawFrames[g_drawFrame % 4];
         ReadDraws(frame);
-        if (!frame.issued)
+        // 0.5.228: one frame in eight timed draw by draw (8192 timestamps a
+        // frame cost the frame rate if every frame is timed).
+        if (!frame.issued && (g_frames % 8) == 0)
         {
             g_context->Begin(frame.disjoint.Get());
             frame.issued = true;
@@ -343,6 +376,54 @@ void RenderStats::EndFrame()
     s.watchedLooks = g_second.watchedLooks / frames;
     s.uploadKilobytes = float(g_second.uploadBytes / 1024.0 / frames); s.streamKilobytes = float(g_second.streamBytes / 1024.0 / frames);
     s.frames = g_frames;
+    // 0.5.384: the old "cpu" number times Draw/Resolve/Present scopes,
+    // NOT the packet loop. Read the OS thread CPU clock once per reporting
+    // second, so packet execution is counted and sleeping/descheduling is
+    // excluded, without adding any per-packet/per-draw clock calls.
+    // Only in render-profile runs; COD3_THREADCPUPROFILE=0 disables it.
+    static const bool threadCpuProfile = []() {
+        const char* value = getenv("COD3_THREADCPUPROFILE");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (Profiled() && threadCpuProfile)
+    {
+        static DWORD previousThread = 0;
+        static uint64_t previousCpu = 0;
+        FILETIME created{}, exited{}, kernel{}, user{};
+        const DWORD thread = GetCurrentThreadId();
+        if (GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user))
+        {
+            const uint64_t cpu = (uint64_t(kernel.dwHighDateTime) << 32 | kernel.dwLowDateTime)
+                + (uint64_t(user.dwHighDateTime) << 32 | user.dwLowDateTime);
+            if (previousThread == thread && cpu >= previousCpu)
+            {
+                const double milliseconds = double(cpu - previousCpu) / 10000.0;
+                const double draws = double(g_second.draws);
+                printf("cp-thread: %.2f ms CPU/frame, %.3f us CPU/draw, %.1f%% of one core; %.1f fps, %.0f draws "
+                       "(whole thread, waiting excluded)\n",
+                    milliseconds / frames, draws > 0 ? milliseconds * 1000.0 / draws : 0.0,
+                    milliseconds / (elapsed * 10.0), s.fps, s.draws);
+            }
+            previousCpu = cpu;
+            previousThread = thread;
+        }
+        else previousThread = 0;   // prime a fresh interval after failure
+        // 0.5.391: the drawing thread's share, the same way.
+        static uint64_t previousDrawCpu = 0;
+        if (g_drawThread != nullptr && GetThreadTimes(static_cast<HANDLE>(g_drawThread), &created, &exited, &kernel, &user))
+        {
+            const uint64_t cpu = (uint64_t(kernel.dwHighDateTime) << 32 | kernel.dwLowDateTime)
+                + (uint64_t(user.dwHighDateTime) << 32 | user.dwLowDateTime);
+            if (previousDrawCpu != 0 && cpu >= previousDrawCpu)
+            {
+                const double milliseconds = double(cpu - previousDrawCpu) / 10000.0;
+                const double draws = double(g_second.draws);
+                printf("draw-thread: %.2f ms CPU/frame, %.3f us CPU/draw, %.1f%% of one core (its waiting spins included)\n",
+                    milliseconds / frames, draws > 0 ? milliseconds * 1000.0 / draws : 0.0, milliseconds / (elapsed * 10.0));
+            }
+            previousDrawCpu = cpu;
+        }
+    }
     if (Profiled())
     {
         // Cycles into time by the draw path's own clock: the sections
@@ -379,7 +460,7 @@ void RenderStats::NoteProgram(bool fromDisk) { (fromDisk ? g_fromDisk : g_compil
 
 bool RenderStats::Wanted()
 {
-    static const bool wanted = getenv("COD3_RENDER_STATS") != nullptr;
+    static const bool wanted = RenderSwitch("COD3_RENDER_STATS");
     return wanted;
 }
 

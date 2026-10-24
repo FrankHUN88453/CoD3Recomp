@@ -1,0 +1,44 @@
+diff --git a/XenonRecomp/recompiler.cpp b/XenonRecomp/recompiler.cpp
+index 0c10146..7cc61da 100644
+--- a/XenonRecomp/recompiler.cpp
++++ b/XenonRecomp/recompiler.cpp
+@@ -673,6 +673,16 @@ bool Recompiler::Recompile(
+         println("\tif ({}.u32 != 0 && !{}.eq) goto loc_{:X};", ctr(), cr(insn.operands[0] / 4), insn.operands[1]);
+         break;
+ 
++    case PPC_INST_BDNZT:
++    {
++        // Decrement the count; branch while it is not zero and the condition
++        // bit is set. Call of Duty 3's multiplayer memcmp loops on eq with it.
++        static const char* const bits[] = { "lt", "gt", "eq", "so" };
++        println("\t--{}.u64;", ctr());
++        println("\tif ({}.u32 != 0 && {}.{}) goto loc_{:X};", ctr(), cr(insn.operands[0] / 4), bits[insn.operands[0] % 4], insn.operands[1]);
++        break;
++    }
++
+     case PPC_INST_BEQ:
+         printConditionalBranch(false, "eq");
+         break;
+@@ -1792,6 +1802,10 @@ bool Recompiler::Recompile(
+         println("\tsimde_mm_store_si128((simde__m128i*){}.s16, simde_mm_subs_epi16(simde_mm_load_si128((simde__m128i*){}.s16), simde_mm_load_si128((simde__m128i*){}.s16)));", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
+         break;
+ 
++    case PPC_INST_VSUBSBS:
++        println("\tsimde_mm_store_si128((simde__m128i*){}.s8, simde_mm_subs_epi8(simde_mm_load_si128((simde__m128i*){}.s8), simde_mm_load_si128((simde__m128i*){}.s8)));", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
++        break;
++
+     case PPC_INST_VSUBUBM:
+         println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_sub_epi8(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*){}.u8)));", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
+         break;
+@@ -1850,6 +1864,11 @@ bool Recompiler::Recompile(
+             println("\t{}.s16[{}] = {}.s16[{}] >> ({}.u8[{}] & 0xF);", v(insn.operands[0]), i, v(insn.operands[1]), i, v(insn.operands[2]), i * 2);
+         break;
+ 
++    case PPC_INST_VSRB:
++        for (size_t i = 0; i < 16; i++)
++            println("\t{}.u8[{}] = {}.u8[{}] >> ({}.u8[{}] & 0x7);", v(insn.operands[0]), i, v(insn.operands[1]), i, v(insn.operands[2]), i);
++        break;
++
+     case PPC_INST_VSRAB:
+         for (size_t i = 0; i < 16; i++)
+             println("\t{}.s8[{}] = {}.s8[{}] >> ({}.u8[{}] & 0x7);", v(insn.operands[0]), i, v(insn.operands[1]), i, v(insn.operands[2]), i);

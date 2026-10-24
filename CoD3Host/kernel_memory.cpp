@@ -204,7 +204,7 @@ namespace
 
         uint32_t& next = physical ? g_physicalNext : g_virtualNext;
         // (The title's virtual allocations stop where the extended window
-        // begins, kernel.h: 256 MB, of which it uses about 16.)
+        // begins, kernel.h: 128 MB since 0.5.287, of which it uses about 16.)
         const uint32_t limit = physical ? Guest::PhysicalHeapLimit : Guest::ExtendedCpuBase;
         const uint32_t address = Align(next, alignment);
         if (!(address < next || address + size < address || address + size > limit))

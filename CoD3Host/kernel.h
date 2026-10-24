@@ -205,6 +205,9 @@ namespace Kernel
     // registers in a report; null for a thread that runs no guest code.
     PPCContext* ContextOf(uint32_t hostThreadId);
     PPCContext* CurrentContext();
+    // 0.5.240: a handler the multiplayer program puts first (mp_fixes.cpp's
+    // roster trap): given the EXCEPTION_POINTERS, true when it dealt with it.
+    extern bool (*FaultHook)(void* exceptionPointers);
 
     // COD3_DUMP names guest addresses, in hexadecimal separated by commas,
     // to print whenever something goes wrong: a bad call, a host fault. Each
@@ -399,12 +402,18 @@ namespace Guest
     // (Initialize). Where a physical address is readable in this runtime's
     // flat memory.
     // Graphics memory past 512 MB (gpu_address.cpp). The processor's
-    // addresses 0x50000000 to 0x6F000000 (above the virtual heap the title
+    // addresses 0x48000000 to 0x6F000000 (above the virtual heap the title
     // allocates from) are graphics memory too, seen by the GPU at 0x20000000
-    // to 0x3F000000: addresses the Xbox never had, which neither the 512 MB of
+    // to 0x47000000: addresses the Xbox never had, which neither the 512 MB of
     // physical memory nor its windows can mean.
-    inline constexpr uint32_t ExtendedCpuBase = 0x50000000, ExtendedCpuLimit = 0x6F000000;
-    inline constexpr uint32_t ExtendedShift = 0x30000000;   // processor address minus GPU address
+    // 0.5.287: 624 MB (was 0x50000000, 496 MB, all of it the map block with
+    // big_memory: 285's mortar archive ran it out on Eder Dam). The title's
+    // virtual heap keeps 0x40000000 to 0x48000000 (128 MB; it uses ~16).
+    // The GPU's side now reaches past 0x40000000 (bit 30): every place that
+    // keeps GPU address bits keeps it (GpuMaskBits, the stream pages, the
+    // write watch's pages).
+    inline constexpr uint32_t ExtendedCpuBase = 0x48000000, ExtendedCpuLimit = 0x6F000000;
+    inline constexpr uint32_t ExtendedShift = 0x28000000;   // processor address minus GPU address
     inline constexpr bool IsExtendedCpu(uint32_t address) { return address >= ExtendedCpuBase && address < ExtendedCpuLimit; }
     inline constexpr bool IsExtendedGpu(uint32_t address) { return address >= ExtendedCpuBase - ExtendedShift && address < ExtendedCpuLimit - ExtendedShift; }
 

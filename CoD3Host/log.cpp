@@ -102,9 +102,14 @@ void Log::Start()
     // A process started with no console at all has no standard streams to
     // put anywhere; they are opened on nothing first so there is something
     // to redirect.
+    // 0.5.216: stdin first. In a windows program (CoD3MP since 0.5.215)
+    // descriptors 0-2 are all free, so stdout reopened first took descriptor
+    // 0: the pipe went onto 1 and 2 below, stdout kept writing to 0 (NUL)
+    // and 0.5.215's CoD3MP.log stayed empty.
     if (type == FILE_TYPE_UNKNOWN)
     {
         FILE* ignoredStream = nullptr;
+        if (_fileno(stdin) < 0) freopen_s(&ignoredStream, "NUL", "r", stdin);
         freopen_s(&ignoredStream, "NUL", "w", stdout);
         freopen_s(&ignoredStream, "NUL", "w", stderr);
     }
@@ -119,10 +124,25 @@ void Log::Start()
     }
     _dup2(descriptor, 1);
     _dup2(descriptor, 2);
+    // And wherever the C streams really are (not 1 and 2 when something
+    // opened them in another order), onto the pipe as well.
+    if (_fileno(stdout) >= 0 && _fileno(stdout) != 1 && _fileno(stdout) != descriptor) _dup2(descriptor, _fileno(stdout));
+    if (_fileno(stderr) >= 0 && _fileno(stderr) != 2 && _fileno(stderr) != descriptor) _dup2(descriptor, _fileno(stderr));
     // Unbuffered, as a console is: a prompt must show before the program
     // waits for an answer, and a line must be out before a crash can lose
     // it. A normal run prints a few lines every ten seconds.
-    setvbuf(stdout, nullptr, _IONBF, 0);
+    // 0.5.370: stdout BUFFERED (64 KB) and written out every 100 ms by a
+    // small thread. Unbuffered, every printf was a write to the pipe: with
+    // bots on, some 300 lines a second, 7% of the game's main thread
+    // (BIG-PROFILE-32, WriteFile). A crash still flushes it first
+    // (kernel.cpp's last-chance handler); stderr stays unbuffered.
+    // COD3_LOG_UNBUFFERED=1: as before.
+    if (getenv("COD3_LOG_UNBUFFERED") != nullptr) setvbuf(stdout, nullptr, _IONBF, 0);
+    else
+    {
+        setvbuf(stdout, nullptr, _IOFBF, 1 << 16);
+        std::thread([] { for (;;) { std::this_thread::sleep_for(std::chrono::milliseconds(100)); fflush(stdout); } }).detach();
+    }
     setvbuf(stderr, nullptr, _IONBF, 0);
 
     g_readEnd = readEnd;

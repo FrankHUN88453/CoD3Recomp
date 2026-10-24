@@ -7,6 +7,7 @@
 #include "tuning.h"
 #include "verify.h"
 #include "texture_pack.h"
+#include "render_queue.h"
 
 #include <algorithm>
 #include <atomic>
@@ -342,6 +343,12 @@ namespace
     // hashing them whole would be tens of megabytes a frame.
     // COD3_DENSEALL=1 hashes everything whole, whatever it costs.
     constexpr size_t AlwaysDenseBytes = 256u << 10;
+    // 0.5.374: mid-frame buffers looked at by each draw's part (below).
+    bool MidFrameRanges()
+    {
+        static const bool on = getenv("COD3_MIDFRAMEHASH") == nullptr && getenv("COD3_NOMIDFRAME") == nullptr;
+        return on;
+    }
     // COD3_MISSAUDIT=1: a resource looked at by sampling is also hashed
     // whole, and a change the samples did not see is named: which memory,
     // how much, a texture or a buffer.
@@ -406,6 +413,7 @@ namespace
         uint32_t width = 0, height = 0, levels = 0;
         uint64_t bytes = 0;
         bool live = false;
+        std::string replacedFor;        // 0.5.234: the map whose own replacement this is ("" none)
         std::vector<uint8_t> sourceMirror;   // verify mode: the memory it was last made from
         uint32_t mirrorEpoch = 0;
         uint64_t verifiedFrame = 0;
@@ -584,6 +592,7 @@ namespace
     // there is room, else released.
     void ReleasePooled(ComPtr<ID3D11Texture2D>& texture, ComPtr<ID3D11ShaderResourceView>& view)
     {
+        RenderQueue::Sync(1);   // 0.5.391: no queued draw still names it
         if (TexturePoolOn() && texture && view)
         {
             D3D11_TEXTURE2D_DESC desc{};
@@ -635,6 +644,7 @@ namespace
         bool dense = true;              // the fingerprint is of every byte
         uint64_t sampled = 0;           // the sampled fingerprint, as the frame's first look found it
         bool midFrame = false;          // the title rewrites it between the draws of one frame
+        bool rangeShadow = false;       // 0.5.374: a mid-frame one with its shadow kept as what went up, each draw's part compared
         uint32_t bytes = 0;             // the buffer's size
         uint32_t seen = 0;              // the largest size a fetch asked for
         uint64_t watchedSince = 0;      // COD3_WRITEWATCH: its pages watched from this write sequence on, 0 not
@@ -696,6 +706,7 @@ namespace
 
     void DropIndexEntry(uint32_t i)
     {
+        RenderQueue::Sync(2);
         IndexEntry& entry = g_indexEntries[i];
         g_indexKeys.Erase(entry.key);
         g_resourceBytes -= entry.bytes;
@@ -958,6 +969,10 @@ namespace
     // to a texel on the screen for nobody to see the difference.
     bool UploadTexture(TextureEntry& entry, const uint32_t fetch[6], const uint8_t* data)
     {
+        // 0.5.391: textures go up on this thread, the drawing thread idle
+        // (rare once a map is in; the staging copies map the context).
+        RenderQueue::Sync(3);
+        entry.replacedFor.clear();   // 0.5.234: set again by a map's own replacement
         // The upload's two parts, timed for the hitch lines: laying the
         // texels out, then making the texture on the device.
         const auto uploadStarted = std::chrono::steady_clock::now();
@@ -1050,9 +1065,10 @@ namespace
             if (skip == 0) top = pixels[0];
             else LinearLevel(data, format, endian, width, height, pitch, tiled, packedX, packedY, top, topRow);
             const std::string key = TexturePack::Key(format, width, height, top);
+            TexturePack::NoteMap(key);   // 0.5.197: textures\maps\<map>.txt (texture_dump only)
             ID3D11Texture2D* replaced = nullptr;
             ID3D11ShaderResourceView* replacedView = nullptr;
-            if (TexturePack::Load(key, g_device, g_context, &replaced, &replacedView))
+            if (TexturePack::Load(key, g_device, g_context, &replaced, &replacedView, &entry.replacedFor))
             {
                 entry.texture.Attach(replaced);
                 entry.resource.Attach(replacedView);
@@ -1203,6 +1219,7 @@ namespace
         ComPtr<ID3D11Buffer> buffer;
         uint32_t bytes = 0;
         uint32_t offset = 0;
+        bool mappedHere = false;   // the last Map was on this thread's context, not in the queue
 
         bool Make(uint32_t size, UINT bind)
         {
@@ -1225,6 +1242,18 @@ namespace
             const uint32_t aligned = (count + alignment - 1) & ~(alignment - 1);
             D3D11_MAP mode = D3D11_MAP_WRITE_NO_OVERWRITE;
             if (offset + aligned > bytes || offset == 0) { offset = 0; mode = D3D11_MAP_WRITE_DISCARD; }
+            // 0.5.391: with the drawing thread, the bytes go in its queue
+            // and it maps the ring at the same offset, in the same way.
+            // (0.5.393: a write too big for the queue is mapped here, the
+            // drawing thread caught up first.)
+            mappedHere = !RenderQueue::Deferring() || count > RenderQueue::MaxRingWrite;
+            if (!mappedHere)
+            {
+                at = offset;
+                offset += aligned;
+                return RenderQueue::RingWrite(buffer.Get(), mode == D3D11_MAP_WRITE_DISCARD, at, count);
+            }
+            RenderQueue::Sync(16);
             D3D11_MAPPED_SUBRESOURCE mapped{};
             if (FAILED(g_context->Map(buffer.Get(), 0, mode, 0, &mapped))) return nullptr;
             at = offset;
@@ -1232,7 +1261,7 @@ namespace
             return static_cast<uint8_t*>(mapped.pData) + at;
         }
 
-        void Unmap() { g_context->Unmap(buffer.Get(), 0); }
+        void Unmap() { if (mappedHere) g_context->Unmap(buffer.Get(), 0); }
 
         uint32_t Append(const void* data, uint32_t count, uint32_t alignment)
         {
@@ -1300,6 +1329,7 @@ void RenderResources::Initialize(ID3D11Device* device, ID3D11DeviceContext* cont
 
 bool RenderResources::BeginFrame(uint64_t frame)
 {
+    RenderQueue::Sync(4);
     g_frame = frame;
     bool remade = false;
     if (g_requestedMipSkip != g_mipSkip)
@@ -1412,6 +1442,7 @@ bool RenderResources::BeginFrame(uint64_t frame)
 
 bool RenderResources::Forget(uint32_t address, uint32_t size)
 {
+    RenderQueue::Sync(5);
     const uint32_t first = Guest::GpuOffset(address), end = first + size;
     auto inside = [&](uint32_t at) { return at >= first && at < end; };
     bool dropped = false;
@@ -1594,6 +1625,7 @@ bool RenderResources::EnsureRows(uint32_t pitch, uint32_t rows)
     // targets again a row at a time.
     g_rowsAsked[pitch / 32] = (rows + 63) & ~63u;
     // The targets of this pitch go: they come back taller at the next ask.
+    RenderQueue::Sync(6);
     bool dropped = false;
     for (uint32_t i = 0; i < g_colorTargets.size(); i++)
     {
@@ -1649,6 +1681,7 @@ RenderResources::Resolved* RenderResources::ResolvedFor(uint32_t physical, uint3
     Resolved& out = entry.surface;
     if (!entry.texture || out.width != width || out.height != height || out.format != format)
     {
+        RenderQueue::Sync(7);
         if (entry.texture) g_resourceBytes -= uint64_t(out.width) * out.height * 4;
         entry.texture.Reset(); entry.resource.Reset(); entry.view.Reset();
         entry.DropCrop();
@@ -1703,8 +1736,10 @@ ID3D11ShaderResourceView* RenderResources::ResolvedView(uint32_t physical, uint3
 
     const uint32_t width = std::min(surface.width, std::max(1u, uint32_t(std::lround(double(guestWidth) * surface.width / surface.guestWidth))));
     const uint32_t height = std::min(surface.height, std::max(1u, uint32_t(std::lround(double(guestHeight) * surface.height / surface.guestHeight))));
+    if (entry.cropSerial != surface.serial || !entry.crop) RenderQueue::Sync(8);   // 0.5.391: copied on this thread
     if (!entry.crop || entry.cropGuestWidth != guestWidth || entry.cropGuestHeight != guestHeight || entry.cropWidth != width || entry.cropHeight != height)
     {
+        RenderQueue::Sync(9);
         entry.DropCrop();
         D3D11_TEXTURE2D_DESC desc{};
         desc.Width = width;
@@ -1857,6 +1892,22 @@ RenderState::Handle RenderResources::TextureForUnchecked(const uint32_t fetch[6]
     if (handle != 0)
     {
         TextureEntry& entry = g_textures[handle - 1];
+        // 0.5.234: one map's own replacement (textures\replace\maps\<map>)
+        // taken up again once another map is loading: the DLC maps' shared
+        // loading picture can sit at the same place with the same texels
+        // from one map to the next, and would keep the first map's copy.
+        if (!entry.replacedFor.empty() && entry.replacedFor != TexturePack::CurrentMapKey())
+        {
+            entry.checkedFrame = entry.usedFrame = g_frame;
+            entry.stable = 0;
+            entry.watchedSince = 0;
+            entry.dense = true;
+            entry.fingerprint = Fingerprint(data, std::min(SourceBytes(fetch), size_t(64u << 20)), true);
+            g_resourceBytes -= entry.bytes;
+            if (!UploadTexture(entry, fetch, data)) { g_textureKeys.Erase(entry.key); entry.live = false; g_freeTextures.push_back(handle); g_whiteReason = "upload failed"; return 1; }
+            g_resourceBytes += entry.bytes;
+            return handle;
+        }
         if (entry.checkedFrame == g_frame) return handle;
         const bool look = LookThisFrame(entry.stable, entry.usedFrame, handle);
         entry.usedFrame = g_frame;
@@ -1981,7 +2032,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
             && entry.buffer && entry.seen != 0 && entry.bytes >= entry.seen)
         {
             D3D11_BOX box{ 0, 0, 0, entry.seen, 1, 1 };
-            g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data, 0, 0);
+            RenderQueue::Upload(entry.buffer.Get(), 0, &box, data, box.right - box.left);
             if (entry.shadow.size() >= entry.seen) memcpy(entry.shadow.data(), data, entry.seen);
             entry.fingerprint = Fingerprint(data, entry.seen, entry.dense);
             Sent(entry, 0, entry.seen, data, "sent whole as verify mode began");
@@ -2059,7 +2110,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
                 for (const auto& [first, end] : runs)
                 {
                     D3D11_BOX box{ first, 0, 0, end, 1, 1 };
-                    g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data + first, 0, 0);
+                    RenderQueue::Upload(entry.buffer.Get(), 0, &box, data + first, box.right - box.left);
                     Sent(entry, first, end, data, "written within the frame (pieces)");
                     if (entry.shadow.size() >= end) memcpy(entry.shadow.data() + first, data + first, end - first);
                     sent += end - first;
@@ -2092,6 +2143,34 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
             }
             if (entry.midFrame)
             {
+                // 0.5.374: a small buffer the title rewrites within the
+                // frame (two of 128 KB on every map, the effects' and the
+                // treads' vertices) was hashed whole by every draw that
+                // used it: on Marseille most of the 16 MB the command
+                // thread hashed a frame. Now a copy of what went up is kept
+                // and each draw compares only the vertices it reads
+                // (LookRanges: its indices' lowest to highest), sending the
+                // pieces that differ; a draw whose vertices can't be told
+                // compares the whole buffer. COD3_MIDFRAMEHASH=1: as before.
+                if (MidFrameRanges() && entry.seen <= AlwaysDenseBytes && entry.buffer && entry.bytes >= entry.seen)
+                {
+                    if (entry.rangeShadow && entry.shadow.size() >= entry.seen) return handle;
+                    entry.shadow.assign(data, data + entry.seen);
+                    D3D11_BOX box{ 0, 0, 0, entry.seen, 1, 1 };
+                    RenderQueue::Upload(entry.buffer.Get(), 0, &box, data, box.right - box.left);
+                    Sent(entry, 0, entry.seen, data, "mid-frame, copy begun");
+                    entry.rangeShadow = true;
+                    entry.fingerprint = 0;   // looked at by its copy from now on
+                    entry.changedFrame = g_frame;
+                    g_bufferUploads.fetch_add(1, std::memory_order_relaxed);
+                    g_bufferBytes.fetch_add(entry.seen, std::memory_order_relaxed);
+                    RenderStats::Frame().bufferUploads++;
+                    RenderStats::Frame().uploadBytes += entry.seen;
+                    static int told = 0;
+                    if (told < 8 && told++ < 8)
+                        printf("render: the vertex buffer at %08X (%u bytes) changes within a frame: compared by each draw's part from now on\n", physical, entry.seen);
+                    return handle;
+                }
                 if (Fingerprint(data, entry.seen, true) == entry.fingerprint) return handle;
             }
             else
@@ -2124,6 +2203,15 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
         entry.checkedFrame = g_frame;
         entry.lookedCall = call;
         wanted = std::max(bytes, entry.seen);
+        // 0.5.374: a mid-frame buffer with its copy kept: compared with the
+        // copy, only what differs sent (the hash and the whole send of
+        // before not needed).
+        if (entry.midFrame && entry.rangeShadow && MidFrameRanges() && wanted <= entry.seen && entry.shadow.size() >= wanted
+            && entry.bytes >= wanted && entry.buffer)
+        {
+            RenderResources::LookRange(handle, physical, 0, wanted);
+            return handle;
+        }
         // Its pages watched from its last look and none written since: the
         // same as it was sent, without a byte of it hashed. Most of what
         // the command thread hashed was this: a few hundred buffers of the
@@ -2131,6 +2219,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
         // unchanged since they were loaded. COD3_HASHLIVE=1: hashed again.
         static const bool noLiveLooks = getenv("COD3_HASHLIVE") != nullptr || getenv("COD3_NOLIVEBUFFERS") != nullptr;
         const bool wasWatched = entry.liveSince != 0;
+        const uint64_t previousLive = entry.liveSince;   // 0.5.378: for the big compare below
         if (!noLiveLooks && wasWatched && wanted <= entry.seen && entry.bytes >= wanted && entry.buffer
             && WriteWatch::Clean(physical, wanted, entry.liveSince))
         {
@@ -2144,7 +2233,20 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
         // (unless its pages keep saying written when it is not: memory it
         // shares with something the title writes every frame).
         entry.liveSince = 0;
-        const bool watchStill = !noLiveLooks && wanted >= (32u << 10) && entry.stable >= StableLooks && !entry.midFrame && entry.falseWrites < 4;
+        // 0.5.377: from 4 KB up (was 32 KB). Marseille's busy views (the
+        // fingerprint audit, 0.5.376): 7500 still vertex buffers of 23 to
+        // 32 KB, the soldiers' and props' models, hashed whole every frame,
+        // 300 to 400 MB a second, just under the old size. Their pages say
+        // instead now. COD3_WATCHSTILL_KB=32: as before.
+        // 0.5.381: the 0.5.380 Marseille audit still found hundreds of MB
+        // per five seconds in 3-4 KB models, below the 4 KB cutoff. Watch
+        // stable models from 1 KB too; COD3_WATCHSTILL_KB=4 restores 380.
+        static const uint32_t watchStillBytes = []() {
+            const char* t = getenv("COD3_WATCHSTILL_KB");
+            const long kb = t != nullptr ? strtol(t, nullptr, 10) : 1;
+            return uint32_t(std::max(1L, kb)) << 10;
+        }();
+        const bool watchStill = !noLiveLooks && wanted >= watchStillBytes && entry.stable >= StableLooks && !entry.midFrame && entry.falseWrites < 4;
         if (WriteWatch::Enabled() && (wanted > AlwaysDenseBytes || watchStill) && entry.bytes >= wanted && getenv("COD3_NOLIVEBUFFERS") == nullptr)
         {
             const uint64_t since = WriteWatch::Sequence();
@@ -2172,7 +2274,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
                 path = "big, first sent whole";
                 entry.shadow.assign(data, data + wanted);
                 D3D11_BOX box{ 0, 0, 0, wanted, 1, 1 };
-                g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data, 0, 0);
+                RenderQueue::Upload(entry.buffer.Get(), 0, &box, data, box.right - box.left);
                 Sent(entry, 0, wanted, data, "big, first sent whole");
                 sent = wanted;
             }
@@ -2180,10 +2282,21 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
             {
                 uint8_t* shadow = entry.shadow.data();
                 uint32_t runStart = 0xFFFFFFFFu;
+                // 0.5.378: watched since its last look (its pages armed
+                // then, and every piece written since sent and kept in the
+                // copy by the frame's later draws): a piece none of whose
+                // pages was written since is the same as its copy, and is
+                // not compared. The twelve megabyte pool of the title's
+                // dynamic geometry was compared whole every frame, a few
+                // pieces of it written: most of the command thread's
+                // memcmp on Marseille. COD3_BIGCOMPAREALL=1: all compared.
+                static const bool compareAll = getenv("COD3_BIGCOMPAREALL") != nullptr;
+                const uint64_t pagesSince = compareAll ? 0 : previousLive;
                 for (uint32_t at = 0; at < wanted; at += BufferPieceBytes)
                 {
                     const uint32_t length = std::min(BufferPieceBytes, wanted - at);
-                    const bool changed = memcmp(data + at, shadow + at, length) != 0;
+                    const bool changed = !(pagesSince != 0 && WriteWatch::Clean(physical + at, length, pagesSince))
+                        && memcmp(data + at, shadow + at, length) != 0;
                     if (changed)
                     {
                         if (runStart == 0xFFFFFFFFu) runStart = at;
@@ -2194,7 +2307,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
                     {
                         const uint32_t end = changed ? at + length : at;
                         D3D11_BOX box{ runStart, 0, 0, end, 1, 1 };
-                        g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data + runStart, 0, 0);
+                        RenderQueue::Upload(entry.buffer.Get(), 0, &box, data + runStart, box.right - box.left);
                         Sent(entry, runStart, end, data, "big, compared by pieces");
                         sent += end - runStart;
                         runStart = 0xFFFFFFFFu;
@@ -2275,6 +2388,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
         if (entry.bytes < wanted)
         {
             path = "grown, made again";
+            RenderQueue::Sync(10);
             // Grown: made again below.
             g_resourceBytes -= entry.bytes;
             g_bufferKeys.Erase(entry.key);
@@ -2287,8 +2401,9 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
         else
         {
             D3D11_BOX box{ 0, 0, 0, wanted, 1, 1 };
-            g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data, 0, 0);
+            RenderQueue::Upload(entry.buffer.Get(), 0, &box, data, box.right - box.left);
             Sent(entry, 0, wanted, data, "changed, sent whole");
+            if (entry.rangeShadow) entry.shadow.assign(data, data + wanted);
             if (!entry.midFrame && wanted <= AlwaysDenseBytes) entry.sampled = Fingerprint(data, wanted, false);
             g_bufferUploads.fetch_add(1, std::memory_order_relaxed);
             g_bufferBytes.fetch_add(wanted, std::memory_order_relaxed);
@@ -2328,7 +2443,7 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
     view.BufferEx.Flags = D3D11_BUFFEREX_SRV_FLAG_RAW;
     if (FAILED(g_device->CreateShaderResourceView(entry.buffer.Get(), &view, &entry.resource))) { entry.buffer.Reset(); g_freeBuffers.push_back(handle); return 0; }
     D3D11_BOX box{ 0, 0, 0, wanted, 1, 1 };
-    g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data, 0, 0);
+    RenderQueue::Upload(entry.buffer.Get(), 0, &box, data, box.right - box.left);
     Sent(entry, 0, wanted, data, "new");
     entry.live = true;
     g_bufferKeys.Insert(key, handle);
@@ -2340,8 +2455,18 @@ RenderState::Handle RenderResources::VertexBufferFor(uint32_t physical, uint32_t
     return handle;
 }
 
+bool RenderResources::MidFrameRangeLook(Handle handle)
+{
+    if (handle == 0 || handle > g_buffers.size() || !MidFrameRanges()) return false;
+    const BufferEntry& entry = g_buffers[handle - 1];
+    return entry.midFrame && entry.rangeShadow && entry.buffer && entry.checkedFrame == g_frame && entry.seen <= AlwaysDenseBytes
+        && entry.shadow.size() >= entry.seen;
+}
+
 bool RenderResources::NeedsRangeLook(Handle handle)
 {
+    // 0.5.374: a mid-frame buffer kept by its copy: always (above).
+    if (MidFrameRangeLook(handle)) return true;
     // COD3_NORANGELOOKS=1: once a frame, as before.
     static const bool off = getenv("COD3_NORANGELOOKS") != nullptr;
     if (off || !Tuning::On(Tuning::rangeLooks) || handle == 0 || handle > g_buffers.size()) return false;
@@ -2384,7 +2509,7 @@ void RenderResources::LookRange(Handle handle, uint32_t physical, uint32_t first
             {
                 const uint32_t end = changed ? at + length : at;
                 D3D11_BOX box{ runStart, 0, 0, end, 1, 1 };
-                g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data + runStart, 0, 0);
+                RenderQueue::Upload(entry.buffer.Get(), 0, &box, data + runStart, box.right - box.left);
                 Sent(entry, runStart, end, data, "range looked at again by a draw");
                 sent += end - runStart;
                 runStart = 0xFFFFFFFFu;
@@ -2396,7 +2521,7 @@ void RenderResources::LookRange(Handle handle, uint32_t physical, uint32_t first
         // No copy kept (under a megabyte): the part is sent as it is, and
         // the next frame's look, finding the memory changed, sends it whole.
         D3D11_BOX box{ firstByte, 0, 0, endByte, 1, 1 };
-        g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data + firstByte, 0, 0);
+        RenderQueue::Upload(entry.buffer.Get(), 0, &box, data + firstByte, box.right - box.left);
         Sent(entry, firstByte, endByte, data, "range sent again by a draw");
         sent = endByte - firstByte;
         // Not a change found, so not counted as one: whether it keeps
@@ -2430,7 +2555,7 @@ void RenderResources::VerifyRange(Handle handle, uint32_t physical, uint32_t fir
     // Sent again, so the picture is right and one miss is not said by
     // every draw after it.
     D3D11_BOX box{ firstDiff, 0, 0, lastDiff + 1, 1, 1 };
-    g_context->UpdateSubresource(entry.buffer.Get(), 0, &box, data + firstDiff, 0, 0);
+    RenderQueue::Upload(entry.buffer.Get(), 0, &box, data + firstDiff, box.right - box.left);
     memcpy(entry.mirror.data() + firstDiff, data + firstDiff, lastDiff + 1 - firstDiff);
     if (entry.shadow.size() >= lastDiff + 1) memcpy(entry.shadow.data() + firstDiff, data + firstDiff, lastDiff + 1 - firstDiff);
 }
@@ -2512,7 +2637,26 @@ ID3D11Buffer* RenderResources::IndexBufferFor(uint32_t physical, uint32_t count,
     const uint32_t guestBytes = count * (wide ? 4 : 2);
     const uint32_t key[4] = { Guest::GpuOffset(physical), count, wide ? 1u : 0u, reset };
     const uint8_t* data = Guest::Base + Guest::PhysicalAlias(physical);
-    Handle handle = g_indexKeys.Find(key);
+    // 0.5.383: a small front cache avoids the full four-word key-table
+    // hash/probe on repeated index ranges. Handles only: validate the live
+    // entry's ENTIRE key, including count/width/reset, after handle reuse or
+    // resource eviction. This never bypasses page/content validation below.
+    // COD3_INDEXLOOKUPCACHE=0 restores the ordinary table lookup.
+    static const bool fastLookup = []() {
+        const char* value = getenv("COD3_INDEXLOOKUPCACHE");
+        return value == nullptr || value[0] != '0';
+    }();
+    static constexpr uint32_t FrontSize = 2048;
+    static Handle front[FrontSize] = {};
+    const uint32_t frontSlot = ((key[0] >> 4) ^ (key[0] >> 16)
+        ^ (count * 0x9E3779B9u) ^ reset ^ (wide ? 0x85EBCA6Bu : 0)) & (FrontSize - 1);
+    Handle handle = fastLookup ? front[frontSlot] : 0;
+    if (handle != 0)
+    {
+        const IndexEntry& cached = g_indexEntries[handle - 1];
+        if (!cached.live || memcmp(cached.key, key, sizeof(cached.key)) != 0) handle = 0;
+    }
+    if (handle == 0) handle = g_indexKeys.Find(key);
     if (handle == 0)
     {
         // A candidate: noted, streamed this time.
@@ -2525,8 +2669,10 @@ ID3D11Buffer* RenderResources::IndexBufferFor(uint32_t physical, uint32_t count,
         entry.usedFrame = g_frame;
         entry.live = true;
         g_indexKeys.Insert(key, handle);
+        if (fastLookup) front[frontSlot] = handle;
         return nullptr;
     }
+    if (fastLookup) front[frontSlot] = handle;
     IndexEntry& entry = g_indexEntries[handle - 1];
     entry.usedFrame = g_frame;
     if (entry.watchedSince != 0)
@@ -2547,7 +2693,7 @@ ID3D11Buffer* RenderResources::IndexBufferFor(uint32_t physical, uint32_t count,
         entry.fingerprint = fingerprint;
         entry.stable = 0;
         if (!entry.buffer) return nullptr;
-        g_context->UpdateSubresource(entry.buffer.Get(), 0, nullptr, ConvertIndices(data, count, wide, reset, indices32), 0, 0);
+        RenderQueue::Upload(entry.buffer.Get(), 0, nullptr, ConvertIndices(data, count, wide, reset, indices32), 0);
         RenderStats::Frame().bufferUploads++;
         RenderStats::Frame().uploadBytes += entry.bytes;
         return entry.buffer.Get();

@@ -27,6 +27,9 @@ struct ID3D11Texture2D;
 struct ID3D11VertexShader;
 struct ID3D11PixelShader;
 struct ID3D11Buffer;
+struct ID3D11BlendState;
+struct ID3D11DepthStencilState;
+struct ID3D11RasterizerState;
 
 namespace RenderState
 {
@@ -260,6 +263,12 @@ namespace RenderState
         // Housekeeping.
         bool bindingsLost = false;      // a cache dropped objects: forget what is bound first
         bool logged = false;            // the frame log wants the target after the draw
+
+        // 0.5.391: the state objects for the handles, looked up on the
+        // command thread (the tables grow there) for the drawing thread.
+        ID3D11BlendState* blendObject = nullptr;
+        ID3D11DepthStencilState* depthObject = nullptr;
+        ID3D11RasterizerState* rasterizerObject = nullptr;
     };
 
     // A resolve, ready to run: a copy of a target into the surface the

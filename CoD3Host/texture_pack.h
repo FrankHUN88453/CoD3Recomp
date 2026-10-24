@@ -30,10 +30,20 @@ namespace TexturePack
     // the console's byte order undone: BC1..3 blocks, or RGBA8 / R8 texels).
     std::string Key(uint32_t format, uint32_t width, uint32_t height, const std::vector<uint8_t>& linear);
 
+    // 0.5.197: with texture_dump on, the key listed once a map in
+    // textures\maps\<map>.txt (which textures each map uses).
+    void NoteMap(const std::string& key);
+
     // Saved once, when texture_dump is on.
     void Dump(const std::string& key, uint32_t format, uint32_t width, uint32_t height, const std::vector<uint8_t>& linear);
 
     // The replacement for this key, made into a texture, when there is one.
+    // 0.5.234: textures\replace\maps\<map>\<key>.png wins while that map
+    // is loaded; forMap then says which map (empty for any other).
     bool Load(const std::string& key, ID3D11Device* device, ID3D11DeviceContext* context,
-              ID3D11Texture2D** texture, ID3D11ShaderResourceView** view);
+              ID3D11Texture2D** texture, ID3D11ShaderResourceView** view, std::string* forMap = nullptr);
+
+    // 0.5.234: the map a per-map replacement goes with, lower case, as Load
+    // compares it ("" in the menus).
+    std::string CurrentMapKey();
 }

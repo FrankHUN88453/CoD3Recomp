@@ -48,6 +48,8 @@ void MpFixesAskVehicle(const std::string& kind);   // mp_fixes.cpp
 void BotsAsk(int count);
 void BotsTactics(int enabled);
 void BotsCamera(int enabled);
+void BotsPose(const std::string& args);       // bots.cpp, 0.5.206: bot_pose
+void BotsPoseTest(const std::string& args);   // bot_pose_test
 void BotsSetup(int bits);                           // bots.cpp
 void BotsRemote(int enabled);                       // bots.cpp (0.5.135)
 void BotsLocal(int enabled);                        // bots.cpp (0.5.137)
@@ -61,6 +63,11 @@ void MpFixesKangarooDrop(float amount);
 void MpFixesKangarooBuild(int mode);                // mp_fixes.cpp (0.5.99)
 void MpFixesVehicleOrder(int what, const std::string& kind);   // mp_fixes.cpp
 void MpFixesGiveStreak(const std::string& kind);   // mp_fixes.cpp
+void MpFixesPlaneSoundTest(const std::string& args);   // mp_fixes.cpp (0.5.264)
+void MpFixesPlaneModelTest(const std::string& args);   // mp_fixes.cpp (0.5.267)
+void MpFixesPlaneEngine(const std::string& args);   // mp_fixes.cpp (0.5.272)
+void MpFixesMortarYaw(const std::string& args);     // mp_fixes.cpp (0.5.303)
+void MpFixesMortarView(const std::string& args);    // mp_fixes.cpp (0.5.309)
 #endif
 
 namespace
@@ -467,9 +474,19 @@ namespace
         // host: the frame rate is the machine's from the menu on.
         return true;
 #else
+        // 0.5.221: Justin: the campaign at 144 or more, as multiplayer. Its
+        // levels already were (0.5.215's log: 144 fps in a level, with
+        // frame_cap 144); its menus stayed at the console's rate. Now only
+        // a film playing (the film player at 0x82A2A24C: the intros, the
+        // briefings while a level loads, a menu's moving background) keeps
+        // the console's rate, so films keep their speed; the menus and the
+        // levels run at the machine's (capped by frame_cap). COD3_SPMENUFPS=0
+        // puts the menus back to the console's rate.
+        static const bool menusToo = []() { const char* t = getenv("COD3_SPMENUFPS"); return !(t && t[0] == '0'); }();
+        if (Guest::Read32(Guest::Base, 0x82A2A24Cu) != 0) return false;
+        if (menusToo) return true;
         const uint32_t running = Guest::Read32(Guest::Base, 0x829BAB18u);
-        if (running == 0 || Guest::Read32(Guest::Base, running + 32) == 0) return false;
-        return Guest::Read32(Guest::Base, 0x82A2A24Cu) == 0;
+        return running != 0 && Guest::Read32(Guest::Base, running + 32) != 0;
 #endif
     }
 
@@ -487,7 +504,7 @@ namespace
         if (now != g_frameRateUnlocked.load(std::memory_order_relaxed))
         {
             g_frameRateUnlocked.store(now, std::memory_order_relaxed);
-            printf("video: the frame rate is %s\n", now ? "unlocked, a level is played" : "the console's");
+            printf("video: the frame rate is %s\n", now ? "unlocked (the machine's, up to frame_cap)" : "the console's (a film, or unlocking is off)");
             fflush(stdout);
         }
     }
@@ -1097,6 +1114,55 @@ namespace
                         fflush(stdout);
                         continue;
                     }
+                    // plane_sound <plane|origin|me|bot> <flyby|engine|flag> (0.5.264):
+                    // where the UAV plane's sound is played and which, played once now.
+                    if (command.compare(0, 11, "plane_sound") == 0)
+                    {
+                        std::string args = command.size() > 12 ? command.substr(12) : std::string();
+                        while (!args.empty() && (args.back() == ' ' || args.back() == '\r' || args.back() == '\n')) args.pop_back();
+                        MpFixesPlaneSoundTest(args);
+                        printf("video: plane_sound %s asked for\n", args.c_str());
+                        fflush(stdout);
+                        continue;
+                    }
+                    // mortar_view <forward> <right> <up> (0.5.309): the camera at the mortar, live.
+                    if (command.compare(0, 11, "mortar_view") == 0)
+                    {
+                        std::string args = command.size() > 12 ? command.substr(12) : std::string();
+                        MpFixesMortarView(args);
+                        printf("video: mortar_view %s asked for\n", args.c_str());
+                        fflush(stdout);
+                        continue;
+                    }
+                    // mortar_yaw <deg> (0.5.303): the mortar tube's facing, live.
+                    if (command.compare(0, 10, "mortar_yaw") == 0)
+                    {
+                        std::string args = command.size() > 11 ? command.substr(11) : std::string("0");
+                        MpFixesMortarYaw(args);
+                        printf("video: mortar_yaw %s asked for\n", args.c_str());
+                        fflush(stdout);
+                        continue;
+                    }
+                    // plane_engine <cue> <ms> (0.5.272): the UAV plane's engine sound.
+                    if (command.compare(0, 12, "plane_engine") == 0)
+                    {
+                        std::string args = command.size() > 13 ? command.substr(13) : std::string();
+                        while (!args.empty() && (args.back() == ' ' || args.back() == '\r' || args.back() == '\n')) args.pop_back();
+                        MpFixesPlaneEngine(args);
+                        printf("video: plane_engine %s asked for\n", args.c_str());
+                        fflush(stdout);
+                        continue;
+                    }
+                    // plane_model <name> [clear] (0.5.267): a model in front of you.
+                    if (command.compare(0, 11, "plane_model") == 0)
+                    {
+                        std::string args = command.size() > 12 ? command.substr(12) : std::string();
+                        while (!args.empty() && (args.back() == ' ' || args.back() == '\r' || args.back() == '\n')) args.pop_back();
+                        MpFixesPlaneModelTest(args);
+                        printf("video: plane_model %s asked for\n", args.c_str());
+                        fflush(stdout);
+                        continue;
+                    }
                     if (command.compare(0, 13, "scope_breath ") == 0)
                     {
                         Input::SetScopedBreath(atoi(command.c_str() + 13) != 0);
@@ -1105,6 +1171,18 @@ namespace
                     if (command.compare(0, 12, "bot_tactics ") == 0)
                     {
                         BotsTactics(atoi(command.c_str() + 12));
+                        continue;
+                    }
+                    // 0.5.206: bot_pose <guns> [distance] [facing] / bot_pose off,
+                    // bot_pose_test [distance] (bots.cpp: how guns sit in hands).
+                    if (command.compare(0, 13, "bot_pose_test") == 0)
+                    {
+                        BotsPoseTest(command.substr(13));
+                        continue;
+                    }
+                    if (command.compare(0, 9, "bot_pose ") == 0)
+                    {
+                        BotsPose(command.substr(9));
                         continue;
                     }
                     if (command.compare(0, 11, "bot_camera ") == 0)

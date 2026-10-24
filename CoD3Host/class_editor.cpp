@@ -37,12 +37,12 @@ namespace
 
     const char* const Weapons[] = { "CLASS WEAPON", "M1 GARAND", "THOMPSON", "BAR", "SPRINGFIELD (SCOPED)", ".30 CAL MG", "BAZOOKA",
                                     "TRENCH GUN", "KAR98K", "MP40", "STG 44", "KAR98K (SCOPED)", "MG34", "PANZERSCHRECK",
-                                    "LEE-ENFIELD", "BREN", "STEN", "FG42", "FG42 (SCOPED)" };
+                                    "LEE-ENFIELD", "BREN", "STEN", "FG42", "FG42 (SCOPED)", "GEWEHR 43", "MG42", "LEE-ENFIELD (SCOPED)" };
     const char* const Bases[] = { "AS PICKED", "HEAVY ASSAULT", "LIGHT ASSAULT", "RIFLEMAN", "MEDIC", "SUPPORT", "ANTI-ARMOR", "SCOUT" };
     const char* const Sidearms[] = { "SIDE'S OWN", "COLT .45", "P38", "M1 GARAND", "THOMPSON", "BAR", "SPRINGFIELD (SCOPED)",
                                      ".30 CAL MG", "BAZOOKA", "TRENCH GUN", "KAR98K", "MP40", "STG 44", "KAR98K (SCOPED)", "MG34",
-                                     "PANZERSCHRECK", "LEE-ENFIELD", "BREN", "STEN", "FG42", "FG42 (SCOPED)" };
-    const char* const GrenadeTypes[] = { "SIDE'S OWN", "FRAG (US)", "STICK (GERMAN)", "MILLS BOMB (BRITISH)" };
+                                     "PANZERSCHRECK", "LEE-ENFIELD", "BREN", "STEN", "FG42", "FG42 (SCOPED)", "GEWEHR 43", "MG42", "LEE-ENFIELD (SCOPED)" };
+    const char* const GrenadeTypes[] = { "SIDE'S OWN", "FRAG (US)", "STICK (GERMAN)", "MILLS BOMB (BRITISH)", "STICKY BOMB (BRITISH)" };
     const char* const GrenadeCounts[] = { "USUAL", "1", "2", "3", "4" };
 
     enum Row { RowClass, RowBase, RowPrimary, RowSidearm, RowGrenadeType, RowGrenades, RowCount };
@@ -57,9 +57,9 @@ namespace
         else if (slot >= 0)
         {
             if (g_row == RowBase) v.classBase[slot] = Wrap(v.classBase[slot] + step, 8);
-            else if (g_row == RowPrimary) v.classPrimary[slot] = Wrap(v.classPrimary[slot] + step, 19);
-            else if (g_row == RowSidearm) v.classSidearm[slot] = Wrap(v.classSidearm[slot] + step, 21);
-            else if (g_row == RowGrenadeType) v.classGrenadeType[slot] = Wrap(v.classGrenadeType[slot] + step, 4);
+            else if (g_row == RowPrimary) v.classPrimary[slot] = Wrap(v.classPrimary[slot] + step, int(sizeof(Weapons) / sizeof(Weapons[0])));
+            else if (g_row == RowSidearm) v.classSidearm[slot] = Wrap(v.classSidearm[slot] + step, int(sizeof(Sidearms) / sizeof(Sidearms[0])));
+            else if (g_row == RowGrenadeType) v.classGrenadeType[slot] = Wrap(v.classGrenadeType[slot] + step, 5);
             else if (g_row == RowGrenades) v.classGrenades[slot] = Wrap(v.classGrenades[slot] + step, 5);
         }
         Settings::Set(v);
@@ -101,7 +101,7 @@ namespace
         {
             values[RowBase] = Bases[v.classBase[slot]];
             values[RowPrimary] = Weapons[v.classPrimary[slot]];
-            values[RowSidearm] = Sidearms[v.classSidearm[slot] >= 0 && v.classSidearm[slot] < 21 ? v.classSidearm[slot] : 0];
+            values[RowSidearm] = Sidearms[v.classSidearm[slot] >= 0 && v.classSidearm[slot] < int(sizeof(Sidearms) / sizeof(Sidearms[0])) ? v.classSidearm[slot] : 0];
             values[RowGrenadeType] = GrenadeTypes[v.classGrenadeType[slot]];
             values[RowGrenades] = GrenadeCounts[v.classGrenades[slot]];
         }

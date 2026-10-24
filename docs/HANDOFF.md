@@ -1,9 +1,44 @@
 # CoD3 Recomp: handoff for the next assistant
 
-Last updated **October 16, 2026**. Installed/source **0.5.183**.
+Last updated **October 23, 2026**. Source / local install: **0.5.407 / 0.5.407** (Claude 18:35: Rimling 32p median 45 -> 65 fps; heap-freeze watch "heapwait:"; see NEXT-SESSION top "STATE")
+
+**START HERE (Claude, 2026-10-23 19:55):** docs/PICK-ME-UP.md, then the top "# STATE" lines of docs/NEXT-SESSION.md and the newest entries of docs/PATCH-NOTES.md. Next build is **0.5.408**. docs/CODEX-HANDOFF-0.5.384.md is HISTORY (it says next is 0.5.385; that is out of date). GitHub release NOT done yet: public repo hovg-N8/CoD3Recomp is still at 0.5.183. Claude's session had no GitHub account linked (add_repo refused). Release text ready: docs/RELEASE-0.5.407.md (source only, no binaries, credit FrankHUN88453/CoD3Recomp). Upload handwritten source/docs/scripts only.
+
+**READ FIRST (2026-10-23, Codex):** the detailed older sections below stop
+at 0.5.304. Current work is documented in docs/PICK-ME-UP.md and
+HANDOFF-MARSEILLE-60FPS.md; every build is at the top of NEXT-SESSION.md
+and PATCH-NOTES.md. Read those before using historical state below.
+Latest: 380 packet diagnostics improved busy views; 381 lowered vertex watch
+threshold and cut scanning, but busiest-view speed essentially unchanged.
+382 removes more diagnostic packet copies; tested, busy CPU ~3.13 us/draw.
+383 index-key front cache tested: no clear matched-bin fps gain; provisional.
+384 true whole-thread CPU measurement tested. See CODEX-HANDOFF-0.5.384.md for final crash/control results. Reproducible
+380/381 results and local log/backup paths: VALIDATION-0.5.380-381.md.
+
 Read HANDOFF first, then latest PATCH-NOTES. Never upload game files.
 
-## GitHub source checkpoint — October 16, 2026
+**Two teams now (2026-10-17):** also read and update docs/SHARED-LOG.md
+every build. Justin's friend + his AI work from the source package Justin
+sends (latest: D:/Call of Duty 3 (USA, Europe)/CoD3Recomp-0.5.207-source.zip;
+handwritten source only), versions 0.5.901+. Main line stays 0.5.194+.
+Merge their files by hand (delta between their packages, patch -F2).
+Start a new session at docs/NEXT-SESSION.md.
+
+## GitHub publication VERIFIED ï¿½ October 16, 2026
+
+Published main: 71fd81c27996c7e6a50fe7c680708fc52c79f3d2
+https://github.com/hovg-N8/CoD3Recomp/commit/71fd81c27996c7e6a50fe7c680708fc52c79f3d2
+Desktop push complete and independent remote SHA verification PASS.
+GitHub Desktop's existing clean checkout (now fast-forwarded to this commit):
+D:/Call of Duty 3 (USA, Europe)/CoD3Recomp-main/CoD3Recomp-main/CoD3Recomp
+Use that checkout for future pushes. Scratch checkout below is a review copy.
+CLI git-remote-https.exe crashed during push; Desktop succeeded. No game
+crash/build occurred. 35 source/docs/test files; portable tests PASS; no game
+files, binaries, generated game code, runtime logs or dumps uploaded.
+Publication record: chat work/github-publication-0.5.183.txt.
+This confirmation is local; published handoff contains the preparation record.
+
+## GitHub source checkpoint ï¿½ October 16, 2026
 
 User authorized updating https://github.com/hovg-N8/CoD3Recomp through183.
 Source ZIP folder has no .git. Dedicated checkout for future pushes:
@@ -16,6 +51,2855 @@ archives or dumps. Preserve fork README credits and expanded .gitignore.
 Build/match test status unchanged by publication; see VALIDATION-0.5.183.md.
 
 ## CURRENT CHECKPOINT - this supersedes historical build/test claims below
+
+### 304 SOURCE CHANGE (Claude, 2026-10-20): interact arms for the mortar
+
+### 303 SOURCE CHANGE (Claude, 2026-10-20): Laison weapons' drawing set-up; mortar_yaw
+
+### 302 SOURCE CHANGE (Claude, 2026-10-20): mortar_shell in hand; interaction end
+
+### 301 SOURCE CHANGE (Claude, 2026-10-20): mortar interaction from mortar_idle
+
+### 300 SOURCE CHANGE (Claude, 2026-10-20): campaign mortar interaction
+
+- mp_fixes.cpp MortarInteraction (sub_8251AE38 on the local controller);
+  input.cpp/.h SetMortarPassFire.
+
+### 299 SOURCE CHANGE (Claude, 2026-10-20): mortar_81mm model, sky kept out
+
+### 298 SOURCE CHANGE (Claude, 2026-10-20): mortar-only KAPF copies
+
+- mp_fixes.cpp: KapfFilter/MakeMortarArchives (file lists cut down), the
+  three ExtraArchives point at the copies, g_laisonZoneArchive (zn08's arms).
+  docs/KILLCAM-PLAN.md: killcam design draft.
+
+### 297 SOURCE CHANGE (Claude, 2026-10-20): Laison off; vehicle read once a map
+
+### 296 SOURCE CHANGE (Claude, 2026-10-20): Laison after the map; KAPF notes
+
+- MpFixesLoadMortarArchive keeps a bank copy; MpFixesLoadLaisonAfterMap (from
+  the sub_82561838 hook, before the mortar vehicle read) loads laison + fx,
+  interactions, then MpFixesLaisonWeapons. KAPF format notes in NEXT-SESSION.
+
+### 295 SOURCE CHANGE (Claude, 2026-10-20): Laison archive off by default
+
+- COD3_CAMPAIGN_MORTAR=1 to load it (breaks Fuel Plant's world).
+
+### 294 SOURCE CHANGE (Claude, 2026-10-20): Laison out of map/zone asset lists
+
+- 292 confirmed the invisible world is Laison's archives. sub_82474CB8 hook
+  skips g_laisonArchive/g_laisonFxArchive for lists of kind 3/4 archives.
+
+### 293 SOURCE CHANGE (Claude, 2026-10-20): weapon room past 63 (test)
+
+- Tables hold 91 weapons; the 63 cap is the player mask (state +1056, 2
+  words, ~100 sites). COD3_WEAPONS_PAST_63=1: Laison's turret/round may be
+  64-65. Phase 2 (bigger mask) not started.
+
+### 292 SOURCE CHANGE (Claude, 2026-10-20): 63-weapon limit
+
+- Player weapon ownership is a 64-bit mask (state +1056..+1063; slots
+  +1064): weapon numbers must stay <= 63. MakeGun and the Laison weapons
+  read check it; mortar_hands removed from Guns[].
+
+### 291 SOURCE CHANGE (Claude, 2026-10-20): campaign mortar files from Laison
+
+- mp_fixes.cpp: g_laisonFile/g_laisonFxFile (LoadExtra after the mortar
+  archive), g_laisonArchive/g_laisonFxArchive in the asset lists; filtered
+  WEAPONFILE read (mortar_81mm_turret, mortar_shell) at the end of the
+  sub_8249E970 hook; filtered VEHICLEFILE read (mortar_81mm) in the
+  sub_82561838 hook (new sub_825683D8 hook); 82515CB8 for the interactions;
+  MortarCampaignWeapons() picks the campaign effects for the streak rounds.
+
+### 290 SOURCE CHANGE (Claude, 2026-10-20): Fuel Plant plane x1.11, radius back
+
+### 289 SOURCE CHANGE (Claude, 2026-10-20): mortar hands from binoculars; Fuel Plant plane
+
+- mortar_hands from mp_binoculars_nospot (288's interact copy drew nothing).
+  MpFixesPlaneFrame: mp_fuel cz = ground + 1498, radius x0.92.
+
+### 288 SOURCE CHANGE (Claude, 2026-10-20): mortar hands
+
+- mp_fixes.cpp: Guns[] mortar_hands (from interact, armsFrom interact_idle_a
+  -> ei_MortarIdle, v_81mm_shell models, archive 2); CampaignAnimEntry maps
+  w_arms_interact_idle_a -> w_arms_ei_MortarIdle; MortarHands() in
+  MortarStart/MortarStop. Load anim + mortar fx: only in laison.cod/fx.cod.
+
+### 287 SOURCE CHANGE (Claude, 2026-10-20): extended window 624 MB
+
+- kernel.h ExtendedCpuBase 0x48000000 (was 0x50000000), ExtendedShift
+  0x28000000; GPU extended 0x20000000-0x47000000. gpu_address.cpp
+  GpuMaskBits mask | 0xE0000000; write_watch.cpp Pages and native_state.cpp
+  g_streamPages to the window end; mp_fixes.cpp sub_820E0158 big map block
+  0x26000000 (608 MB). Mortar archive (laison vehicles) on with big_memory.
+
+### 286 SOURCE CHANGE (Claude, 2026-10-20): mortar archive off
+
+- 285 hung Eder Dam loading sp\\laison\\weapons.cod (4th gun archive) after
+  the +8 MB sp\\laison\\vehicles.cod: map block full. MpFixesLoadMortarArchive
+  only with COD3_MORTAR_MODEL=1.
+
+### 285 SOURCE CHANGE (Claude, 2026-10-20): mortar killstreak
+
+- mp_fixes.cpp, block "0.5.285: THE MORTAR KILLSTREAK" (before the
+  killstreak box): MortarUse (local), MortarShell[16], MortarProp[4]
+  (others' tubes), MortarSoundAt (script_origin pool of 3, the plane's
+  toward-listener placement), MortarLaunch/MortarBlast (G_Damage 825862F8:
+  r3 target r4/r5 attacker r6 0 r7 point r8 damage r9 0 r10 14
+  MOD_MORTAR_SPLASH, stack +84 0 +92 -1 as sub_8258A040), MpFixesMortarFrame
+  (from MpFixesPlaneFrame), MpFixesMortarPacket ('f' C3MF, 'p' C3MP, 'm'
+  C3KM), MpFixesMortarUsedOut. Streak.mortars; earned at MortarKills() (4).
+  StreakKind + StreakMortar (box 4 kinds); HUD ring/panel in StreakHudDraw.
+  MpFixesModelFound(name). g_mortarFile sp\laison\vehicles.cod (8 MB),
+  loaded after the Stuka (before the guns) or before the planes without
+  campaign guns; g_mortarArchive in the asset lists (sub_82474CB8).
+  PlaneNetVersion 3, C3KS 4 bytes/entry.
+- input.cpp/.h: SetMortar/TakeMortarFires (held in place, RT counted).
+- bots.cpp (end, inside COD3_MP): BotsSideOf, BotsGroundZ, BotsLineClear.
+- lobby_rules.cpp: C3KM/C3MF/C3MP dispatched.
+- To tune from the first test: kMortarYawOffset (tube direction),
+  shell pitch (-90 offset), cue names (Mortar_Slide/Fire/Miss/Explo).
+
+### 284 SOURCE CHANGE (Claude, 2026-10-20): Demolitionist kit
+
+- bot_kits.h: Kit.secondary[24], sticky, label[16]; Parse: optional cols
+  6 (second weapon, KnownPrimary or -) and 7 (frag|sticky|-); class
+  "demolitionist" = 2 (rifleman: rifle-grenade special) with label.
+  Default + Justin's bot_kits.txt line: 2 demolitionist bren 2 0 mg42 sticky.
+- mp_fixes.cpp: thread_local g_botSpawnSecondary/g_botSpawnSticky set in
+  the sub_82206028 hook (BotsSecondaryName/BotsKitSticky, bots.cpp);
+  sub_821DF378: bot pistol name -> WeaponName(second); sub_821E6238: bot
+  sticky -> 0x82039438 ("stickygrenade").
+- bots.cpp: the last 4 "slot=4" loops (BotSlot, kit balance, ReKit, kit
+  helpers) -> FirstBotSlot().
+
+### 283 SOURCE CHANGE (Claude, 2026-10-20): bots in spare local slots (full 32)
+
+- player_capacity.h: BotsInLocalSlots() (COD3_BOTS_ALL_SLOTS != "0"),
+  FirstBotSlot() 1 or 4, MaxBotsNow() = Active() - 1 (or - 4).
+- bots.cpp: AddBot searches 4..31, then 3, 2, 1; 26 "for (x = 4; x <
+  ActiveSlots()" loops -> FirstBotSlot() (each checks g_bot); CommandPlayer
+  (own ring for a bot below 4), SV_GetUsercmd hook, IsBotSessionPlayer,
+  localBot, killfeed "who", player-dies hook: from FirstBotSlot.
+- Unverified: the title's local-player code for clients 1-3 (loopback in
+  sub_825334E8 is per local player entry; bots skip snapshots); the
+  scoreboard shows at most 24 rows (ROWFULL, 248).
+
+### 282 SOURCE CHANGE (Claude, 2026-10-20): lookouts + decay
+
+- bots.cpp: BotLookout {at, yaw, score, usedAt}, g_lookouts (300 max);
+  BotsLearnKill(attacker, victim) (mp_fixes G_Damage hook when the
+  target's +776 goes <= 0): flat >= 1100 -> merge (160 units, 80 z, 35 deg:
+  score +1, yaw +30% of the gap) or add. LookoutFile = <map>.lookouts.txt;
+  LoadLookouts at map change (score x0.85, < 0.5 dropped); saved with the
+  map knowledge (SaveMapKnowledge). Map nodes deaths/kills/failed x0.85
+  after Load. BestLookout(around, range): score - d/2000 > 1.4, not taken,
+  not used in 60 s. Sniper errand: dest = Nearest(lookout) when free; at
+  arrival the lookout's way (x2) first in ex.watch. ExploreStep route:
+  kit 6 or sniper within 200 / 80 z of a lookout (score >= 1, not the last
+  one within 90 s): hold 4-6 s (holdUntil, scanUntil, scanYaw sweep 0.6
+  rad), giveUpAt extended. "near" is a Windows macro (renamed around).
+- Full 32: PlayerCapacity::ReservedLocalClients = 4: bots in slots 4..31
+  (28 at 32). People: host 0, joiner(s) 1..3.
+
+### 281 SOURCE CHANGE (Claude, 2026-10-19): killfeed victim by side
+
+- bots.cpp sub_82529D78 hook: the victim (r7) painted by his side (+520
+  -> +4) against g_feedLine.hostSide (this machine's player): red if not
+  the same; no side = red (245 rule: victim always red). Killer as before.
+
+### 280 SOURCE CHANGE (Claude, 2026-10-19): Poissons +1600, radius x0.98
+
+- 279 log: 20 "of another player not played" (raise x15, rechamber x4),
+  own events still traced ("= me" 10). Plane at 686 on Poissons.
+
+### 279 SOURCE CHANGE (Claude, 2026-10-19): others' first-person handling sounds dropped
+
+- 278 TESTED Poissons: "lobby rules: bots 99 (FILL)"; mines: antiarmor
+  slots 9/10/11/26/27 + light camper 30 given, "takes out mp_mine",
+  "laid". Plane height 207 / 194 (poissons ground + 400 with ground =
+  players' mean z ~ -200): too low.
+- Trace: 25 events all from lr 82555344 (sub_82555160), msg +0 00000501
+  +432 4 +500 0 for bots and for "me" alike: no third-person form.
+- Fix in sub_82554BA0 hook: event "weapon_*" without "_fire" containing
+  reload/rechamber/raise/drop/bolt/_ads/pullout/putaway/clip, whose +496
+  handle's entity is an EntityList player other than mine: r3 = 0,
+  return. COD3_OTHERS_RELOADS=1 turns it off. Poissons plane +900.
+
+### 278 SOURCE CHANGE (Claude, 2026-10-19): mines given to bots; reload trace in 82554BA0
+
+- 277 TESTED: Poissons, 28 bots, 390 s, fps median 39.6 (p10 36.2), 70
+  smokes / 94 frags, kits: antiarmor x5, 19 bazooka/panzerschreck event
+  56s, roles objective 10 rusher 7 flanker 7 camper 4. No "lobby rules:
+  bots" line (bots came from bot_add). mp_mine owned by nobody -> 0 mines.
+  "reload sounds:" at 82556868: 0 lines.
+- mp_fixes.cpp: MpFixesGiveMines(entity): holder {entity+484}, rank 1,
+  sub_821EE6C0 (hooked: spare 4). bots.cpp BotLayMine: Lay gets since/
+  given (reset each death); kit 5 or camper (not kit 0/3) -> given once a
+  life after 3 s; "bots: mine: slot N (class) given mines: owns/none".
+- mp_fixes.cpp sub_82554BA0 hook: "reload sounds: event X for handle H:
+  entity E (player N, d away) | msg +0 +8 +432 +500 +504 +524 +528".
+  Hypothesis: bots are local index 3 (bots.cpp "shared scratch, remote
+  bot"), so the sound code plays their events as a local player's.
+
+### 277 SOURCE CHANGE (Claude, 2026-10-19): lobby BOTS row; bot gear/roles; reload trace
+
+- 276 TESTED two PCs: 24 OK (C3UP once each, joiner "host says we earned
+  a UAV", C3KU back), 32 OK ("32 in play", roster 28 bots, ~41 fps host;
+  slot 8 mostly route 0 / stalled). Friend's log not read (Justin: skip).
+- lobby_rules.cpp (LF line ends!): Page3 row 1 BOTS {OFF,2,4,8,12,16,22,
+  FILL}; TakePage3 -> BotsAsk(BotCounts[i]) (99 = FILL, clamped by
+  MaxBotsNow). Description text updated.
+- bots.cpp: smokes: evasive needs now >= nextSmoke, screen only rushers
+  slot%3==0, next 45-65 s. Roles want {0.38,0.25,0.25,0.12}; war quota
+  (n*11+10)/20, 3..11. BotLayMine after BotDispense (owned bit +1056,
+  near g_war flag < 900 or camper, 8-23 s first, then 35-55 s, 3 a life;
+  switch, 0.9 s, fire 0.4 s, 1.2 s, back). WeaponNumber fwd-declared.
+- bot_kits.h defaults + Justin's game-folder bot_kits.txt: smokes 1 (0
+  heavy/antiarmor), antiarmor lines x3 (ASSUMED the class's own main is
+  the launcher: check "bots: loadout" + whether they fire rockets).
+  docs/build-logs/test_bot_kits_203.cpp expects 15 defaults (now 17;
+  not part of the build).
+- mp_fixes.cpp 82556868 hook: "reload sounds:" GR_/GF_/RELOAD/RECHAMBER/
+  BOLT: entity, player index, = me, distance, +484/+480, r6 r7 r8, lr.
+
+### 276 SOURCE CHANGE (Claude, 2026-10-19): dedup side packets; joiner killstreak sync
+
+- 275 TESTS: (1) Justin max_players 32, friend 24 (session storage "32 in
+  play" vs "24 in play"): friend's own server spawned him at -6526 -6074
+  8115 and he fell forever; his roster came as 24 bots; on a team switch
+  Justin's game hung in sub_820C27E0 (a list walk: corrupt list) from
+  8257A6C8 respawn (sub_82563F10 -> 82561448 -> 824C4AA8). (2) Both 24:
+  friend got C3UP twice ("from another machine" x2; Justin's peers list
+  has 100.93.247.25 and 100.87.12.49, and his side send goes to each),
+  hits doubled (his copy -180 when Justin's had 60). Killstreaks only
+  counted on the host (friend's G_Damage sees no bot deaths).
+- Packets v2: + 8 bytes (machine id, count); MpFixesOnPlanePacket drops
+  own and repeats (512 kept). C3KS (host, 1 s): per non-bot client:
+  session number (BotsSessionNumberOfSlot), kills, uavs; joiner
+  (BotsLocalSessionNumber, not hosting) sets g_streaks[own]; 2.5 s guard
+  after his call; C3KU (his number) -> host uavs--. UAV only (artillery /
+  Typhoon on a joiner would fire in his world only).
+- Open: bots' reload sounds heard as own, two-PC too; bots off objective.
+
+### 275 SOURCE CHANGE (Claude, 2026-10-19): UAV plane over the side channel; 32 safety in bots.cpp
+
+- P2P (HANDOFF 194): every machine runs its own server; script entities
+  are not shared. MpFixesUavPlane now picks the first angle and sends
+  "C3UP" (ver 1, side, seconds u16 BE, cx cy cz radius angle floats LE)
+  via Net::SideSend; lobby_rules.cpp hands C3UP/C3UH/C3UD to
+  MpFixesOnPlanePacket (queue, 64 max), processed at the top of the asks
+  in MpFixesPlaneFrame: P -> remote UavPlaneAsk (not re-sent);
+  H/D -> MpFixesPlaneHit(..., remote=true) (D = 99999).
+- MpFixesPlaneHit(remote=false): own-side check, then only this machine's
+  shooters (attacker == own EntityList[1], or host && BotsIsBotEntity);
+  hits sent as C3UH (side, hit u16, rocket); shot down sends C3UD.
+- bots.cpp: BotsIsBotEntity, BotsThisMachineHostsBots; BotRoster
+  MaxEntries 20 -> 30; g_mirror/g_joinTriedAt/g_kitTold/g_mirrorLife/
+  KilledLife/LifeKnown/SpawnTried, conflictTold, lastHealth/lastState/
+  primed [24] -> [32] (indexed by session number < SessionMaxNow = 32).
+  lobby_rules.cpp receive buffer 512 -> 2048 (roster 8 + 30*20 = 608).
+- NOT changed (need two-PC 32 logs): 825321C8 free-client search
+  (6-unrolled, r30 += 6 < 24, 4992 stride: N would run to 36), its
+  session-number bound li r9,24; 823DB378 (lhz 16-bit mask, 24-word
+  stack array); 823D6518/823D6C08; session max 823CE344 (823D1B54/
+  823D1BDC); 82428010 (vehicle occupant, byte table 0x82C73024).
+
+### 274 SOURCE CHANGE (Claude, 2026-10-19): plane hit / crash effects
+
+- sub_82583310 (a projectile's explosion) writes the effect entity's
+  origin +336..344 and angles +352..360, then sub_82556180(out (stack),
+  entity, weapondef+8 name, 56). Event 56 = the weapon's explosion fx +
+  sound; event 1 = muzzle flash. PlaneFx(x,y,z,weapon,event) does that on
+  its own script_origin (g_planeFxHandle), angles -90 0 0.
+- MpFixesPlaneHit: damage >= 100 -> bazooka 56; else thompson 1 (60 ms
+  throttle), 30-unit jitter. Shot down: panzerschreck 56 + smokegrenade 56
+  at the plane; crash (g_planeCrashAt) at the dive's end point:
+  panzerschreck 56, fraggrenade 56, smokegrenade 56 (+50 z).
+- Untested: whether event 1 with no tag_flash shows; client-side only.
+
+### 273 SOURCE CHANGE (Claude, 2026-10-19): engine default, crash sound; mortar notes
+
+- 272 TESTED: Stuka seen (loaded as 5 before the guns, found by name
+  67EC1FC0). ARPL_P47_1 is a one-shot (no loop). Justin tuned live:
+  ARPL_P47_2 every 5450 ms = default now.
+- Crash: g_planeCrashAt[k] = shot-down + 2500 ms; "UAV:Mortar_Explo" at
+  the hit, then UAV:Mortar_Explo + UAV:SHELL_EXPLO_MAINIMP (cue swap).
+- Plane sounds are local to the host (his sound origin). For joiners:
+  server-side 824CF5F8 (r5 0) on the plane would send the event; the
+  joiner's own 82554BA0 hook would swap the cue (untested, two PCs).
+- MORTAR research (Justin wants a mortar killstreak later): campaign
+  Laison has it all: sp\laison\vehicles.cod v_81mm (tags tag_barrel,
+  tag_turret), laison.cod INTERACTIONFILE:mortar + INTERACTSTATEFILE
+  mortar_idle/load/start, Weapon_mortar shakerumble; laison fx.cod
+  mortar_launch, mortar_trail, mortar_dirt, mortar_water_laison (forest
+  fx.cod mortar_dirt too); sounds Mortar_Fire/Explo/Miss/Slide in
+  forest.wbk + laison.wbk (both loaded beside MP maps); v_81mm_shell in
+  forest/laison weapons.cod (loaded); w_arms_ei_MortarIdle anim. MP xex
+  has MOD_MORTAR(_SPLASH), InteractStateMortarLoad (not Idle/Start: SP
+  only), prompts "[HOLD_USE] to Use Mortar"/"Press ~r1 to fire the
+  mortar" (mp global.cod), MP_GS_MortarFire(B) in mp global.wbk. Plan:
+  mortar barrage killstreak on the artillery code (sub_821F70A8) with
+  Mortar_* cues, more smaller rounds; optional v_81mm prop.
+
+### 272 SOURCE CHANGE (Claude, 2026-10-19): engine + near-pass flyby
+
+- Engine: once per UAV (on[k]) at p.sound via PlaneSound (frame path,
+  heard), cue g_planeEngineCue (default ARPL_P47_1), repeat every
+  g_planeEngineEvery ms (0 = once). Unknown whether ARPL_P47_1..4 loop.
+  Console plane_engine <cue> <ms> (kernel_video.cpp).
+- Flyby: only while p.dist < 3500 (host to plane), 9 s apart.
+
+### 271 SOURCE CHANGE (Claude, 2026-10-19): Stuka archive before the guns
+
+- 270 TESTED: flybys heard (cues ARPL_P47_By01..07 found: 590630.. and
+  By04 655931). Overlap fixed: flyby every 7 s.
+- 270 probes: stuka_flying/stuka/v_a20/v_gunturret 0; v_shermanM4A3,
+  v_shermanM4A3_d1, tankshell found (Merville has them). 253 (Stuka
+  loaded as 6, before the guns) showed the Stuka. Now
+  MpFixesLoadStukaEarly before the gun loop (sub_8247DD38 hook);
+  MpFixesLoadPlaneArchives skips it then. PlaneSpawn: side 1 gets
+  stuka_flying if MpFixesStukaFound (sub_82446EA0) else v_Typhoon.
+- crssrds.wbk (not loaded) has Plane_Explode, Dogfight_Plane1/2,
+  P47_FlyBy_Plane1/2, ARPL_Dual_P47_By01: crash sound candidates.
+
+### 270 SOURCE CHANGE (Claude, 2026-10-19): plane cues via an event
+
+- 268 log: no "cues: name ARPL_*" ever: sub_82556868's name is an event
+  name; sub_82554BA0 looks it up in the map's event table (sub_82490220)
+  -> cue names -> sub_8212B268 (OrderedCueLookup, campaign slots 2nd
+  pass). ARPL_* have no event: dropped. FLAG_FLAPPING too (Flag_Flapping
+  cue -1). LEE_ENFIELD_FIRE_3RD heard because the 82554BA0 hook makes it
+  weapon_kar98_weapon_fire_3rd + cue override.
+- Now: 82554BA0 hook: sent "ARPL_*" or "UAV:<cue>" -> event
+  weapon_kar98_weapon_fire_3rd, t_cueOverride = cue, t_eventGun null.
+  Log "uav plane: sound X made as the Kar98's shot event". Default where
+  = 1 (sound origin, toward the plane). Watch for "cues: name ARPL_..".
+- 269: Stuka list not full (no "list full" line), lookup still 0, and
+  SetModel left +540 0, +16 then 0x40000000 (= no model). plane_model
+  now probes stuka_flying, stuka, v_a20, v_shermanM4A3_d1, v_gunturret,
+  tankshell, v_Typhoon, v_shermanM4A3: tells if crssrds is registered.
+- 269 bot sounds: sub_82555E90/F90 had only grenade entities: reload
+  sounds come another way (next: SoundTimes-style trace with entity).
+
+### 269 SOURCE CHANGE (Claude, 2026-10-19): asset list order, bot sound log
+
+- 268 TESTED: plane_model: v_Typhoon found 6D581B30; stuka_flying direct
+  lookup 0 and SetModel left +540 = the Typhoon's model (so 265's flying
+  "Stuka" was an empty model). ARPL_P47_1b/2b/3b/1 played from the frame
+  (logged), all mute; the rifle shot audible. mace2.wbk names: a PLANES
+  group (ARPL_P47_*) beside the weapon ones: suspect group not loaded.
+- sub_82474CB8 hook: extra order now weapons, P47, Stuka, vehicle,
+  Kangaroo, map (std::rotate); a full list (count 32) logs
+  "archives: list X full". If not full -> the Stuka model is not
+  registered at all (look at crssrds archive registration).
+- CampaignEventName: "bot sounds:" for sub_82555E90/F90 (animation
+  sounds: reloads): entity, its player index, = me, distance, +484/+480
+  vs mine, r3/r5/r6 (150 lines). Bots' reloads heard as own (12v12).
+
+### 268 SOURCE CHANGE (Claude, 2026-10-19): plane_sound name <ALIAS>
+
+- 266 TESTED: LEE_ENFIELD_FIRE_3RD heard from the frame (PlaneSound at
+  own list entity) - so 258-264's path was fine; the P-47 aliases are the
+  problem (likely streamed/long in sp\mace2\mace2.wbk). Typhoon seen for
+  enemyuav. Bot reload sounds as own: also at 12v12.
+- plane_sound name <ALIAS>: which = 4, any alias (kept in a static set).
+
+### 267 SOURCE CHANGE (Claude, 2026-10-19): plane_model Stuka diagnostic
+
+- SetModel (sub_824CE130): asset lookup sub_820D71E8 with name+6 (a
+  prefix skipped); not found -> sub_8256FD68 (ent, name, bank): looks up
+  sub_82446EA0(out, *(0x82BCC88C), bank (ent+480 or *(0x82BCC828)+40),
+  name); needs model+32 and +32->+44->+0 non-zero, stores model at +540.
+- crssrds vehicles.cod has stuka_flying (+ stuka/stuka_low/stuka_med/
+  propeller/col parts) beside many tanks; forest's has only v_Typhoon.
+- plane_model <name> [clear]: script_model 450 in front of the player at
+  +120 z; logs entity +16/+20/+620/+968, +540 model and its +32/+44/+76,
+  then 1 s later; direct lookup logged. clear: +16 &= ~0x40000000 each
+  frame. kernel_video.cpp: console command (not syntax-checked here:
+  audio_out.h not staged; copy of the plane_sound block).
+
+### 266 SOURCE CHANGE (Claude, 2026-10-19): Typhoon both sides; frame fallback
+
+- 265 TESTED: with bots, flybys played inside events at own entity
+  (out words fine): unheard. Without bots, only one event (his own shot,
+  event 1). Stuka (side 1) flew a full circle at 1400 on Merville twice,
+  never seen; its +16 had 0x40000000 (the Typhoon's 0, 263 log).
+- Sound names: strings of the banks: ARPL_P47_1..4(b), By01-03/06/07 in
+  sp\mace2\mace2.wbk only (By04 in forest.wbk); none in mp\global.wbk or
+  mp_merv.wbk (Flag_Flapping is). LEE_ENFIELD_FIRE_3RD in mace2+laison.
+  mp xex has _mp_audio script keys plane_flyby / dist_chatter (the MP
+  maps' own ambient flyby spawner): a lead if the P-47 aliases stay mute.
+- Now: Typhoon for both sides (MpFixesPlaneModelLoaded = P47/Typhoon
+  archive); queued sound -> frame (PlaneSound) after 300 ms unconsumed;
+  plane_sound ... now -> frame at once. Log "played from the frame".
+- Justin also: Colt 45 sounds wrong + no reload sound; bots' reload etc.
+  heard as if from himself even far away (open item, 32 players).
+
+### 265 SOURCE CHANGE (Claude, 2026-10-19): plane sound from the game's sound events
+
+- 264 TESTED (Justin 17:13): circle round the whole map + height good.
+  All 7 plane_sound tests silent incl. FLAG_FLAPPING at his own player
+  (log: 82556868 accepted every call, out words like 002A0002). So every
+  call made from the server frame (MpFixesLauncher) is unheard, whatever
+  entity/alias. The only port-made sound known heard (Lee-Enfield scoped
+  shot) is made from inside the weapon event hooks (sub_82556180 etc.,
+  CampaignEventName) with that ctx, stack -0x400, out on that stack.
+- Now: PlaneSoundChosen queues (MpFixesQueuePlaneSound: atomic ent +
+  alias); PlaneSoundFromEvent at the top of CampaignEventName plays it
+  (ent 0/invalid -> the event's r4). Default where = 2 (host's player).
+  plane_sound shot = LEE_ENFIELD_FIRE_3RD. Log "uav plane: X played in
+  event N ... at entity E (+484 ..)". Needs weapon events (bots shooting).
+- 82556868 notes: r30=*(0x82BCBE04) sound world; 825556A8 takes ent +484
+  (handle, checked vs 0x82BD1FC0 table in 8254B888) and +480 (tag) when
+  r7=-1; command kind 7, alias at +508, list of 2048 at +8192.
+
+### 264 SOURCE CHANGE (Claude, 2026-10-19): spawn-point circle, mean height, plane_sound
+
+- 263 TESTED (Justin 15:54): plane back; still no plane sound (flag-style
+  call on the script_origin); circle covers only part of the map; height
+  grew each call (he was in noclip: ask.cz used the highest player).
+- Circle: all entities 0..4095 (table 0x82BD1FC0) whose class (+548 string
+  object, text +12) has "spawn": box -> centre, half the larger side
+  (2500..12000); log "uav plane: N spawn points span". Height: players'
+  mean z + 1400 (p.ground = mean; crash ground = p.ground - 100).
+- plane_sound console (kernel_video.cpp -> MpFixesPlaneSoundTest): where
+  (plane / origin / me / bot nearest) x which (flyby / engine ARPL_P47_1 /
+  flag FLAG_FLAPPING), plays once now and sets the flybys' choice. Theory:
+  a no-model script_origin or the own player never gets its sound events
+  to the client; a bot (a client entity in the snapshot) or the modelled
+  plane (but far) might. The flag test separates "where" from "alias".
+
+### 263 SOURCE CHANGE (Claude, 2026-10-19): undo 260 lowering + 262 loop; flag-style sound
+
+- 262 TESTED (Justin 15:19, mp_merv): plane NOT seen, bazooka SILENT, no
+  plane sound. Log: +16 0x40000000 on Merville too (so not "out of the
+  world"; set since 257/259, cause unknown) -> 260's rule lowered it to
+  ground+300 on Merville (lost in trees). The loop: 824CF5F8 with r5 1 put
+  1 at the sound origin's +888 (a sound index, not a flag): other sounds
+  went silent.
+- The map flag script (sub_821ED9xx, FLAG_FLAPPING at 0x82039698) calls
+  table +184 (824CF5F8) with r3 handle, r4 alias string, r5 0, r6 0, r7 0
+  -> sub_82556868(out, entity, alias, r6 0, r7 -1, r8 0). Same now for the
+  flybys, on the sound origin (script_origin), every 3 s within 9000.
+- Heights: 1400 over the highest player; Poissons 400 (260 seen low there).
+
+### 262 SOURCE CHANGE (Claude, 2026-10-19): engine loop on the sound origin; rocket delay
+
+- 261 TESTED (Justin 14:39): no sound; panzerschreck shot it down (3 hits
+  logged at fire time, 300 each), no hit marker noticed, no explosion.
+- sub_82556868 does not keep r4 (passes it to 825556A8 with r7) and makes a
+  type-7 sound message; called from the server frame (we) it is never heard
+  (ids returned), though the client weapon path's calls are. Heard from the
+  server frame: playloopsound 824CF5F8 (FLAG_FLAPPING asked from 824CF700).
+- Now: one-shots off; ARPL_P47_1 looped (824CF5F8 r5 1) on p.sound (the
+  script_origin) when it is made; p.sound kept 900 toward the plane (3000+
+  away: 900 + 0.6 x beyond 3000); parked with the plane.
+- Rockets: hit applied after distance / 1.5 ms (RocketHit queue in
+  MpFixesPlaneShots). NEXT: explosion effect at rocket hits / the crash
+  (find MP playfx; or the artillery strike sub_821F70A8 at the crash point).
+
+### 261 SOURCE CHANGE (Claude, 2026-10-19): flybys on the host's player
+
+- 260 TESTED (Justin 14:19): plane SEEN on Poissons (the out-of-world
+  lowering works); still no sound on any map.
+- PlaneSound now as the port's heard Lee-Enfield shot: sub_82556868 with
+  r4 = the host's EntityList entity, r7 -1, r8 0 (r8 was left from ctx
+  before), every 3 s while the plane is within 6000. If heard: move to a
+  directional source later (the script_origin p.sound is still made and
+  moved, unused for sound now).
+- Memory work agreed with Justin (clear leftovers on map change, campaign
+  gun archives on demand, measure free room): first needs a Merville then
+  Poissons repro on 261 (the 258 crash: GPU hung). The Kangaroo archive
+  is reused, not duplicated, on that change, so "leftovers" is not proven.
+
+### 260 SOURCE CHANGE (Claude, 2026-10-19): plane comes down when out of the world
+
+- 259 TESTED (Justin 14:06) Poissons FRESH: no crash (so 258's crash was
+  Merville's leftovers + planes; still to fix on map change). Archives 5-8
+  guns, 9 Typhoon, 10 Stuka, map 11. Stuka made, circled at 1400 over the
+  highest player, moving fine, NOT seen. Its +16 = 0x40000000 all along
+  (Merville 256: 0). Taken as out of the world (no area): in phase 2,
+  every 2 s while the bit is set, p.cz -= 250 down to p.ground + 300.
+  If the bit is something else, the log shows it never clearing.
+
+### 259 SOURCE CHANGE (Claude, 2026-10-19): UAV sound origin; no planes on Poissons
+
+- PROCESS NOTE: re-committing a file from the SAME staged path can send
+  the earlier upload (the 13:44 commit put back the old mp_fixes.cpp; the
+  13:48 build ran the Poissons skip). Commit a changed file from a new
+  output folder each time (outputs/<ver>b/...). Rebuilt as 0.5.259 again.
+
+- 258 TESTED (Justin 13:39, mp_merv): hit markers seen, 8 "hit for" lines;
+  sounds ARPL_P47_By01..07 started (sub_82556868 ids 0x50005...), none heard
+  (plane 2500..9000 + 1400 up: past the aliases' reach).
+- Poissons after Merville CRASHED: map 15 kind 3 (weapons 5-8, planes 9/10
+  "still loaded"), then call through 0xCDCDCDCD in sub_82291160 <-
+  82291980 <- 82291F80 <- 825A1614 (and 822C0638), 2048 MB committed.
+  Before it: "The GPU is hung" (D3D's own message) = graphics memory full.
+  Justin wants the plane on Poissons: archives kept there; test Poissons
+  FRESH (first map). If fresh works: leftovers from Merville (Kangaroo
+  archive 12, Merville's) fill it; free or skip those on change. If fresh
+  hangs too: on Poissons only, a smaller Axis plane (Typhoon for both) or
+  one campaign weapons archive fewer. MpFixesPlaneModelLoaded guards a
+  plane without its model.
+- Sound: p.sound = a script_origin (824CEAD8 "script_origin") moved every
+  100 ms to the host's eyes + 900 toward the plane (moveto 0.1 s); flybys
+  every 3 s on it when the plane is within 9000.
+
+### 258 SOURCE CHANGE (Claude, 2026-10-19): UAV shots by ray, hit marker, flybys
+
+- 257 TESTED (Justin 13:28, mp_merv): circle perfect; no "hit for" lines
+  (bullets never reach G_Damage for the script_model; Typhoon's archive has
+  no col. mesh anyway); no sound: playloopsound 824CF5F8's r5 is stored at
+  +888 = the loop sound itself (we passed 1); its one-shot call
+  sub_82556868 (out, entity, alias text, 0, -1) returned 0x100004.
+- MpFixesPlaneShots (each host frame while a plane is up): per player, the
+  held weapon's clip (record +164 held, def list 0x82BCBF9C, clip record
+  +4*(172 + def+1468)) going down = shots; ray from record +0..8 (+60 z)
+  along +204 pitch (down +) / +208 yaw vs a 380-unit ball round the enemy
+  plane's +336; hit -> MpFixesPlaneHit (40, rockets 150 -> x2). Logs
+  "uav plane: client N shot S (weapon) at side K's plane: D away, missed by M"
+  (first 40). Host's own hit -> g_planeHitMarker 220 ms -> X drawn in
+  StreakHudDraw (StreakHudActive true while it shows).
+- Sound: PlaneSound = sub_82556868 on the plane every 3 s, ARPL_P47_By01..07
+  in turn. kPlaneSpeed 993.
+
+### 257 SOURCE CHANGE (Claude, 2026-10-19): UAV Build B (damage), radius, speed, sound
+
+- 256/255 TESTED (Justin 13:01): "a perfect circle", ~80% there: wants a
+  bigger radius (the whole map), 5% slower, shootable, plane sound.
+- Radius: players' positions sampled every 1 s per map (bounding box);
+  circle = box centre, 0.45 x larger side (2500..9000), height max(top
+  seen, now) + 1400. Speed kPlaneSpeed 1045 (was 1100).
+- Damage: on fly-in ent +608 = 1 (G_Damage's takedamage), health 600 (ours).
+  The G_Damage hook calls MpFixesPlaneHit first: a hit on a plane entity
+  is counted there (damage >= 100 counts x2) and the game's own damage is
+  NOT run; the plane's own side is ignored (attacker +520 -> +4). At 0:
+  rotateto pitch 55 roll 120 and moveto ahead 1800 to the ground (top seen
+  - 100) in 2.5 s, phase 4, parked after 3 s; the host's UAV ends when its
+  side's plane falls (g_uavUntil = 1). Logs "uav plane: side N hit for".
+  UNKNOWN: whether bullets/rockets reach G_Damage for a script_model at
+  all (contents/clip from col.<model>): if no "hit for" lines, look there.
+- Sound: playloopsound 824CF5F8 (+0xB8; r3 handle, r4 alias string, r5
+  non-zero kept at +888, refused if +888 set) with ARPL_P47_1 at spawn;
+  the loop stays on the entity (reused, parked under the map).
+- NOTE: the edits to edit/mp_fixes.cpp for this build were partly found
+  already made in the scratchpad (from an earlier attempt of this turn);
+  reviewed line by line before use.
+
+### 256 SOURCE CHANGE (Claude, 2026-10-19): plane position log
+
+- 255 TESTED (Justin 12:53, mp_guns): loaded fine (Typhoon 9, Stuka 10, map
+  11). He was side 1: Stuka made at -9504 4412 2099, circle over 53 -47 at
+  1499 r 1547; all phases logged; he saw NO plane (253's unmoved one was
+  visible at its spawn point). So the moves do something now: where to?
+- "uav plane: side N phase P at x y z (angles; +16 +20 +620), aiming at"
+  every 2 s while up. NEXT: if the origin never changes the mover is not
+  run for it (check +16 flags / trajectory +20 vs a map script_model); if
+  it goes elsewhere fix the point; if it is right, it is fog/size.
+
+### 255 SOURCE CHANGE (Claude, 2026-10-19): map-load freeze; Typhoon
+
+- 254 (Justin 12:18): froze loading mp_merv. Log: archives 5 P-47, 6 Stuka,
+  then campaign weapons 7 mace2, 8 fuelplnt loaded, 9 forest "loading" and
+  never "loaded"; fps 0 from 50 s, frames still counting (logic stuck in
+  the load). 253 (same order) had loaded all four + the map (kind 3 as 11):
+  so we are at the edge of the map block (big_memory 495 MB) on Merville.
+  The "read of heap memory never handed out" x16 lines are in both (normal).
+- FIX: Allies' plane = v_Typhoon from sp\forest\vehicles.cod (2.6 MB, only
+  the Typhoon; tag_body/tag_prop) instead of chambois\veh.cod (13 MB). Plane
+  archives now load in MpFixesLoadPlaneArchives, at the end of
+  sub_8247DD38's campaign-guns loop (or right away when campaign_guns 0).
+  Stuka (crssrds, 10.7 MB) kept. If Merville still hangs: drop the Stuka
+  file too (then both sides Typhoon, or find a smaller Stuka source).
+
+### 254 SOURCE CHANGE (Claude, 2026-10-19): UAV plane fixes
+
+- 253 TESTED (Justin 11:56, mp_merv): Stuka seen, far off the map's side,
+  never moved. Log: made at 9116 -6725 2002, "flying in over 0 -104 at
+  height 1402" (players' +336 read ~0), all phases logged, no motion.
+- 824C7FC0 is NOT moveto: it calls 824C5AB0 (angles +352, trajectory +60
+  = a rotation). moveto is 824C8288 (+0xA38: vec r4 absolute, f1-f3; ->
+  824C5C30: origin +336, trajectory +20; skipped if the point equals the
+  vector at 0x82A93408). 824C84A0 = relative move from +336. 824C80A8
+  rotateto (AngleSubtract vs +352) is right.
+- Players' position: ps (+512) +0..+8 (as the set-origin call 8255E118).
+- Sides: Justin (American) had team +4 = 2: side 2 = Allies -> P-47.
+- Screenshot 115526: plane visible in the fog, small: fine once overhead.
+
+### 253 SOURCE CHANGE (Claude, 2026-10-19): UAV plane, Build A (visible, no damage)
+
+- Justin (00:05): UAV = 3 kills, plane circles 30 s then flies away, must be
+  shootable (gunfire or rockets) to end the UAV early, "just like other
+  Call of Duty UAV killstreaks". Agreed plan: Build A (this) visible plane;
+  Build B damage/shoot-down, bots. Picked P-47 (Allies) + Stuka (Axis).
+- EXISTING (found, not new): killstreak ladder in mp_fixes.cpp (G_Damage
+  hook sub_825862F8 counts kills in a row; UAV = enemy_radar 0x82B2CF90+12
+  = 1 on the host's own machine, killstreak_uav_kills 3, uav_seconds 30;
+  artillery; "Typhoon" run = strikes only, no model). Streak arrays and
+  ClientOf were 24: now 32 / MpCapClients.
+- PLANE MODELS in the campaign archives (strings of the .cod files): P-47
+  v_rep_P47 (saint_lo\vehicles.cod, chambois\veh.cod 13 MB), Stuka
+  stuka_flying (crssrds\vehicles.cod 10 MB, also the A-20 v_a20), Typhoon
+  v_Typhoon (blkbrn\vehicles\planes.cod 2.5 MB, forest\vehicles.cod),
+  Fw 190 in 4 parts (saint_lo). No C-47 mesh (texture only). MP global
+  sounds have ARPL_P47_1..4(b), ARPL_P47_By01..07.
+- MP SCRIPT TABLE (0x82A98030 = *(0x82BCBF64), filled at run time): pairs
+  list at 0x825FF090 (244) + slot stores (sub_824D1380, 824D0C68,
+  824D3338): scratchpad mp_table.json, 996 offsets. Offsets differ from
+  the campaign table after the low ones (+0x264 spawn 824CEBE8, +0x268
+  spawn() 824CEAD8, +0x5A0 is NOT delete). Movers: all call sub_824BB360
+  (mover class check): moveto 824C7FC0 (+0xA5C: handle r3, vec r4, f1 time,
+  f2 acc, f3 dec), rotateto 824C80A8 (+0xA4C, angles in degrees),
+  rotatevelocity 824C81C8 (+0xA48), 824C5900/59D8 (+0xA64/A60: stop?).
+  Delete native not identified: the plane is parked at z -60000 and reused.
+- CODE (mp_fixes.cpp): ExtraArchive g_p47File / g_stukaFile loaded in
+  MpFixesLoadVehicleArchive each map (Settings uavPlane, ini uav_plane),
+  added to every archive list (sub_82474CB8 extra[+3], [+4]).
+  MpFixesUavPlane(base, caller, seconds) at the UAV call (side from caller
+  +520 -> +4: 1 Allies, 2 Axis; centre = players' mean, radius 0.7 x
+  spread clamped 1500..4000, height top player + 1400) queues an ask;
+  MpFixesPlaneFrame (MpFixesLauncher, host frame): spawns script_model via
+  824CEAD8, SetModel 824CE130, fly-in moveto 4 s, circle steps every 400 ms
+  (moveto + rotateto, 1100 u/s, bank 25), off along the tangent 6 s, parked.
+  kPlaneYawOffset 0 = GUESS (model nose on +X): fix from a screenshot.
+  Logs "uav plane: ...". Syntax: same errors as the original with stubs
+  (g++ -fsyntax-only, simde from GitHub); checker proven to reach the code.
+- UNTESTED. Risks: archives too big for memory (uav_plane = 0 turns off),
+  model axis/scale, mover natives on a script_model mid-game, the plane
+  visible only when its archive is in the joiner's lists too.
+- 253 BUILT OK (00:30, 2nd try: "far" is a Windows macro, renamed). Not
+  played yet.
+- BUILD B FINDINGS (research, no code yet): both plane models carry a
+  collision mesh (col.v_rep_P47, col.stuka_flying) and tag_prop / tag_body.
+  G_Damage sub_825862F8 args: r3 target, r4 inflictor, r5 attacker, r6 dir,
+  r7 point, r8 damage (9999 = force), r9 flags, r10 means of death; it
+  returns at once unless target +608 (takedamage) != 0. Plan: on spawn set
+  plane +608 = 1 and our own health (e.g. 600; rockets x4); in the hook, if
+  r3 is a plane entity, subtract r8 ourselves and do NOT call the original;
+  at 0: UAV off (g_uavUntil) when it is the host's side, notice "UAV SHOT
+  DOWN by <attacker>", crash: rotateto nose -60 and moveto down 2.5 s, then
+  park. First thing to log in B: whether bullets reach G_Damage for it at
+  all (if not: the entity needs contents/link from its col mesh).
+- NEXT (Build B): damage. The G_Damage hook sees target r3: if it is the
+  plane's entity, count damage (needs the plane to have collision/contents
+  and takedamage: compare a spawned script_model's fields with a
+  destructible's), then fall/burn (moveto down + effect), UAV off early,
+  notice "UAV SHOT DOWN by X". Sound: playloopsound candidate +0xB8
+  824CF5F8 (reads +888) with ARPL_P47_1. Bots: shoot at the plane, call
+  UAVs.
+
+### 252 SOURCE CHANGE (Claude, 2026-10-18): death freeze; HUD-only draw list
+
+- 251 TESTED (Justin 23:42, 32 in play): "I see all the ranks". Log:
+  "overhead icons: players 24-31 of HUD object 829E4410 at AA3D0000".
+- Death freeze (couple of seconds on death): bots.cpp HostDeathCapture
+  (0.5.226/228 debug) took screenshots at frames 2/6/12/20/35 of the first
+  3 deaths and Render::LogNextFrame at frame 7 of death 1 ("397 of 2076
+  draws pictured", ~19k log lines). Now only with COD3_DEATH_CAPTURE=1;
+  SetPlayerDown (death blur) unchanged.
+- Binoculars (bad run 251, x2 zoom): 249's DumpDraws listed the FIRST 700
+  draws = world only (604 drawn, 96 "no target" 1-index points with a
+  16x16 scissor, vs 10e10ea9 ps 5d27834e). The mask is a late flat draw.
+  DumpDraws(why, -N): only draws without Z enable (depthControl bit 1),
+  over the next 8000 draws; mp_fixes asks -300 at each zoom level. 249's
+  good-run list is lost (log overwritten) and was world-only anyway. NEXT:
+  compare a good and a bad run's flat lists (Justin says good/bad).
+- Scoreboard: 28 bots + host = 29; Justin counted 15 + 14 = everyone.
+  Told him. 32 rows would only matter with 32 humans/bots (rows cap 24 per
+  board, 248).
+- OPEN: bots' reload/foley sounds heard as if from his own character with
+  32 (asked whether it happens at 24). Suspect sound emitter/entity lookup
+  for slots past 24 falling back to the listener; not found yet.
+
+### 251 SOURCE CHANGE (Claude, 2026-10-18): overhead icon table past 24
+
+- 250 played by Justin (23:26, mp_hosta, 32 in play, bots added; log clean,
+  only the usual 0x406D1388 thread-name notice). He did not notice whether
+  every teammate had an icon: still open, ask again on 251.
+- HOW FOUND: 250 cap-probe.csv joined with cap-probe-sites.csv minus
+  cap32-sites.csv. 824F97C8 (824F9410, cmpwi r17,96, range 4..96) and
+  82508130 (82507D28, cmpwi r24,96): loops r17/r24 = 0,4..92 over
+  EntityList[1..24] (lwz 4(EntityList+r)). 824F9410 (per HUD object r14,
+  +4 enabled, +8 local view) writes a 12-byte entry per slot at r14+76
+  (+0 flag, +1 byte, +4 alpha float, +8 icon kind): kind = entity +1928
+  (rank) for teammates (<= 4), 3 talking? (823EA1E0), 4 = down/medic (+1924
+  == 4, alpha fades over 5000 ms from +136), 7 = enemy spotted (+1924 3,
+  flags +240 bit, 15000 ms). Distance fade r26/r21. 82507D28 draws each
+  flagged entry at the head tag ("BIP01 HEAD", 0x8206D414; "_point"
+  0x82065444) through widget obj+12+8*kind. Table 24 x 12 = +76..+364; the
+  object has fields right after (+372 byte read by 82506C08), so no room.
+- FIX: cap32 kinds SIDE12W (824F97C4 addi r27,r27,12) / SIDE12R (8250812C
+  addi r29,r29,12): when the index reaches 96 (slot 24) and MpCapClients >
+  24, the entry pointer jumps to MpHudSide(base, obj) (+1 for the reader's
+  r29 = entry+1): mp_fixes.cpp, 16 objects max, 8 x 12 (+32) bytes each,
+  AllocatePhysical, log "overhead icons: players 24-31 of HUD object".
+  Both loop ends N4. Dry run of patch_cap32 then patch_cap_probe on a copy
+  of the generated C (probe lines stripped): 227 sites in 143 functions,
+  910 probe sites, OK. Helper syntax-checked standalone.
+- Classified NOT player (record in compare review): 82276D80 (vector<T24>
+  size, divw by 24), 823231C0/8231BBF0/820E0338 (A..Z case fold, cmplwi 25),
+  8212B5D0/8227BCF8/8227C160/822C59E8 (24-byte memcpy/strncmp lengths),
+  82171288 (li r6,24 arg), 824ADA88/82553780 (li r4,25 arg), 82400810
+  (entity +84 state switch 5..24), 8248D1F0 (2-word loop 16..24),
+  822BA360/822BED10 (type 22/23 compare). 823EFCA8 voice: harmless (250).
+- OPEN, next: 8242808C in 82428010 (cmpwi r29,24, 1.1M hits): finds a
+  vehicle's occupant (+624 -> +524 -> +484 handle) in EntityList[1..24];
+  index r29 reads a byte table at 0x82C73024 (24 bytes?). Players past 24
+  are "not found" there. Check the table's size/users before N.
+- Study tools this session: scratchpad xexdump.py (XEX2 basic compression,
+  retail AES key via python cryptography) -> mp.bin image at 0x82000000.
+
+### 250 SOURCE CHANGE (Claude, 2026-10-18): friendly markers + compass for 32
+
+- Justin (23:03, 249, 28 bots): "some of the added players don't have a
+  rank above their head, hard to tell they are friendly". Also: binoculars
+  worked this run (both draw lists, no zoom and x2, are in that log:
+  "render: draw list" - they are a GOOD-run baseline; the bad state is
+  intermittent). bot_add 32 gave 28 bots (32 total incl. host + locals).
+- HOW FOUND: joined the 249 cap-probe.csv with cap-probe-sites.csv minus
+  cap32-sites.csv (hot sites still compared with 24). 8250689C in
+  82506540 (cmpwi r25,24, hits 244752, range 1..24): loop over
+  EntityList[1..24], same team as the local player (r24), alive (+0x784),
+  writes a 36-byte entry at obj + 0x188 + 36*idx, idx = (record -
+  MpPlayerRecords) / 2992 (82506540's base already relocated by
+  patch_player_records, so idx is 0..31): +0x188 time, +0x18C/0x190/0x194
+  position (entity +0x70/+0x80), +0x198 flags (bit 0x20). The drawer
+  824E2CB0 walks obj+0x18C with li r26,0x20 (32 entries), reads +0x198 bit
+  0x20: room for 32 already. The obj is one of 4 local HUD objects of
+  0x1B48 (init 82506E78). So only the writer loop: cap32 N.
+- 82505CE8 (called right after it from 82506C08): compass player list,
+  loop unrolled by 8 (r23 += 8, cmpwi r23,24 at 82506384), table obj+0x5F8
+  memset 0x500 = 32 x 0x28. cap32 N too (32 = four passes).
+- Both UNTESTED in a match. Expected: every teammate past slot 24 gets the
+  rank icon; compass shows them.
+- Other hot 24-sites still open (from the same join, by hits): 82276D80
+  li r10,24 (51M), 823231C0 cmplwi 25 (13.5M), 8231BBF0, 823EFCA8 (voice,
+  harmless), 8212B5D0, 8227BCF8/8227C160 (li r5,24 memsets?), 822BA360,
+  824F9410/82507D28 (cmpwi 96 = 4x24), 82400810. Classify next.
+
+### 249 SOURCE CHANGE (Claude, 2026-10-18): brightness; binocular draw lists
+
+- 248 TESTED (Justin 22:49, after a restart with max_players 32, 28 bots):
+  scoreboard 15 + 14 rows. Note: max_players only applies at start (his
+  first try was in the running game: 20 bots, 24 cap).
+- Binoculars still see-through at the sides at the x2 zoom (the port's
+  zoom: weapon +1600 FOV x3, mp_fixes view(2)). 248 log: "binoculars down
+  after 484 frames; draws left out meanwhile: no target x34848" (72 a
+  frame; normal play ~50 a frame "no target"). DOF-pass-on did not help.
+- render_commands.cpp: DumpDraws(why, n) lists the next n draws (vs, ps,
+  prim, count, colour mask, depth control, stencil, blend0, scissor, drawn
+  or skip reason). PrepareDraw is now a wrapper over PrepareDrawInner.
+  mp_fixes calls it 60 frames into each zoom level, once per level per run
+  (700 draws). NEXT: diff the "no zoom" and "x2 zoom" lists: the side
+  bars' draw (likely a 2D quad, maybe "no target" or a scissor) present in
+  one, missing/skipped in the other.
+- Brightness: Settings brightness (50..150, ini "brightness", F11 Graphics
+  slider). render_d3d11.cpp GammaTable(): the display LUT (title's, or
+  identity) entries raised to 100/brightness per channel; re-uploaded when
+  it changes. Justin asked for the campaign's slider in the MP options
+  menu: not done (menu data); F11 instead.
+
+### 248 SOURCE CHANGE (Claude, 2026-10-18): scoreboard past 24
+
+- 823A0180 (scoreboard, rows +0x4C, 24 x 12 B, count r17) and 8239EC38
+  (second scoreboard, rows +0x88, 24 x 20 B, team totals +0x3D4..0x3E8)
+  each walked EntityList[1..24] (li r23,24 at 823A023C; li r20,24 at
+  8239ECE4). Now cap32 kind N (MpCapClients).
+- Rows stay 24 (arrays and the widget are sized 24): new cap32 kinds in
+  scripts/patch_recomp.py, all no-ops at 24 players:
+  ROWFULL0 (823A024C "cmplwi cr6,r28,0": entity counts as empty once r17
+  >= 24), ROWFULLNE (8239EE40 "cmpw cr6,r28,r10": not my team) and
+  ROWFULLNZ (8239EE4C, 2nd "cmplwi cr6,r10,0": team-only flag set), so in
+  8239EC38 the team totals still add every player but no row 25 is
+  written. 8239F030 (cmpwi r17,24) clears rows up to 24: unchanged.
+- Dry run of the patcher on the two functions OK (7 sites).
+- Binoculars: Justin, 22:13, with texture_replace = 0: black sides came
+  and went ("they were [fine] ... then I seen them mess up again"), so NOT
+  the HD textures. render_commands.cpp: SetBinocularsUp(bool) (called each
+  frame from MpFixesBinoculars: g_heldSpotter || own binoculars out) draws
+  the depth of field pass 56ccd878 while up (as SetPlayerDown does) and
+  prints "render: binoculars down after N frames; draws left out
+  meanwhile: <reason> xN" (first 40). Read that next: if "empty scissor"
+  or another reason shows, that is the side bars.
+- bots.cpp BigTest: the Back press every 25 s (scoreboard toggle) only with
+  COD3_BIG_SCOREBOARD=1 (Justin: it kept popping up while he watched).
+- CORRECTION: +0x3C6A0 of *(0x82BC CB00) (stored 24 at 823D1B54 /
+  823D1BDC) is a session STATE code (other stores 2, 4, 9; compares
+  cmpwi 24 in 823BB888, 823C8420, 823C85F0, 823CA7C0, 823CB450), NOT a
+  max-players field. Do not cap32 it.
+- 247 BIG-TEST-32-MAPS RESULT: all five maps finished clean, 28 bots +
+  host the whole 150 s each, no crash (only the usual 0x406D1388 thread-name
+  notice at start), median fps rimling 47, mp_farm 43, ordnance 43,
+  mp_merv 41, longyard 42; 40-50 killfeed lines a map, coloured by the
+  rule. Solo 32 is solid on five maps.
+- Justin's ini: texture_replace set back to 1 (22:25) after the test.
+- At the time of this build BIG-TEST-32-MAPS (247; rimling mp_farm
+  ordnance mp_merv longyard) was running; read big-test-32-<map>.log.
+
+### 247 SOURCE CHANGE (Claude, 2026-10-18): 32 players as a setting
+
+- Justin: "how close are we" for more bots. Answer given: solo 32 works
+  (242 BIG-TEST-32 full match, 37 fps); needed: a setting (this build), the
+  scoreboard's 24 rows (823A0180, menu widget rows: real work), more maps;
+  two-PC 32 needs testing together (network loops left at 24: 823ED658,
+  823D6518/823D6C08/823DB378, 825321C8; session max-players field 24 at
+  823CE344 / +0x3C6A0 stored by 823D1B54/823D1BDC: joining past 24 may be
+  refused).
+- MpCapClients (mp_fixes.cpp, static init) = COD3_PLAYERS if set, else
+  CoD3Recomp.ini "max_players" (GetModuleFileNameW dir) >= 32 -> 32. The
+  setting is Settings::Values::maxPlayers (load/save "max_players"), F11
+  Multiplayer checkbox "32 players (test, restart the game)". Fixed for
+  the run (generated code reads MpCapClients everywhere).
+- Game folder (not source): MAKE-FRIEND-UPDATE.ps1 / INSTALL-FRIEND-UPDATE
+  .ps1 / UPDATE-README.txt now carry the co-op bats, COOP-README.txt and the
+  newest ..\coop-test-*-for-friend.zip (Justin asked, 21:47).
+- Binocular ADS: left/right not fully black (only the centre fine). Test
+  set up: Justin's ini texture_replace = 0 (Claude changed it 21:48; SET IT
+  BACK TO 1 after). If the sides go black with it off, the upscaled
+  binocular overlay texture in textures\replace is the cause.
+
+### 246 SOURCE CHANGE (Claude, 2026-10-18): killfeed colours set at sub_82529D78
+
+- 0.5.245 TESTED (Justin, BIG-TEST): smokes thrown ("throws smoke ... 2
+  left", 84 smoke lines in the rimling log; 0.5.244 fix confirmed). Kill
+  feed still "green killed green" though the log said victim drawn red.
+- sub_82456920 has two colour paths: team game (0x82B913E4 +0x14 set):
+  sub_8244DB20 per name; otherwise sub_8247E2F0(entity) ("this machine's
+  player": green (k,1,k) else red (1,k,k), k = 0.25 at 0x820631A4). Bots
+  are this machine's (sub_823D9B50 wrappers), so all green. Both colours
+  end at sub_82529D78 (HUD feed add; r3 1, r4 killer text, r5 killer
+  colour r1+0x70, r6 victim text, r7 victim colour r1+0x60, r8 means).
+  0.5.246 paints r7 red and r5 by the attacker's side vs the host's there
+  (g_feedLine set by the 82456920 wrapper). The 8244DB20 wrapper is gone.
+- Justin: audio "delayed or strange" in the 245 rimling BIG-TEST. Log: 0
+  dropped, xma 0 refused, audio frames keep real time; fps 28-33 (was ~42
+  on 242's 24 rimling) with smokes now thrown (gpu 26-29 ms). Asked him if
+  mp_farm sounded fine and whether it is only in heavy smoke.
+- Rimling LOADED on 0.5.245 (the 243 load crash did not come back).
+- Justin (21:45, on 0.5.245): smokes seen; binocular ADS blackout now FINE
+  (no change made for it; reported fixed). Closed unless it comes back.
+
+### 245 SOURCE CHANGE (Claude, 2026-10-18): killfeed victim always red (Justin's choice 1)
+
+- Justin chose: the victim's name always red, the killer in his team's
+  colour. sub_8244DB20 has exactly two callers, both in sub_82456920
+  (0x82456B68 victim r25, then 0x82456C3C attacker r27). The 82456920
+  wrapper sets g_feedVictimColour = 3 - host side (host entity +520 -> +4,
+  only if 1/2); the 8244DB20 wrapper replaces r3 with it on the first call
+  whose team is 1/2, then clears it. Covers the host's own death (his team
+  object is the local one, so writing the team word could not work).
+  Log: "bots: killfeed line: ... (victim drawn red)".
+- 0.5.244 not yet tested when 245 was written (smoke rounds, 1K pool).
+
+### 244 SOURCE CHANGE (Claude, 2026-10-18): bot smoke rounds; 1K pool only at 24; 243 load crash
+
+- 0.5.243 TESTED (Justin ran BIG-TEST.bat): mp_farm finished, 0 apsMemory.
+  Rimling CRASHED at 36 s uptime while loading (after devmap from mp_merv):
+  "Guest fault: read at guest address 0x3B000000"; frames (symbolized with
+  the 0.5.243 exe/pdb): 821C08B0 <- 821C1758 <- 821C1AA0 <- 823FB698 <-
+  823FBA08 <- Mmio::CallIndirect <- 821E4CA8 <- 821D8CA8 <- coroutine
+  Start (a script thread reading a session message). New path; not seen
+  before. Only 243 change active there: all 9 particle pools x2 at 24 (~11
+  MB more from the game allocator 820FB738). 0.5.244 doubles only the 1 KB
+  pool at 24 (the one that ran dry), all 9 at 32. If the crash comes back
+  with that, it is not the pools.
+- Smoke count look (243): slot 5 [24 smokegrenade owned 0 clip#20=0]
+  [25 smokegrenade_axis owned 1 clip#21=0] [10 stielhandgranate owned 1
+  clip#10=2]: the smoke is given (2664) but its rounds stay 0 (the 2864
+  count call does not set them). Kit extras now write record +4*(172 +
+  def+1468) = count when 0, for the smoke and the frag, if owned. Log
+  "bots: kit extras: <name> rounds set to N".
+- Killfeed (243 log, mp_farm, 40 lines): bot sides are all 1/2, host side
+  1; colours follow sub_8244DB20 (different team from the local player =
+  red). Justin: "it should be red when you die not green" - ASKED which
+  rule he wants (victim always red? his own death red?). No change yet.
+- Justin: binoculars ADS overlay not fully black (edges). Not looked at
+  yet (cf. the Lee-Enfield scope blackout history in NEXT-SESSION).
+
+### 243 SOURCE CHANGE (Claude, 2026-10-18): particle pools x2 always; killfeed side log/fix; smoke count look
+
+- 0.5.242 TESTED (Justin ran BIG-TEST-32 then BIG-TEST; he asked Claude
+  NOT to drive his computer any more: ask him to run tests): 32 rimling
+  "finished", 28 bots / 29 session players, 0 apsMemory, roster trap 0,
+  36.9 fps, effects most 456 / nodes most 965. 24 rimling finished but 46x
+  apsMemory (1K pool, requests 0xE0/0x180/0x40); 24 mp_farm finished, 0.
+  "call: through a pointer to ..." lines at start-up (8280B610, 827B4110,
+  8279B190, 8278BF90, 827009x0) are in every run (known, handled); one
+  0x40xx from sub_823C9F00 <- sub_82403840 (per-bot session update, voice
+  object) at 24 too: handled, not a crash.
+- sub_8210ACA0 doubling now unconditional (24 and 32).
+- Justin: bot victims no longer red in the killfeed. Colour = sub_8244DB20
+  (team r3 = entity +0x208 -> +4; 1/2 compared with the CurrentClient+1
+  entity's; else white). sub_82456920 (r3 victim entity, r4 attacker)
+  wrapper now logs "bots: killfeed line: victim .. side .., attacker ..
+  side .., host side .." (40) and, for a bot victim side not 1/2, writes
+  his session player's +604 side for the call and restores it.
+- Smokes: no "throws smoke" in any 242 log; "has no smoke left" 65-97 per
+  run while loadouts give 1-2 smokes (mp_fixes kit extras: OnWeaponFor
+  2664 smokegrenade/_axis + 2864 count). BotNadeAmmo(smoke) = 0 always;
+  frags work ("frag button found 2", 56 throws). 0.5.243 logs "bots: smoke
+  count look, slot N: [w name owned clip#i=n spare#j=m] | slots ..." 3x.
+  NEXT: read it; fix BotNadeAmmo's smoke path (name/def/ammo index).
+
+### 242 SOURCE CHANGE (Claude, 2026-10-18): particle memory pools x2 at 32; damage-from table sink
+
+- 0.5.241 TESTED (Claude launched BIG-TEST-32.bat then BIG-TEST.bat from
+  Explorer via computer use, click tier: double-click the .bat):
+  - 24 regression: big-test-rimling.log + big-test-mp_farm.log, version
+    0.5.241, both "finished", 20 bots / 21 session players all along, no
+    apsMemory messages, no fault. 24.2 fps rimling, 50.4 fps mp_farm.
+  - 32: big-test-32-rimling.log: 28 bots / 29 session players 0..120 s,
+    roster trap 0 faults, player-object-pool 36 x 1392 OK. CRASH ~130 s:
+    "Guest fault: read at guest address 0x22DC3341", host frames symbolized
+    with llvm-symbolizer --obj=CoD3MP.exe (stage CoD3MP.exe + .pdb, absolute
+    address 0x140000000+off, --no-inlines): 82108EA8 <- 820FBE20 (effect
+    instance's child list +0x54/+0x5A) <- 8243B878 (spawn effect) <-
+    82440118 <- 82442840 <- 82552BE8 <- 82554BA0 (sound/cue event) <-
+    825555C0 <- 8252E2E0 <- 82557D60. Before it, 22x "native error enqueue
+    ... [apsMemory : pool(size=%d, count=%d) is empty] args 400 200 ..."
+    (pool +0x14 size 1024, +0 count 512).
+- Particle memory: sub_82430A58 (particle start-up, after 82109F38..F68 +
+  8210ACB8) adds 9 pools via sub_8210ACA0(count r3, size r4) -> 8210AB30 ->
+  8210A378 into the manager *(0x82A883F0); 512 x 16/32/128/256/512/1K/2K/4K/
+  8K. sub_8242EEE8 adds 13 more (500x64 .. 15x16K). Best-fit alloc
+  sub_8210A638 -> sub_8210A4C8 (pool empty -> the apsMemory message, null).
+  0.5.242: wrapper doubles count when MpCapClients > 24 (~8 MB + ~2.6 MB).
+  Log "effects: memory pool of N-byte blocks, M of them".
+- Damage table 82580B40 (G_Damage-ish): victim record r9, loop over
+  EntityList[1..24] for the attacker (cmpwi r10,24), not found -> li r10,-1,
+  then record + 4*(337 + index) += damage: index -1 = record +1344 (another
+  field). cap32 SINK337 at 82580D84 (addi r11,r10,337): with N > 24 and
+  index < 0, r11 = (MpDamageSink - r9) >> 2 so the rlwinm/lwzx/stwx reach a
+  64-byte AllocatePhysical sink. Readers of +1348 still see 24 only (credit
+  from 25-32 not kept).
+- 823EFCA8 (24-loops, stack arrays) is the VOICE relevance per local player
+  (session +0x139D0 voice object, 823B8088): players 24+ just aren't voice
+  candidates. Harmless for bots; humans take low slots. Left at 24.
+- Scoreboard 823A0180: rows at object +0x4C, memset 0x120 (24 x 12), loop
+  li r23,24 over EntityList[1..24]; list widget at object +0x338 (vtable,
+  +0xF0 row items; sub_824E6240/824E6520 fill cells). 32 needs the widget/
+  menu to have 32 rows and room after +0x16C: NOT done.
+- patch_recomp.py: cap32 declarations are now added line by line when
+  missing (a file patched by 0.5.240/241 already had the old block, so a new
+  helper like MpDamageSink would not have been declared). Dry run on
+  ppc_recomp.90.cpp: SINK337 patched once, idempotent.
+- NEXT: build 0.5.242, rerun BIG-TEST-32.bat (expect "finished", no
+  apsMemory), then BIG-TEST.bat; then scoreboard; then a two-PC 32 test
+  (both PCs COD3_PLAYERS=32).
+
+### 241 SOURCE CHANGE (Claude, 2026-10-18): 32-test round 2: per-player object pool, roster name getters
+
+- 0.5.240 BIG-TEST-32 (rimling, COD3_PLAYERS=32, 28 bots + host): full 150 s,
+  ~40 fps, 29 session players, bots in slots 24-31 spawn/die/respawn
+  (death drops for slots 24-31 in the log). Log: build-logs/
+  big-test-32-240-rimling.log (summary lines only kept in HANDOFF).
+- Problems seen: (1) "call: through a pointer to 0x40xx" from sub_823C9F00
+  (voice object at session+0x139D0 read as 0 -> guest address 0 held entity
+  handles 0x4005..0x401C): sub_82427170 hands out per-entity objects (entity
+  +504) from a pool of 24 at 0x82607890 (1392 bytes each; +0x8280 pointers,
+  +0x82E0 indices, +0x8340 objects base (static 0x82607890), +0x8344
+  count); probe 824271A8 saw the count reach 24. Fix: MpPool504 (mp_fixes):
+  with 32, a block of 36 objects + 36 pointers + 36 indices, the base word
+  pointed at it on first use; cap32 kinds P504 (the 14 addi -32128/-32032
+  sites in 820D5BD0 free, 820D64E8 reset, 820D6580 fill, 82422390,
+  82426A48, 82427170 alloc) and P504d (fill's index stores +96..+116 -> +48),
+  N for the fill bound 820D660C (6 at a time -> 36) and alloc 824271A8.
+  (2) roster trap: inline roster entry 1 +104 (names) read via 821DF2E0 /
+  820B00B8 / 8254D098 / 8254D180 (string helpers) and entry 0 +604 by
+  823D82A0. Name/team getters not redirected: 8239EF3C, 823A03B4, 823D9054
+  (addi +4216 = roster +104) and 823D82B4 (+4716 = roster +604): R4216/R4716.
+- CheckPlayerStorage / CheckSessionPlayerStorage count Active() slots.
+- Still open: scoreboard shows 24 rows (823A0180 rows at +76, 24 x 12);
+  823EFCA8 relevance loops at 24; second 24-pool at 0x825FFBE0+0x327C0
+  (820D6710, only 0..5 used); 82580B40 damage table.
+
+### 240 SOURCE CHANGE (Claude, 2026-10-18): runtime player count (24 / 32), 189 cap32 sites, roster trap
+
+PROBE RESULT (0.5.239, BIG-TEST rimling + mp_farm, 20 bots, 21240 server
+frames, devmap HAS a session: 21 session players): 357 of 910 sites ran.
+Patterns: player loops see 1..24 every frame (e.g. 823F01D8 375/frame,
+823E5FC0 71/frame); "nobody" tests see 0 and 24 (local places +22929);
+EntityList walks 4..96; 30800/30932 "registry of 24" (82435810 etc.) and
+switch/clamp compares are unrelated. Files: build-logs/cap-probe-239-*.csv.
+
+- MpCapClients (mp_fixes.cpp): 24, or 32 with COD3_PLAYERS=32. Read by the
+  generated code and PlayerCapacity::Active()/MaxBotsNow().
+- scripts/patch_recomp.py patch_cap32 (runs before patch_cap_probe; the
+  probe now skips cap32 note lines): docs/player-limit/cap32-sites.csv,
+  189 sites / 128 functions, located like the probe (asm, occurrence,
+  total). Kinds: N (24), N-1, N+1 (25 = "special" local place / ranged
+  max), N4 (EntityList byte 96), set4992 (0x1D400 client-list ends ->
+  N*4992), delta2992 (82594A38 record-init end), guard100 (EntityList +100
+  level copy stored only while N <= 24), R<off> (redirect an inline roster
+  base through MpSessionPlayerAddress), Rend22928 (MpSessionRosterEnd),
+  groups6 (6-unrolled roster loops: (N+5)/6 groups). At N=24 every line
+  computes the original value.
+- Covered: server clients (825304DC/82531758/825350B4 ends, 825314EC,
+  825315F4 countdowns, 82530294, join 8240480C/824048E4); game: level
+  maxclients 82594A08 (level 0x82C281D0 +148), record init 82594A38, record
+  countdown 82595128, player entity spawn 8249B1FC, 824BADC8, EntityList
+  clear 824B1BE0, EntityList walks 825627DC/82562944/8258ADA0, 824BEADC,
+  8248FEB4; session: roster loops, local-place "nobody" tests and stores
+  (24 -> N, 25 -> N+1), 61 ranged read/write maxima (821AF1E0 read,
+  821AFF20 write, li r6,24/25), party-list inits (11 bytes of 24).
+- Deliberately LEFT at 24 (players 24+ are skipped there, no overflow):
+  823EFCA8 (per-frame relevance: stack arrays 24 x 4 and 24 x 12 at
+  r1+112/+212), scoreboard 823A0180/8239EC38 (24 rows of 12 at +76),
+  82580B40 (per-entity damage table at entity+1348, 24 words; fallback
+  index -1 -> slot 336), 824F9410 / 82507D28 (EntityList walks writing
+  12-byte entries), 823ED658 (network), 823D6518/823D6C08/823DB378
+  (per-player message loops), 825321C8 (6-unrolled server scan),
+  823D1D60 etc. (lobby arrays strides 160/200/80/48), 823CE344 /
+  +0x3C6A0 (session max-players field, stored 24 by 823D1B54/823D1BDC).
+- ROSTER MISSES FOUND (inline roster read after 0.5.213's relocation;
+  fixed for 24 too): 823DD0E8 (find by xuid, base +4248), 823DC678 (count,
+  base +4900, 6-unrolled), 823DC918 (clear +144, base +4256), 823EC678
+  (backwards walk from object+22928). Session storage now 36 entries
+  (session_player_storage.h) so the 6-unrolled walks stay inside.
+- Roster trap (COD3_ROSTER_TRAP=1): pages wholly inside the inline roster
+  are PAGE_NOACCESS once the roster moves; Kernel::FaultHook (new, first in
+  GuestFaultHandler) logs "roster trap: sub_X read/WROTE ... entry n +f",
+  opens the page, single-steps (EFlags TF) and closes it again; summary
+  every 30 s. Finds the remaining missed roster accesses at run time.
+- Host: bots.cpp arrays sized StorageClients (32), loops bounded by
+  ActiveSlots(); SessionMax -> SessionMaxNow(); bot names 1..N; BotsAsk
+  clamps to N-4. mp_fixes: FindFree/MpSessionPlayerAddress use Active();
+  spare server slots are not marked 0xA7 when 32 are in play.
+- BIG-TEST-32.bat: COD3_PLAYERS=32, 28 bots, roster trap, rimling;
+  big-test-32-<map>.log, cap-probe-32-<map>.csv. BIG-TEST.bat takes
+  COD3_BIG_TAG for the names.
+- Syntax: bots.cpp / mp_fixes.cpp stub-only errors; patch dry run on the
+  0.5.238 generated copy: cap32 189 + probe 910, idempotent, 14 changed
+  files clang-clean.
+
+### 239 SOURCE CHANGE (Claude, 2026-10-18): player-cap probe (910 sites) + BIG-TEST (no play change)
+
+- Goal (Justin: "keep working until this is figured out ... big games"):
+  sort the ~900 retail instructions that compare with / load 23/24/25 into
+  "player limit, must become 32" vs unrelated, by RUNTIME evidence instead
+  of reading each by hand.
+- scripts/patch_recomp.py `patch_cap_probe` (runs LAST in the mp chain):
+  docs/player-limit/cap-probe-sites.csv (id,address,function,asm,occurrence,
+  total,reg). 910 sites in 574 functions: every `cmpwi/cmplwi rX,23|24|25`,
+  `li rX,23|24|25`, `subfic ..,24|25`, plus `cmpwi/cmplwi ..,92|96|100|128`
+  inside the 396 functions that load EntityList (lwz -14340(rX)). Inserts
+  `MpCapProbe(id, ctx.rX.u32); // cap probe 0.5.239` before the site's code
+  line (value 0 for li/subfic). Located by (asm text, occurrence among
+  identical asm lines, total) in the post-chain generated C; every site is
+  verified before anything is written (dry run in scratch: 910 inserted,
+  second run idempotent, 70 files clang -fsyntax-only clean except the
+  pre-existing coroutine goto in ppc_recomp.78).
+- CSV built from the retail disassembly (llvm-objdump of the decrypted
+  image) aligned to the generated C by counting asm comment lines from the
+  function start; the alignment treats "// session roster 0.5.213" as an
+  instruction and jumps to 824048E4 after "// server client scan 0.5.214".
+  Skipped: 824048B4 (inside the replaced scan), 82483124 (already 32).
+- mp_fixes.cpp: MpCapProbe/MpCapProbeWrite/MpCapProbeTick. Per site hits,
+  low/high (int32), 64-bit mask of values 0..63 seen, count >= 64. Writes
+  cap-probe.csv (exe folder) every 30 s, at exit, and from BigTest.
+  COD3_NO_CAP_PROBE turns it off.
+- bots.cpp BigTest (COD3_BIG_TEST=<maps>, COD3_BIG_BOTS=20,
+  COD3_BIG_SECONDS=150): devmap, A until alive, god, BotsAsk; status line
+  every 15 s ("big test:"), back (scoreboard) every 25 s; at the end writes
+  the probe and TerminateProcess. Called after PhotoTour::Frame in
+  PPC_FUNC(sub_82535810), as is MpCapProbeTick.
+- Game folder BIG-TEST.bat: one process per map (a second devmap in one run
+  loses the session), copies CoD3MP.log -> big-test-<map>.log and
+  cap-probe.csv -> cap-probe-<map>.csv.
+- Reading it: a player loop shows hits ~ frames x 24 and seen 0..24; a "no
+  player" test sees 24; sites with 0 hits are dead in these tests. devmap
+  has no session (bots get no session player), so the session layer needs
+  a real System Link match too.
+- Next: merge the probe files, classify live sites, write the 24->32 site
+  list (same CSV-driven patch, with value checks), drop the EntityList +100
+  copy stores, then raise PlayerCapacity::ActiveClients.
+
+### 238b RESEARCH (Claude, 2026-10-18 19:45, no code change): player cap - all 212 compare/store/loop 24 sites classified
+
+- Loading pictures done for all 11 DLC maps (game folder textures\replace\maps\<map>\, both keys);
+  mpdepot2 10, mpstalag 11, mp_guns 4, ordnance 4 from the v3 reshoot (mapping json in build-logs).
+- Original code disassembly WITHOUT CoD3Scan: llvm-objcopy -I binary -O elf32-powerpc mp.bin mp.elf;
+  llvm-objdump -D --triple=powerpc (address = offset + 0x82000000). mp.bin = decrypted image
+  (scratchpad xexwork/unxex.py). Never upload either.
+- docs/player-limit/COMPARE-REVIEW-239.md + compare-review-239.csv: groups A session roster 62,
+  B server clients 6, C lobby/party arrays in the session object 14 (NEW: storage still 24 - strides
+  160/200/80/48/8 at session +632/+7536/+4443/+6336), D entity/local-place 10, E UI 12, F state enum
+  14 (leave), G unrelated 93 (registry 0x82C77850 of 24 singletons etc.), H unknown 1.
+- Next: relocate group C storage; entity slots 24..31; then bounds A+B+C+D behind one switch.
+
+### 238 SOURCE CHANGE (Claude, 2026-10-18): loading picture picks installed; COD3_PHOTO_VARIANT
+
+- Justin's picks (v2 sheets = photo-tour.log view N): rimling 6 (172240),
+  longyard 4 (173449, gamma 0.75 x1.12), mpmonte 7 (173632), mp_hilltops 9
+  (174608), mp_isle 9 (175216), shipyard 5 (175923), mp_farm 5 (180532).
+  Pillar bars cropped, 2:1 crop at 45% from top, 2048x1024 Lanczos, each in
+  game folder textures\replace\maps\<map>\ as BOTH
+  1024x512_f18_05F0F9261D8E1859.png and 1024x512_f18_4884F46D37EDE122.png.
+  Still to confirm which key the loading screen shows. Reshoot: mpdepot2,
+  mpstalag, mp_guns, ordnance (ordnance keeps shot 7 for now).
+- bots.cpp PlanViews: COD3_PHOTO_VARIANT (0-5): high cameras +v*0.6 rad,
+  roof +v*1.1 rad, first v*6 accepted streets skipped. Game folder:
+  PHOTO-TOUR-RESHOOT.bat (variant 1, the 4 maps).
+- Next after pictures (Justin): back to the player cap (cap 24; HANDOFF 218,
+  docs/player-limit/RESUME-214.md, entitylist-uses-218.csv).
+
+### 237 TEST 6 (Claude, 2026-10-18 18:30, no code change): first two-PC co-op on 0.5.237
+
+- Justin HOST, joiner 100.87.12.49, Forest. Logs: game folder
+  coop-host-play.log + coop-relaunch.log; findings for Team Friend in
+  docs/build-logs/COOP-TEST-6-FINDINGS.txt, zip coop-test-6-for-friend.zip
+  (D:/Call of Duty 3 (USA, Europe)). Joiner's logs NOT yet received.
+- WORKS: film share + held skip (45-83 s), MakeBody 232 from spawner 22
+  (96 s), stance/jump/move and shots both ways, grenades/smoke with fuses,
+  CWX1 relaunch notice. Justin: closer to in sync than test 5.
+- PROBLEMS: stand-in hit for 586/449/821 exactly when the joiner's smoke
+  arrived (153/221/266 s; own projectile hurting the stand-in?); 3 smokes +
+  1 frag "NOT thrown" (267-284 s); stand-in 232 gone at 382 s, no friendly
+  spawner, borrowed soldier 6, then mission restart (402 s) made dixon
+  (soldier 3) the stand-in; relaunch at 419 s: relaunched host only reached
+  the front-end menu (log ends ~5 s, world sent once, no reconnect);
+  stance changes arrive in quick pairs (->1 then ->4). Host fps min 7 /
+  median 53 / max 144. All co-op items are Team Friend's (coop.cpp).
+
+### 237 SOURCE CHANGE (Claude, 2026-10-18): Team Friend co-op v33 + v34 merged; photo tour results
+
+- coop-for-friend (2).zip (Justin's Downloads, 18:07): coop.cpp (106728 B,
+  v34) taken unchanged. input.cpp/input.h in the package were made from a
+  pre-0.5.231 copy (no Input::PressButton, which the photo tour needs), so
+  their input-sprint.diff was applied by hand onto ours (l3/r3 pad names,
+  g_sprintHeld, Input::SprintHeld()); kernel_xam.cpp: their 3+2 lines
+  (CoopBeforeRelaunch before Relaunch for default.xex, campaign only);
+  result identical to theirs except our PressButton. native_options.cpp
+  and title_fixes.cpp in the package equal ours. Their notes:
+  docs/build-logs/COOP-TEST-5-REPLY.txt, COOP-V34-NOTES.txt.
+- v33: shots = +52 rise while rec +1352 bit 1 (attack) and <= 1200 ms;
+  stance from rec +208 0x20 (crouched), prone from view height <= 20 held
+  0.3 s, changes held 0.15 s; body keeps the lowest height of 0.6 s
+  (jumps); host attacks toward the joiner's body do no damage; CWX1 on
+  relaunch, joiner follows, coop-relaunch.log, socket retries; delay 0.15 s.
+  v34: grenades (type 3 'grenade'/'smoke_grenade', CWG1, magicgrenade
+  sub_824B27A8); campaign sprint via g_speed x1.5 while Input::SprintHeld
+  (COD3_NOSPRINT=1 off).
+- Photo tour 0.5.236 ran on all 10 maps: learning runs worked (mpdepot2
+  670 places, longyard 828, mpstalag 737, mp_hilltops 360, mp_isle 734,
+  shipyard 421, mp_farm 890), 12 shots each; contact sheets in the game
+  folder's photo-picks\<Map>-shots-v2.jpg. Some eye-height shots face a
+  wall (paths over walls). Learning runs show split screen on screen only.
+
+### 236 SOURCE CHANGE (Claude, 2026-10-18): photo tour: eye-height street views, learning runs; 0.5.235 test results
+
+- Claude ran Justin's test on his PC (computer use, 16:55-17:05, 0.5.235,
+  PROFILE-CPU.bat, System Link Marseille, bot_add 20, died once):
+  DEATH VIEW FIXED (blurred, critically wounded view soft like the console).
+  LOADING PICTURE: used.txt shows the System Link load used
+  1024x512_f18_4884F46D37EDE122 (the global CoD3 splash upscale) at 82.0 s,
+  not 05F0F926 (which the 16:29 run replaced per map). Shot 7 now also at
+  textures\replace\maps\ordnance\1024x512_f18_4884F46D37EDE122.png (game
+  folder only). Unconfirmed which one the screen shows in which path.
+  PROFILE: CoD3MP.log stopped at 307 s (cut mid-dump, 2.0 MB) while the
+  game ran 4 more minutes, and no "profile of the" report was ever written
+  (ProfileHostThread is only started for "cp", kernel_video.cpp:1335).
+  Unexplained; look at log.cpp's pipe reader and the profiler thread
+  (LoadSymbols / SymFromAddr on CoD3MP.pdb) before asking for another run.
+  Also: the device bridge timed out twice during play (heavy load).
+- Computer use cannot turn the camera: the game ignores the synthetic
+  absolute mouse moves, and typed console text is unreliable. So the tour
+  plans the views itself.
+- bots.cpp PhotoTour::PlanViews (>= 20 learnt places): 4 high (0.75 radius,
+  z max(mz+450, place+300), at the middle), 2 roof (0.45 radius at +0.3 and
+  +pi rad, place+200), up to 6 eye height: for every places/400-th place and
+  16 directions, places ahead within 110 lateral / 220 vertical, followed
+  while gaps <= 350, depth >= 900; deepest first, cameras >= 1400 apart and
+  not within 20 degrees of a near one (< 2500); z place+64; pitch
+  clamp(atan2(z - (farZ+40), depth) - 3, -4, 6). Tested standalone on
+  ordnance/rimling data (0.1 s; same as the Python prototype). The old
+  8-view code is kept behind "else if (false)".
+- COD3_PHOTO_LEARN=<map>: devmap, alive -> god, BotsAsk(16), stage 4 for
+  240 s, SaveMapKnowledge, next map/terminate. PHOTO-TOUR.bat calls :one per
+  map: a learning run first when bots\maps\<map>.txt is under 8000 bytes.
+
+### 235 SOURCE CHANGE (Claude, 2026-10-18): Team Friend coop.cpp v32 + native_options.cpp (options kept) merged
+
+- From coop-for-friend.zip (Justin, 16:30): CoD3Host/coop.cpp (88413 B,
+  v32), native_options.cpp (15188 B), title_fixes.cpp (byte-identical to
+  ours, not written), PLAY-COOP-HOST/JOIN.bat and COOP-README.txt (identical
+  to the game folder's). Taken unchanged; their notes:
+  docs/build-logs/COOP-TEST-4-REPLY.txt.
+- v32: MakeBody (dospawn sub_824B9118 from an actor_ally_* spawner, flag 64
+  for the host's body; borrow fallback, COD3_COOP_BORROW=1); stance from the
+  record's +184 view height to actor +656 (allowedstances sub_8249D140);
+  shots by the record's weapon time +52 rise -> shoot sub_824B8FF8; CWP1 36
+  bytes, CWQ1 12 bytes on port+2; mission end not taken for a restart;
+  turned things (1 degree) sent as moved (flag 16); COD3_COOP_MAP ignored
+  under COD3_LAUNCHDATA.
+- native_options.cpp (campaign only, #ifndef COD3_MP): state block
+  0x82A8E610 +60..+107 and the brightness float +400 saved to
+  saves\options-sp.bin on change (polled once a second from coop.cpp's
+  sub_82535E80 hook, NativeOptionsPoll) and restored in the defaults hook
+  within 30 s of a non-relaunched start. COD3_NOSAVEOPTIONS=1 off. +400 as
+  brightness unconfirmed (their note).
+- No new host symbols outside the three files; multiplayer unaffected
+  (both are #ifndef COD3_MP). UNTESTED between two PCs; both PCs need
+  0.5.235 (CWP1/CWQ1 sizes changed). Friend update: MAKE-FRIEND-UPDATE.bat.
+
+### 234 SOURCE CHANGE (Claude, 2026-10-18): death view blur; per-map texture replacements; Marseille is the cp thread, not the GPU
+
+- Evidence: Justin's 0.5.233 Marseille run (CoD3MP.log 16:01, 20 bots, one
+  death; death screenshots 155906/155906-2/155931/155932(-2); frame 10493
+  logged at death frame 7, draws.bin beside it).
+- DEATH FLASH. Frame 10493's post chain: scene resolve 04350000 (1040x624),
+  particles at half size (0A8E0000/0A780000, ps 39753ca3, 2a892b14), then
+  013C0000 (fmt 6) resolve; 10e0411b downsample -> 02100000 260x156;
+  0925661f blur; 56ccd878 (the DOF blend back, 42 dw) and 5fb07e1b (shell
+  shock pass, 231 dw) were loaded and DRAW_INDX'd by the title but never
+  drawn by the host (no "frame ... draw" line; skips "aim blur off x71");
+  then cc16ad469f5cb8cc (vs d76d2474, vte 400) samples 013C0000 twice =
+  the double vision; bloom 22241069 / 0a8fb702 / fe657844. The crop of
+  155906-2 shows two sharp copies (two star icons, two bodies). Cause:
+  aim_depth_of_field=0 (settings default) skips 56ccd878 always
+  (render_commands.cpp IsAimBlurProgram). Fix: RenderCommands::
+  SetPlayerDown(bool) (atomic); the skip is not applied while the host's
+  player is down. bots.cpp HostDeathCapture calls it every server frame
+  (dead = health <= 0 and state 3/4; record 0 -> false). Logs "render: the
+  host's player is down/up again". 5fb07e1b (shell_shock_blur) left as is
+  (its copy was black, render_commands.cpp 1083). Host only: a joiner's
+  copy does not run sub_82535810's hook.
+- MARSEILLE PERF (correction of 228's "GPU bound"): RenderStats' gpu ms is
+  end - begin timestamps of the frame = GPU timeline span incl. idle, so it
+  tracks the frame time whenever the card waits. Per draw stamps gave
+  d24754093992 (world, 5 textures, normal mapped; avg 104 indices = 35 tris
+  a draw in frame 10493) ~9 us a draw, depth only draws 13 us: the arrival
+  pace, not the cost. Frame time vs draws (stats lines): 1177-1756 draws
+  18-19 ms (floor), 2927 24.6, 4711 35.7, 5141 40.1: about 7 us a draw
+  above ~2000 draws. profile: 3.8 us a draw of draw path (buffers 1.2,
+  textures 0.55, constants 0.56, bind 0.57); cp waits for the title 1%;
+  "fingerprints over 33 MB a frame" (8.5k looks, 5.7k by pages). So the cp
+  thread is the limit: ~3.8 us draw path + ~3 us elsewhere (PM4 parse,
+  register writes ~300k a frame, driver). render_stats.cpp: COD3_GPU_DRAWS
+  now opt in (was RenderSwitch, default on in MP since 228).
+  NEXT: PROFILE-CPU.bat (COD3_HOSTPROFILE=cp,main) standing in a heavy
+  Marseille view; then cut the top functions (likely the buffer
+  fingerprinting and the packet loop).
+- PER-MAP REPLACEMENTS: texture_pack.cpp Scan(): replace\maps\<map>\<key>
+  (exactly 3 path parts, first "maps") goes to g_mapReplacements[map], not
+  the global table. Load(..., std::string* forMap): the current map's
+  (Kernel::CurrentMap lower case, set when dlcN:\mp\<map>\<map>.cod opens)
+  first; used.txt says "replaced for <map>"; log "replaced from
+  maps\<map>\". render_resources.cpp TextureEntry.replacedFor (cleared at
+  each UploadTexture); a cache hit whose replacedFor != CurrentMapKey() is
+  uploaded again (the shared DLC picture may sit at the same address with
+  the same texels on the next map).
+- LOADING PICTURE: 0.5.233 used.txt: 1024x512_f18_05F0F9261D8E1859
+  NOT-REPLACED first at 19.6 s, after menus (<= 6.6 s) and before the map's
+  textures (22.3 s); D:\mp\loadscr.cod read. Not proven to be the loading
+  picture (no dump existed). Dump(): with texture_dump off, a 1024x512
+  texture with no replacement is still saved (12 a run), logged "a 1024x512
+  picture with no replacement ... while the map is". Shot 7 (150928, 69..1833
+  content, 2:1 crop at 45% from top, 2048x1024 Lanczos) committed as
+  game folder textures\replace\maps\ordnance\1024x512_f18_05F0F9261D8E1859.png.
+  Check the next log for "replaced from maps\ordnance" and the dump; if
+  the loading screen draws a sub rectangle, refit to the dump's framing.
+- Syntax: texture_pack/render_stats/render_commands/render_resources with
+  stub windows/d3d11 + ppc stub: error counts identical to the unedited
+  files (52/0/4/13, stub only), none on changed lines.
+
+### 233 SOURCE CHANGE (Claude, 2026-10-18): free photo mode (COD3_PHOTO_FREE)
+
+- 0.5.232 tour (photo-tour.log): rimling, ordnance (8 views from above each),
+  mpdepot2, longyard (spawn views, 0-1 learnt places) done and each process
+  ended by TerminateProcess; the run stopped after longyard (7 maps left).
+  Shots 150748-151159; contact sheets made for Justin (outputs/photos).
+- PhotoTour::Free(): COD3_PHOTO_FREE=<map>: same load/A-press/spawn, then
+  "god / noclip" only, Overlay::Notice, stage 3; split-screen clients kept
+  at 0 in stage 3. HUD left on (F10 toggles in overlay.cpp's state).
+- Game folder: PHOTO-FREE.bat (asks the map), PHOTO-TOUR-REST.bat (the 7
+  remaining maps through PHOTO-TOUR.bat).
+
+### 232 SOURCE CHANGE (Claude, 2026-10-18): photo tour views from above; TerminateProcess at the end
+
+- 0.5.231 live: rimling spawned (A presses worked, state 1 -> 3), 4 views
+  shot (145344-145356): HUD/gun hidden OK, split screen gone, but low (+140
+  over the place) and blocked by walls/trees, view 4 indoors. "quit" then
+  froze the game (fps 0, window stayed): PHOTO-TOUR.bat stuck on map 1.
+- PlanViews: 8 views: k*45 deg around the centroid at 0.75 (even k) or 0.45
+  (odd k) of the max radius, snapped to the nearest learnt place; z =
+  max(mz+450, place z+300); yaw to the centroid; pitch = atan2(z-mz, dist)
+  capped 35. Spawn fallback: 4 yaws x (+350 z pitch 20, +60 z pitch 5).
+- End: COD3_PHOTO_QUIT -> detached thread, Sleep 3 s, TerminateProcess.
+
+### 231 SOURCE CHANGE (Claude, 2026-10-18): photo tour: A through the team/class menus; one map per process
+
+- 0.5.230 tour log: "devmap rimling" loaded (map knowledge loaded) but the
+  host stayed on the team select (never alive) -> 2 min timeout; the next
+  "devmap ordnance" from inside the game ended with "game session no longer
+  available" (Justin). Fixes: input.cpp/h Input::PressButton(name) (atomic
+  buttons + 2 reads, returned first by ScriptedButtons); PhotoTour presses A
+  every 1.5 s once g_mapKnowName == map and the host is not alive (state 3,
+  health > 0), from 10 s after the devmap. PHOTO-TOUR.bat loops the maps,
+  one CoD3MP.exe run each (start /wait, COD3_PHOTO_TOUR=<map>,
+  COD3_PHOTO_QUIT=1), appending each CoD3MP.log to photo-tour.log.
+- devmap from the menu came up as 4-player split screen (4 team menus,
+  Justin). PhotoTour writes LocalState(1..3) (0x82C7A270 + k*0xc88 + 0xb8)
+  to 0 every frame once the map is in ("local client k was N").
+- Syntax: bots.cpp 0 (stub localtime_s only), input.cpp 41 stub-only (same
+  as before).
+
+### 230 SOURCE CHANGE (Claude, 2026-10-18): Team Friend coop.cpp v31 + title_fixes film sharing
+
+- From ~/Downloads/coop-for-friend (1).zip (their 0.5.231 numbering;
+  COOP-TEST-3-REPLY.txt in build-logs). coop.cpp replaced whole (adds
+  CoopFilmActive/CoopFilmStop/CoopFilmEnded, CWR1/CWF1 on UDP port+4/+5,
+  interpolation buffer COD3_COOP_DELAY (0.1 s), COD3_COOP_SNAPPY=1 old way).
+  Same overrides (sub_82451C68, sub_82517A00, sub_82535E80).
+- title_fixes.cpp replaced whole: v30 auto-skip removed; sub_824D0470 inside
+  the film asks CoopFilmStop(pressed) in co-op; sub_824EEBA0 calls
+  CoopFilmEnded after the film. COD3_SKIPFILMS=1 outside co-op still skips.
+  (title_fixes is campaign-only, coop.cpp campaign-only: MP unaffected.)
+- PLAY-COOP-HOST/JOIN.bat identical to v30 (no change in the game folder).
+- Syntax (campaign defines): coop.cpp 0, title_fixes.cpp 0.
+
+### 229 SOURCE CHANGE (Claude, 2026-10-18): PhotoTour (DLC loading pictures); F10 photo mode
+
+- DLC dlmaps.txt (Bravo/Valor/Champs) give each map only a loading title and
+  location, no picture: all 11 DLC maps share one loading image (to find:
+  dump while loading a DLC map). Per-map replacement needs a texture_pack
+  change (folder per map) - NOT done yet; pictures first.
+- bots.cpp namespace PhotoTour, called after the server frame in the
+  sub_82535810 hook. COD3_PHOTO_TOUR=1 (11 DLC paks) or a comma list;
+  COD3_PHOTO_QUIT=1 quits at the end. 20 s after start: "devmap <pak>"
+  (2 min timeout), wait g_mapKnowName == pak and host health > 0 (+8 s),
+  "god / noclip / cg_draw2D 0 / cg_drawGun 0", 4 s, views: from
+  bots\maps\<pak>.txt (>= 20 places) the farthest place per quadrant
+  around the centroid within 85% of the max radius, +140 z, yaw to the
+  centroid, pitch 10 down; else 4 yaws from the spawn (+60 z). Each view
+  held 4.2 s (record +0..8 written, +16..24 zeroed; client view angles at
+  0x82A57900 + index*6352 +1668/+1672 nudged by the difference to record
+  +204/+208), screenshot at 3.5 s. Log "photo tour: <map> view N ...
+  screenshot HHMMSS". (0.5.106 note: setviewpos did not move the host, so
+  the origin is written.) Known maps: ordnance rimling mpmonte mp_guns
+  shipyard; the other six use spawn views.
+- overlay.cpp: F10 toggles cg_draw2D/cg_drawGun; F12 skips the draw log in
+  photo mode. Help line updated.
+- Game folder: PHOTO-TOUR.bat.
+- Syntax: bots.cpp 0 (stub-only localtime_s); overlay.cpp stub-only
+  (VK_F10 missing from the stub).
+
+### 228 SOURCE CHANGE (Claude, 2026-10-18): GPU per-draw timing in MP; death frame draw log; medic kit lines
+
+- 0.5.227 live (ordnance, 20 bots): REVIVE WORKS: slot 20 "stands slot 0 up
+  (Plyr_Revive, handles 00008001 00008015): health now 100, state 3" ->
+  REVIVED. Other trips: several "took too long" (22 s, navigation), host
+  "not revivable" while state 3 health <0 (dying, before state 4).
+  Medics still 2/20: bot_kits.h picks the kit with the lowest team
+  count/weight, ties -> first line; with 15 lines and ~10 bots a side every
+  line is used once and weights never matter. bot_kits.txt: 2 more medic
+  lines (thompson, mp40) after scout -> 3 medics a side.
+- Render (stats/profile on): RTX 2070, 1800x1080 MSAA 4x (antialiasing=3),
+  console_depth=1. Quiet: 50 fps, cpu 11.6 ms, GPU 19.4 ms, 2208 draws,
+  4552 texture switches. Heavy: 11-18 fps, GPU 48-92 ms, 4000-5500 draws.
+  profile: 3.4-4.7 us a draw (buffers 1.1-1.8, textures 0.5-0.9, constants
+  0.55, bind 0.55). => GPU-bound. Suspects: console_depth (depth written in
+  the pixel program, no early Z: overdraw of smoke/fire), MSAA 4x resolves.
+  render_stats.cpp: COD3_GPU_DRAWS default on in MP, sampled 1 frame in 8
+  ((g_frames % 8) == 0 in BeginFrame): "gpu draws: ... the most:" list of
+  pixel programs by GPU ms every 5 s.
+- Death flash (0.5.226 capture, death by Bot 4): screenshot frame 2 full
+  blur, frame 6 sharp standing view (frozen moment of the hit), 12/20 that
+  picture ghosted over the ground death cam. A retail "double vision" pass
+  whose copy is sharp here (console's is low-res). HostDeathCapture now
+  ignores state 0 (spawn screen; 0.5.226's deaths 1-2) and calls
+  Render::LogNextFrame at frame 7 of the first death (draw log + draws.bin
+  in screenshots) to find the pass/program.
+- Game folder: CoD3Recomp.ini texture_dump 1 -> 0 (left on since the
+  campaign menu pass).
+- Syntax: bots.cpp 0; render_stats.cpp 41 stub-only (same as before).
+
+### 227 SOURCE CHANGE (Claude, 2026-10-18): coop.cpp v30 + title_fixes film skip from Team Friend
+
+- From ~/Downloads/coop-for-friend.zip (COOP-TEST-2-REPLY.txt in build-logs).
+  coop.cpp v30 replaced whole (SmoothFollow stand-ins; +580 script-target
+  soldiers only after 10 s; 'delete_me' never; stand-in replaced when gone;
+  30 s fallback from first soldier; non-soldiers paired within 1500; restart
+  count in CWL1 bytes 68-71 (lobby packet 68 -> 72: both PCs must match);
+  joiner brought beside host >1500 away 5 s after load; COD3_COOP_MAP).
+  Same overrides as v29 (sub_82451C68, sub_82517A00, sub_82535E80).
+- title_fixes.cpp: theirs == ours + title_fixes-filmskip.diff (checked): adds
+  sub_824D0470 override (answers 1 inside sub_824EEBA0 when COD3_SKIPFILMS,
+  default on when COD3_COOP set) and a log line in sub_824EEBA0. Campaign
+  only (#ifndef COD3_MP). No other host file overrides sub_824D0470.
+- Game folder: PLAY-COOP-HOST.bat (asks for COD3_COOP_MAP) and
+  PLAY-COOP-JOIN.bat from the package; COOP-README.txt unchanged.
+- Syntax (campaign defines, stub6 winsock): coop.cpp 0, title_fixes.cpp 0.
+
+### 226 SOURCE CHANGE (Claude, 2026-10-18): revive via Plyr_Revive; host-down medic report; render profile on in MP; death capture
+
+- 0.5.225 live (ordnance, 20 bots): "perf:" over 5 s with bots: bots 1.4-3.1 ms
+  (40-83 traces a frame, 0.4-0.7 ms), server frame 6.8-8.6 ms, rest 10-30 ms;
+  before bots (host alone): rest 25-36 ms, 135-188 frames/5 s. render line:
+  22.6-54 fps, render cpu 11-15 ms, 6319 draws, 15164 texture switches, 641
+  program switches a frame; "cp: 0% waiting for the title" (CP always busy).
+  Kernel: NtWaitForSingleObjectEx/NtReleaseMutant x285M each in 279 s (job
+  lock, ~1M/s, known). Conclusion: client/render side, not bots.
+- Revive: 6 direct sub_823E86A8 calls (message 93), none took; medic still
+  held shotgun (MpFixesSwitchWeaponFor mp_revive does not change +164).
+  sub_823E86A8 = build msg 93 (two 24-bit session indices via sub_823E5F30)
+  and sub_823D8F08 send: host to itself is never handled. Now stage 3 calls
+  sub_82201D40 (Plyr_Revive, natively compiled .bro) with r3 = &deadHandle,
+  r4 = &medicHandle (handle = (*(0x82BD1FC0+8*index+4) << 14) | index,
+  index = slot+1), inside BotClientScope(target slot). COD3_REVIVE_DIRECT=
+  message restores 0.5.225, =0 kit trace only. Log "stands slot N up
+  (Plyr_Revive ...): health now H, state S".
+- Host down: each living same-side medic logs once per host death: distance
+  (g_deadAt), job stage/target, enemy within 500, next-try delay, claimed by
+  another; or "not revivable" with health/state if state != 4. 0.5.225 log
+  had no medic trip to slot 0 at all.
+- render_stats.cpp: RenderSwitch(): in COD3_MP, COD3_RENDER_STATS,
+  COD3_RENDER_PROFILE, COD3_GPU_PROFILE default ON (=0 off). Next log has
+  "stats:" + "profile: X us a draw: state/targets/pipeline/textures/
+  buffers/constants/bind/indices/draw" + gpu ms: pick the dominant section.
+- HostDeathCapture (bots.cpp, from the sub_82535810 hook): first 3 host
+  deaths, 60 frames of "death view:" (CurrentClient, +1924, +1932, gun view
+  pointers 0x82C37070..7C) and Overlay::RequestScreenshot at frames
+  2/6/12/20/35. For Justin's "glimpse of me like split screen" at death.
+- Game folder bot_kits.txt: medic weight 3 -> 6.
+- Syntax: bots.cpp 0 errors; render_stats.cpp only the stub D3D errors (42,
+  same as the unmodified file).
+
+### 225 SOURCE CHANGE (Claude, 2026-10-18): direct revive call; perf split logging
+
+- 0.5.224 live (ordnance, PROFILE-MULTIPLAYER): threads over 5 s: guest 0
+  (main game thread) 96-100%, command processor 77%, guest 1/4 (821424B0)
+  ~35%. Render profile ~3.5 us a draw (buffers 1.5, bind 0.57, textures
+  0.53, constants 0.5), 4860 constant blocks, 16 MB fingerprinted a frame.
+  So the frame is bound by the guest main thread (Com_Frame: client + server
+  + FeedBots), not the renderer. Revive: 7 trips, 6 aborted "enemy in sight".
+- bots.cpp: BotTrace wrapper counts/times traces; sub_82535810 hook times
+  FeedBots vs __imp__sub_82535810 (server frame) vs the rest; "perf: a game
+  frame: bots X ms (N traces a frame, Y ms of them), server frame Z ms, the
+  rest W ms" every 5 s.
+- BotRevive: stage 3 calls sub_823E86A8(*(*(0x82BCCAC0)), target entity,
+  medic entity) once per try (Job.sent) - the call sub_82579408 makes after
+  sub_82575910's hit. COD3_REVIVE_DIRECT=0 disables. Abort distance 300.
+
+
+### 224 SOURCE CHANGE (Claude, 2026-10-18): shotgun aggression; screen smoke; revive at fall position
+
+- 0.5.223 live: bot grenades seen by Justin (record+164 write works);
+  killfeed fixed. Smoke: 9 throws, 36 "has no smoke left" (kits carry 1-2).
+  Revive: slot 20 reached slot 0 (Justin) twice, never fired: d > 70 reset
+  (dead player's entity follows the spectator view). 6 "he is up again"
+  (targets 900-1560 away respawned first).
+- bots.cpp: BotHoldsShotgun (def name shotgun/trench) -> FightAggressive
+  unless health <= 25; closeIn 110, backOff 0, sprint+weave beyond 450, no
+  range stop, no melee charge with a loaded shotgun. Screen smoke in
+  BotExtras for RoleObjective/RoleRusher moving forward with g_seeDist
+  700-2500. BotRevive: g_deadAt[] (record origin at first death sighting)
+  used as the body point; search radius 1000; reset distance 120; respawn
+  hold 25 s.
+- coop.cpp replaced with Team Friend's v29 (~/Downloads/coop-for-friend (1)): stand-ins = any actor_ally_*_reg*, fallback any ally after 30 s; per-mission reset at SV_SpawnServer (g_mapGen); flag 16 moved-only sync. Their reply: COOP-TEST-1-REPLY.txt. Note: a joiner needs every mission recompiled (their joiner lacked saint_lo).
+- Ordnance (Justin's "Marseille") perf, 0.5.223 log: avg 44.7 fps over 359
+  samples (fuel 60.6); render cpu median 15.1 ms, p90 21.8 ms; 4300-5000
+  draws, ~11k texture binds (already de-duplicated in BindTexture), "cp: 0%
+  of the time waiting for the title" = the command processor thread is the
+  limit. Next: a PROFILE-MULTIPLAYER.bat run on that map (COD3_THREADTIME,
+  COD3_GPU_PROFILE, COD3_RENDER_PROFILE) to split the CP time.
+
+
+### 223 SOURCE CHANGE (Claude, 2026-10-18): coop.cpp merged (campaign co-op experiment)
+
+- From Justin's coop-for-friend package (~/Downloads/coop-for-friend; README
+  says "from Team Justin, session 4", untested between two PCs). Added
+  CoD3Host/coop.cpp unchanged and "coop.cpp" at the end of COD3_HOST_SOURCES
+  (CMakeLists). Whole file is #ifndef COD3_MP (make_mp_host.py skips it; MP
+  copy empty). Overrides sub_82451C68 (NET_SendLoopPacket), sub_82535E80
+  (Com_EventLoop), sub_82517A00 (SV_SpawnServer) - no other host file
+  overrides these (title_fixes only mentions 82517A00 in a comment). Uses
+  Kernel::WatchWrite/ArmWatchpoints/QueueConsoleCommand, Overlay::Notice/
+  RequestScreenshot, Settings systemLinkPeers - all exist. Syntax-checked
+  (campaign defines, Linux stubs + a BSD winsock stub): 0 errors.
+- Runtime: COD3_COOP=host|join (PLAY-COOP-HOST/JOIN.bat in the game folder),
+  COD3_COOP_HOSTIP / COD3_COOP_JOINIP, COD3_COOP_APPLY=goal, UDP 28962/28963.
+  Forest only; levels/forest was already recompiled (recomp_forest.log).
+- Game folder: PLAY-COOP-HOST.bat, PLAY-COOP-JOIN.bat, COOP-README.txt;
+  repo copy of the README: docs/COOP-README.txt.
+
+
+### 222 SOURCE CHANGE (Claude, 2026-10-18): record+164 = grenade at throw start; revive trace
+
+- 0.5.221 live (bot_add 20): bot throw (slot 10, stielhandgranate #16, in
+  clip 1/0): command 0x2 + word 0x10 first, quiet after; +168 = 2 for ~21
+  commands then 0, but +164 stayed the gun (0x15). Host: +164 = grenade
+  (0x0B) from the first command through the throw, word back to gun after.
+  Search tried all 4 bits: nothing spent. Now the command write also sets
+  record+164 = g_throwWeapon on the throw's first command.
+- Revive: one medic reached a body, 3 tries, record+2948 stayed -1
+  (sub_82575910 never ran: the revive check in sub_82463A48 needs def+172
+  == 4 and +176 == 11, reached from sub_82464AF8). "bots: revive trace"
+  logs held weapon, its +172/+176, +168, +2948 during the fire stage.
+  Note bots also fire through the direct FireWeapon (sub_82590C30) call
+  while wantsFire; that path does not do revives.
+- Killfeed wrapper confirmed active ("current client 3 -> 0"). Rifle
+  grenades "special set to 4" logged (Justin saw 3: one loaded + 3).
+- Campaign upscales: + mission 1024x512_f18_5EE26A2430BFDBC5, C7895A4E9A3FAF01.
+- 0.5.221 was the first build made by AUTO-BUILD (OK, 2.6 min).
+
+
+### 221 SOURCE CHANGE (Claude, 2026-10-18): campaign menus unlocked; campaign upscales
+
+- kernel_video.cpp TitlePlaying (campaign build): only the film player
+  (0x82A2A24C non-zero) keeps the console rate; menus unlocked too (was:
+  sv_running && no film). COD3_SPMENUFPS=0 restores the old rule. 0.5.215
+  campaign log already showed 144 fps in a level (frame_cap 144), menus 30.
+- Campaign upscales in textures\replace (Justin's PC only): start menu 7,
+  sepia 3 (F606FAA4, AC7B4839, F481CE70), then mission art + thumbnails
+  (esr/overnight.sh order). List: HANDOFF 217.
+- Auto-build: AUTO-BUILD.ps1/.bat/-AT-STARTUP.bat in repo root (see
+  NEXT-SESSION). Justin has to start it once himself (no remote shell; File
+  Explorer control is single-click only).
+
+
+### 220 SOURCE CHANGE (Claude, 2026-10-18): killfeed CurrentClient; throw quiet; special count 4; medic fire
+
+- 0.5.219 live: bots' frag/smoke with 0x2 + grenade weapon word: record +168
+  became 2 (offhand started, as host) then 0 after 2 commands; bot buttons
+  0x2002 (stance tap) then 0x4 (sprint) after release; host presses only 0x2
+  (or 0x80) and his +164 = grenade (0xC) for ~16 commands, +196 = last
+  offhand. Fix: g_throwQuiet = 60 commands: strip StanceButton/Sprint/fire
+  at command write; weapon word grenade on the first command only.
+- Killfeed: sub_82456920(victim, attacker, mod): teamBased byte
+  *(0x82BA13E4+20) -> sub_8244DB20(team = ent+520 -> +4): compares with
+  EntityList[*(0x82BCBE9C)+1]'s team. CurrentClient (0x82BCBE9C) is the
+  bot's local place inside BotClientScope, where bot kills happen. Wrapper
+  sets it to 0 for the call when g_bots > 0 and it is non-zero. Non-team
+  path colours by svs client +1880 == 2 (all bots forced 2) - unchanged.
+- Specials: sub_821EE6C0 (mp_mine) / sub_821EE7C8 (m1garand_rg / k98_rg) give
+  the weapon (+2664 of builtin table 0x82A98030), set "special" clip 0
+  (+2864) and spare 1/2/3 by rank (+2872). Wrappers in mp_fixes.cpp call
+  +2872 again with ("special" script string via 0x821E0E48, 4); release
+  0x821DD938. Defs: mp_mine clip 10 start 10 max 10 (clip and reserve share
+  pool #26); k98_rg clip 5 start 10 max 5; m1garand_rg clip 3 start 3 max 5.
+  maxAmmo/startAmmo now set to 4 for *mine*/*_rg. Crate refill unverified.
+- Revive: 0.5.219 one medic (slot 7) of 20; at body once, never fired
+  (yaw error never < 12). Now fires at < 20 deg or after 2 s. bot_kits.txt
+  (game folder) medic weight 1 -> 3.
+
+
+### 219 SOURCE CHANGE (Claude, 2026-10-18): grenade weapon word; special ammo 4; flag crouch; feelers
+
+- 0.5.217 live (host, 20 bots, map change ok - bots re-added): host
+  "spent a frag" x4 and "spent a smoke" all with keys 0x2 only; throw trace
+  host: the FIRST command of each throw has weapon word +8 = 5 (the grenade),
+  then 0x18 (gun) while 0x2 stays held ~11 frames. Bots sent 0x6 (0x2 +
+  sprint) with their gun (0x2A): nothing spent. Fix: g_throwWeapon (best
+  frag/smoke weapon number from the kit, BotNadeWeapon) written into command
+  +8 for the first 2 commands of a throw (g_throwFrames); candidates now
+  {0x2,...} for both, no mutual avoid; smoke press is 0x2 alone (no sprint,
+  no fire). The 0.5.215 trace trigger compared serverTime with GetTickCount
+  (Think's `now` is serverTime) - now on g_throwFrames / 0x2.
+- Revives 0.5.217: 11 starts, 1 reached the body, 8 aborted "enemy in sight"
+  (<900). Now <500 and only before the body (stage < 2).
+- mp_fixes.cpp (weapon tuning at load, before the campaign clip print): defs
+  named *mine* or *_rg: reserve = 4 - clipSize (min 1) into maxAmmo +1472
+  and startAmmo +1452 when lower (COD3_SPECIAL_AMMO=n). Logged per weapon
+  with class (+176), clip/reserve indices. Whether the support crate refills
+  specials up to maxAmmo is the assumption to check.
+- Flag hold: idle at flag crouch cycle 4 s of 12 (slot-staggered) + small
+  strafe; fighting at flag crouch 2 s on/off + strafe.
+- BotFeelers (after BotRevive/BotDispense, every brain bot): every 150 ms a
+  body sweep 44 ahead at feet+18 along the actual move (from forward/right
+  and view yaw +208); hit with normal.z <= 0.6 -> slide (move minus its
+  normal component) toward the more open of +-40 deg feelers (40 units);
+  head-on and both shut -> back off 400 ms. 3 bumps within 80 units in 12 s
+  -> g_failedRoutes[slot].Remember(feet, 64 ahead), haveStep=false.
+  "bots: feelers: N walls felt, M spots learnt" every 30 s.
+- PlayerLimitProbe line was absent in 0.5.217 (expected: 0.5.218 code).
+
+
+### 218 SOURCE CHANGE (Claude, 2026-10-18): EntityList level slot +100 -> +132 (player-cap prep)
+
+- EntityList (*0x82BCC7FC) is a 104-byte C++ object allocated in
+  sub_825583F8 (sub_820DE848(4, 104, ...), `li r4,104` at 82558A24) and built
+  by sub_824830E0 (vtable 0x82077004; registers itself in a 24-entry system
+  registry 0x82C77850 - unrelated cap; clears +4..+96 with li r9,24, +100=0).
+  Layout: +0 vtable, +4..+96 player entities (client n at +4*(n+1); spawned
+  as 24 by sub_8249B1E0 when +4 is empty), +100 the level entity
+  (sub_825638A0 spawn, stored by sub_82535A18 / sub_82593FA8; not an index-25
+  entity number). sub_824B1B28 (map restart) frees and clears +4..+96, +100.
+- Audit: every function, EntityList loads and register copies followed to
+  their uses (study/lib.py dataflow; volatile regs dropped at calls): 508
+  loads -> 402 indexed (player by slot+1), 42 const +100 (40 reads, 2
+  stores), const +0/+4/+8 few, 37 pointer walks from +4 (24-count loops; need
+  32 at activation), 14 unresolved. Lists: docs/player-limit/
+  entitylist-level-sites.csv (patched sites) and entitylist-uses-218.csv
+  (all 508, with use kind).
+- scripts/patch_recomp.py `patch_entity_list_level` (runs last in `mp`):
+  per site (function, asm text, occurrence, expected count) - refuses if a
+  count differs; 40 reads -> +132; the 2 level stores + constructor + map
+  restart clear write BOTH +100 and +132 (a missed reader still sees the
+  level while the cap is 24); size 104 -> 136; constructor clear 24 -> 32.
+  Idempotent via "// entity list 0.5.218" marks (46 expected). Verified on
+  a copy of the 2026-10-17 generated ppc_mp: 46 marks, second run no-op.
+- bots.cpp PlayerLimitProbe: every 5 s logs (on change/mismatch) "player
+  limit: entity list ... level +100 X +132 Y spare slots clean/IN USE".
+- Activation still needs: the dual +100 write removed; the 37 pointer walks
+  and sub_8249B1E0 / sub_824B1B28 counts at 32; the indexed readers checked
+  for bounds (slot < 24 assumptions); plus RESUME-214's list.
+
+
+### 217 SOURCE CHANGE (Claude, 2026-10-18): bot medic call; campaign menu upscales
+
+- **Medic call:** host-side handler sub_823E3860 (vtable 0x820A0DB0, a
+  session message): roster entry (784 stride) +4120 = client, then the
+  script callback *(*(0x82BCBF64)+3352) = reenable_medic_call (sub_821F0DA0,
+  registered in sub_82216FE0) with r3 -> word holding entity+484. bots.cpp
+  `CallMedic` (namespace, after PickSide) calls it the same way (scratch below
+  r1, BotClientScope "medic call"); in the respawn block, once per death,
+  1.5 s after death with record+1924 == 4. COD3_NO_MEDIC_CALL=1 disables.
+  The table also has 3344 (spotter miss) and 3348 (revive miss, "nobody to
+  revive") callbacks used by sub_82463A48.
+- **Campaign menus:** used-campaign.txt (Justin's pass, 0.5.215 campaign):
+  1257 entries, all but 39 movie frames (_f2_). The 38 NOT-REPLACED: start
+  menu 2048x1024_f18_D2261FA1C34D05A3 (background), 2048x512_f20_127DD5C9B8C2B5D0
+  (CoD3 logo), 256x128_f20_C046CE5AB5EAA7F3 (pad buttons), 512x256_f20_88F5203782BB9483
+  (font), 1024x512_f18_9769DB58A2861484 / 98D96D87D4077A89 (menu frames),
+  128x128_f20_10D6C2D03BB4DAC9 (lock); sepia 512x256_f18_F606FAA4 / AC7B4839 /
+  F481CE70; mission art 1024x512 x17 + 128x64 thumbnails x15. This build:
+  the start-menu seven (esr/esrgan_np.py; 2048 inputs capped at 4096).
+  Next builds: sepia + mission art, a few each.
+
+
+### 216 SOURCE CHANGE (Claude, 2026-10-18): medic revive for bots; log fix for the no-console CoD3MP
+
+- **0.5.215 regression:** CoD3MP.log 0 bytes. In a WIN32 program fds 0-2
+  are closed; log.cpp's freopen(stdout,"NUL") took fd 0, then the pipe was
+  _dup2'd onto 1/2 while stdout kept writing fd 0 (NUL). Fix: reopen stdin
+  first (fd 0) when _fileno(stdin) < 0, and after the _dup2s also dup the
+  pipe onto _fileno(stdout)/_fileno(stderr) if they are not 1/2. main.cpp's
+  --console path reopens CONIN$ first for the same reason.
+- **Revive mechanics (retail):** weapon class list at 0x825D7838 (def+176):
+  rifle0 None1 smg2 lmg3 pistol4 grenade5 rocketlauncher6 turret7 spotter8
+  non-player9 sniper10 revive11 health12 ammo13 interact14 mine15 flag16
+  spread17. sub_82463A48(entity, weapon) fire check: def+172==4 &&
+  def+176==11 -> sub_82575910(entity, view, &target): 100-unit trace from the
+  eye (radius ~30 sweep of entities by abs bounds +272/+288); success needs
+  hit entity +512 record, record+1924 == 4 (dead), and +520->+4 equal to the
+  medic's (team). Miss: record+2948 = level time (MPGAME_MEDIC_NOBODY_TO_REVIVE
+  hint, sub_824FE358). sub_82579408 (fire): target -> sub_823E86A8(session,
+  target, medic) = session message 93 with both 24-bit session indices ->
+  script Plyr_Revive (_mp_common.bro, sub_82201D40, table 0x820949E8 id
+  0x4000cc03): health = g_player_maxhealth, loadout again (sub_821FB7E0).
+  reenable_medic_call (sub_821F0DA0) plays american_/german_medic 5 s after
+  the call; the call itself is the death-screen option
+  (MPGAME_SELECT_KIT_CALL_MEDIC, sub_82392F40) - not driven for bots yet.
+  "Critical" spectate states exist (UpdateSpectateCritical[GoingToDie]).
+- **bots.cpp:** `g_reviveTarget[]` + `MedicComing(slot)` in the namespace.
+  `BotRevive` (before BotKitProbe; called before BotDispense, which is
+  skipped while reviving): medic (kit base 3), no enemy seen within 900,
+  nearest dead teammate (health<=0, state 4, same Side, dead <25 s, not
+  claimed) within 1600; walk (TacticalMove) to <38 units of the body centre
+  (entity +272..+288, fallback record origin); MpFixesSwitchWeaponFor
+  "mp_revive"; stop, aim (g_yaw/g_pitch eased, g_wantYaw/g_wantPitch = body,
+  since command +28/+32 carry the server's view); fire 450 ms after 900 ms;
+  check 2 s: up -> "REVIVED", else retry (3 tries, logs view pitch and
+  record+2948). Respawn: dead bots skip the 4 s respawn while MedicComing,
+  up to 20 s ("calls for a medic").
+- Untested. If revives never take: compare record+2948 (nobody hint set =
+  trace missed: closer/lower aim), or the session message for bot targets.
+- Also: texture_dump = 1 set in the game's CoD3Recomp.ini for Justin's
+  campaign menu pass (used-campaign.txt). Upscaler rebuilt in the scratchpad
+  without torch: esr/esrgan_np.py (numpy RRDBNet, loads RealESRGAN_x4plus.pth
+  directly; 256x128 in ~50 s; matches the old 0.5.169 upscale within 0.6/255).
+  PyPI is blocked in this session; github release downloads work.
+
+
+### 215 SOURCE CHANGE (Claude, 2026-10-18): grenade button search; no console; EntityList player block; campaign used list
+
+- **Grenades.** 0.5.213 log: bot throw traces show presses of 0x80 (frag) and
+  0x2 (smoke) spending nothing (record +160..+215 unchanged). Host button log
+  in that match: 0x4000, 0x8000, 0x200 presses, never 0x80/0x2. (Handoff 170's
+  kbutton table says 0x80 = "class (grenade)" and 0x8000 is set by
+  CL_FinishMove; the throw evidently is not plain 0x80 for a server-fed bot.)
+  bots.cpp now: `BotNadeAmmo(base, record, smoke)` sums clip+spare
+  (def+1468 -> record+4*(172+i), def+1460 -> record+4*(80+i)) over weapon defs
+  whose lowercase name contains grenade/nade/mills/frag/stiel/sticky/mk2/m24
+  (smoke counted separately). `NadeButtonSearch` g_fragSearch {0x4000,
+  0x8000, 0x80, 0x200} / g_smokeSearch {0x8000, 0x4000, 0x2, 0x200}: each
+  throw presses the current candidate for 350 ms, 1.5 s later the ammo is
+  re-read; drop -> `found` (logged "bots: frag button found: X"), unchanged
+  -> next candidate ("spent nothing; trying the next"). Trials where the bot
+  was dead/late (>2.5 s) or ammo rose are discarded. Frag and smoke never
+  share a found bit. No ammo -> no throw ("has no grenades left").
+  Host learner (after the host throw trace): ORs host buttons over the last
+  90 frames; when the host's frag/smoke count drops, logs "bots: host spent a
+  frag (a -> b); keys pressed before it X" and adopts the first candidate in
+  X. Throw trace now triggers on g_throwUntil (any candidate), not 0x82.
+  If no candidate works: the throw likely needs a weapon word / offhand
+  state in the command (+8) or the 0x200 local-client flag; compare the
+  host's "throw trace host" lines around his "host spent a frag".
+- **Console.** CMakeLists: CoD3MP WIN32_EXECUTABLE ON + /ENTRY:mainCRTStartup
+  (main() unchanged). main.cpp (COD3_MP): AllocConsole + CONOUT$/CONIN$ when
+  `--console`, COD3_CONSOLE!=0, or `<exe dir>\game\default.xex` is missing
+  (first-time installer prompts). Run() accepts `--console`. kernel.cpp
+  Kernel::Exit waits for Enter only when a console exists. log.cpp already
+  handled FILE_TYPE_UNKNOWN (stdout -> NUL, log file kept). Campaign CoD3.exe
+  unchanged (still a console program).
+- **Player limit finding (classifies catalog loop_24 at 0x824B1BE0).** In
+  sub_824B1B28 (called from sub_8258F0E8, sub_825909D8 [g_reloading],
+  sub_82590AC0, sub_82593FA8 [level load]) r3 = *(0x82BCC7FC) (EntityList):
+  `li r10,24; mtctr; stw 0` clears words +4..+96, then `stw 0,100(r28)`.
+  So EntityList+4*(1..24) = the 24 player entities (bots use
+  entities+4*(slot+1)), and +100 (index 25) is a special level/world entity:
+  41 direct `lwz rX,100(EntityList)` sites (camera FOV, "global"
+  script_model, g_gravity, wbk_loaded, map_restart, sub_82587268 player died,
+  tank mantle...). >24 players cannot simply use indices 25..32: either move
+  index 25's object (41+ sites) or map players 24..31 to new indices. TRUE
+  player loop; must change together with the entity-number audit.
+- **Campaign upscales.** texture_pack.cpp: the campaign writes
+  textures\used-campaign.txt (MP keeps used.txt), so MP runs stop
+  overwriting it. Ask Justin: texture_dump=1, browse the campaign menus (not
+  movies: dumping during movies hangs), quit, set it back, send
+  used-campaign.txt; upscale NOT-REPLACED 512+ menu art a couple per build
+  (Real-ESRGAN x4, keep the dump name, textures\replace). The ESRGAN setup in
+  the old scratchpad is gone; reinstall (pip torch cpu + RealESRGAN_x4plus).
+- Syntax: bots.cpp 0 errors (-DCOD3_MP, stubs); main/kernel/texture_pack:
+  stub-only errors (freopen_s, VirtualAlloc, wchar paths). NOT BUILT.
+
+
+### 214 PREPARED (Codex, client date 2026-10-17): bounded join scan; roster slots 24-31 addressable
+
+Original CoD3Scan disassembly now resolves all catalog addresses; do not count generated C comments. Verified the opcode/immediate shapes for 160 comparisons, 49 candidate stores, 3 supposed loops, and 66 roster adds. Two supposed loops are indirect calls (mtctr uses r11, not the register loaded with 24).
+
+Found and patched two prerequisites: the six-wide join scan in sub_824046D8 would read slots 32-35 if its bound alone were raised; it now uses a bounded search and retains the existing full/setup/connect paths. The 0.5.213 roster mapper excluded slot 24+, so explicit roster calls now use a separate 32-entry mapping API while generic adjacent-field classification stays at 24. Bot/player active limits remain 20/24 through the new player_capacity.h.
+
+Source version 0.5.214 prepared; installed build still 0.5.213 at this checkpoint. Python patch tests and existing storage patch tests PASS; actual generated patch applied. C++ tests/build/install/runtime PENDING until later validation entries. **Resume at docs/player-limit/RESUME-214.md and docs/build-logs/validation-214.txt.** Exact backup: chat work/before-214; original audit: docs/build-logs/player-cap-original-sites-214.csv (local only).
+
+
+### 2026-10-18 PLAYER-CAP AUDIT (Codex): 32 remains plausible; audit mapping needs repair
+
+- The 32-player target remains plausible: three storage layers now have 32-entry backing, and the study identifies 32-bit session masks as the protocol ceiling for this target. The 0.5.213 solo test validated storage integrity only; active cap is still 24.
+- Current bot console request is clamped at 20 in `BotsAsk`; `bots.cpp` still uses `MaxClients = 24`. Thus the last solo match did not exercise slots 24-31.
+- Rechecked `sites.csv`: 1,107 rows; 66 session base offsets plus one server allocation are marked done. Remaining categories and counts are recorded in `docs/player-limit/AUDIT-20261018.md`.
+- Found an audit reliability issue: the catalog's fourth field is `status`, whereas its generator emits original instruction text. More importantly, simple function-offset mapping against current generated C can misalign after prior generated-code edits. Do not use index-only output to rewrite 24s. Reconstruct and validate exact PPC instruction context before classifying or patching sites.
+- Entity numbering, UI capacities, per-client animation/render storage, join/leave/respawn and local-player assumptions remain open. No source code or build changed in this audit.
+- Next: repair the mapping using retail PPC instruction order and patch history; classify player sites; audit the host/joiner and UI paths; then prepare a guarded integration stage before enabling slots 24-31.
+
+
+### 213 SOURCE CHANGE (Codex, 2026-10-17): relocate the session roster
+
+- The user's 0.5.212 match log validated the prior storage stages: all 24
+  player records remained in the relocated 32-record block (zero stale
+  pointers, spare clean, guard clean); server-client slots 24-31 remained
+  unchanged. User reports the scoped Lee-Enfield now works normally on 212.
+- The next 16v16 prerequisite is the session's 24 x 784-byte roster at
+  session-object +0x1010. Added `CoD3Host/session_player_storage.h` and
+  `MpSessionPlayerAddress` in `mp_fixes.cpp`: allocate 32 records in extended
+  memory, copy the original 24 on first access, keep an A7 guard, and redirect
+  only effective addresses inside the original roster. Host bot/session helpers in `bots.cpp` also use the relocated roster accessor. The outer session
+  object's other fields remain at their original offsets. `COD3_NO_SESSION_RELOCATION=1`
+  provides a rollback path.
+- `scripts/patch_recomp.py mp` reads the site catalogue and redirects all 66
+  roster-base additions in 53 generated functions. It validates every
+  function/site before writing; the 41 stride users keep their existing 784
+  stride and follow the redirected roster pointer. The active player cap,
+  bot cap, sentinels, session loops and UI remain 24. This build does not
+  enable slots 24-31.
+- `MpFixesFrame` checks the eight spare records and guard every ten seconds.
+  `tests/session_player_storage_test.cpp` covers address mapping;
+  `tests/session_player_patch_test.py` covers catalogue patching, idempotence
+  and abort-before-write on a mismatch.
+- Build/tests and final binary hashes: see `docs/build-logs/validation-213.txt`. Corrected 0.5.213 is installed locally and packaged. Solo runtime checks of the relocated session roster, bot session, respawns and map transitions remain pending; a second PC is not required for this stage.
+
+### 213 SOLO RUNTIME (Team Native, 2026-10-17): storage clean; bot transition follow-up
+
+- The 0.5.213 log records the 32 x 784-byte session allocation and 30 clean
+  copies of all 24 active records; spare entries and guard remain clean. The
+  existing player-storage check also reports 24 relocated, no old pointers,
+  spare clean and guard clean during the active match.
+- A bot session reached 20 bots on `mp_merv`; the match changed to `mp_fuel`.
+  The roster then reported zero bots and later three. A later `bot_add 20` was
+  ignored because this client reported session number 24. The existing notes define
+  >=24 as no local place, so this may have happened after active play. Check bot
+  counts through a hosted map change before treating this as a defect.
+- The run lasted about five minutes with no fatal/crash signature. This validates
+  the roster relocation for this run only; the active cap remains 24. Respawn
+  behavior was not explicitly confirmed by the user. Full details are in
+  `docs/build-logs/validation-213.txt`.
+### 212 LIVE TEST (Team Native, 2026-10-17): scope restored; storage checks clean
+
+- User reports Lee-Enfield scoped ADS now works normally on the installed
+  0.5.212 build after `Render::LogNextFrame()` was removed from ADS entry.
+- The match log confirms 24 relocated player records, zero old-array
+  pointers, clean spare records/guard; it also repeatedly reports server
+  client slots 24-31 clean (0 bytes changed). This validates the storage
+  reserves for that run only; it does not allow additional slots.
+- Player cap remains 24. Session-roster relocation is staged in 0.5.213; solo runtime validation is required before raising any gameplay limits.
+
+### 212 SOURCE CHANGE (Codex, 2026-10-17): make scoped-ADS tracing nonintrusive
+
+- The 0.5.210 live log shows Lee-Enfield ADS transitions immediately followed
+  by `Render::LogNextFrame()` captures. That call forces a full renderer frame
+  dump at the exact action being measured, adding logging/render work during
+  ADS. Removed the forced dump from `MpFixesMg42View`; lightweight ADS
+  transition/settings traces remain.
+- Compared with the friend's `G43-0.5.900-for-friend (2).zip` source and
+  shared handoff: the Lee-Enfield setup is unchanged in the current source.
+  It copies `kar98_sniper`, keeps the Laison view/scope model, applies the same
+  77 `LeeScopedFields` values (including zoom 15 and 0.42 s zoom-in), and
+  inherits the same overlay pointer. The friend recorded an offline match
+  where the weapon worked. Recopying those weapon definitions would not
+  restore the current behavior; preserve them and investigate post-merge
+  ADS/render behavior.
+- This is a diagnostic-isolation change, not a confirmed scope-rendering fix.
+  The captures contained a valid overlay pointer and changing render targets,
+  but no explicit black-frame marker. The first black-scope report appears in
+  the 0.5.208 handoff after the 0.5.206 merge; no intentional Lee-Enfield
+  scope-field change is recorded there. During the current 0.5.210 test the user
+  reports the zoom partly works, the outer scope mask is not fully black, and
+  it feels like half of the ADS scope animation is missing. The overlay and
+  reticle fields are copied from `kar98_sniper`; compare the stock scoped
+  Kar98 and Lee-Enfield before changing overlay/animation data. Test repeat
+  ADS with 0.5.212 and compare frame-time logs. Do not install or overwrite
+  while CoD3MP.exe is running.
+- Source 0.5.212 was built and installed; the local match result is recorded
+  above. Build/package hashes are in `docs/build-logs/validation-212.txt`.
+
+### 211 SOURCE CHANGE (Codex, 2026-10-17): cache world-model vertex bounds
+
+- In `CoD3Host/mp_fixes.cpp`, `WorldFitFrame` ran in the frame hook and called
+  `VertexBox` for each kept campaign mesh every frame. That function rescanned
+  every saved vertex even though `Keep` had already preserved the original
+  data. `WorldMesh::originalBox` now caches those bounds as each mesh is
+  captured; repeated frame fits reuse the box. The fit still detects reloads
+  through `Keep`'s buffer identity and first-vertex checks.
+- This targets avoidable CPU work behind the reported ADS/game lag. It does
+  not address the black screen: the 0.5.210 trace confirms a non-null scope
+  overlay pointer but does not identify the rendered black frame.
+- Release build, `world_model_fit_test`, and friend package pass; see
+  `docs/build-logs/validation-211.txt`. Local install was blocked because
+  Windows denied replacing CoD3MP.exe. The port folder was restored to 0.5.210.
+  The 0.5.211 package is in the Codex task outputs. In-game validation pending.
+
+### 210 SOURCE CHANGE (Codex, 2026-10-17): server-client spare bounds probe
+
+- scripts/patch_recomp.py mp now validates sub_825336F0's allocation and
+  initialization sizes, changing both from 0x1D400 (24 x 4,992) to 0x27000
+  (32 x 4,992). All existing player loops and MaxClients remain 24.
+- MpFixesFrame marks the extra eight records and scans them every 10 seconds.
+  Any changed bytes and their offsets are logged. This is bounds-check only;
+  no extra slot is enabled. Release build/install PASS; executable hashes
+  match. Friend package: outputs/CoD3MP-update-0.5.210.zip.
+- Next: solo 20-bot match to confirm the spare eight stay clean, then joined
+  match for the 0.5.209 mirror fix. Do not raise the player/bot cap before the
+  session layer, sentinels, remaining client loops and UI are expanded.
+
+### 209 SOURCE CHANGE (Codex, 2026-10-17): joiner mirror spawn dispatch
+
+- The user confirmed both players intentionally closed the 0.5.208 game early
+  because it was laggy; this was not a reported crash. Friend log ended during
+  live execution, as expected. Do not infer a crash from its ending.
+- The log confirms intermittent frame-rate stalls: 23/286 one-second FPS
+  samples are below 60, including 0-1 FPS at 79-81s, 0 FPS at 90-93s and
+  0-1 FPS at 108-113s. Final sample 76 FPS is not representative. File reads
+  and allocated memory stay flat through those later windows; the log has no
+  network RTT. Lag is real but still unlocated. See the task output review.
+- User also confirms host-bot frag/smoke animations remain invisible.
+  CoD3MP (14).log contains zero `throws a grenade`, `throws smoke`, `throw
+  trace slot`, or `throw trace host` lines. It cannot diagnose a throw that
+  never occurred during that match.
+- Root cause found for mirror spawn failure: on the joiner, each mirror has a
+  session entry. Spawn dispatch sub_824D0AF0 routes session-owned players to
+  the original network path; the host-owned bot therefore never gets placed
+  in the joiner's game. Change: recognize roster-marked mirror entries by
+  session number and route only those through the existing local bot path
+  (sub_82593608, model setup, callback +3312 finalizer, animation rig). Scan
+  remote slots 1-23 as mirrors can be assigned below slot 4. Mirror callbacks
+  use BotClientScope's spare local index 3 and restore the joiner's client/view
+  state on exit.
+- Improve throw trace: current command +8 was printed before it is populated
+  with the selected weapon, so its value was always the cleared zero. Move
+  the diagnostic after final weapon selection. Still no gameplay change to
+  grenade input until a host-vs-bot trace identifies the missing field/state.
+- 0.5.209 Release build and install PASS; SHA256 matches build. Friend update
+  package: outputs/CoD3MP-update-0.5.209.zip. No match test yet. Next validate
+  a joined match with bot throws, mirror health/state and respawns; capture
+  render timing/call context during the low-FPS windows. Keep the active-player cap at 24:
+  server-client slots/list and session/UI/sentinels remain unexpanded.
+
+### 208 FRIEND MATCH RESULT (Team Native, 2026-10-17): intentionally ended early due to lag
+
+- User supplied Downloads/CoD3MP (14).log: 0.5.208 on Rouen. Last complete
+  time marker 286 s, 76 fps, active player. The user clarified his friend
+  closed first, then he closed his own game early because it was laggy. The
+  file ends midway through a live diagnostic snapshot because they ended the
+  match. Four early
+  0x4001000A/06 debugger exception codes; twelve outside-allocation reports
+  are all during initial map load. No bad calls or effects-pool failures.
+- Relocation: 30 post-map checks: relocated 24, old pointers 0, spare and
+  guard clean every time. Player limit remains 24.
+- Lag: 23/286 FPS samples below 60. Severe clusters at 79-81s, 90-93s and
+  108-113s reported 0-1 FPS; final sample was 76. No RTT measurement. File
+  reads and allocated memory stayed flat in the later stalls, so cause is
+  unresolved.
+- Confirmed multiplayer issue: all 299 joiner mirror spawn messages report
+  health 0 / state 0 or 3 immediately after spawn ("NOT alive after the
+  spawn"). Only one host death was applied to a mirror. Trace/fix
+  MirrorHostBots' spawn; do not claim bot life mirroring works yet.
+- Scoped rifle: 8 ADS enters and leaves; aim/shell-shock blur off. One native
+  FOV sample 83.45 at ADS .617, other sampled ADS values stayed 90. Log has
+  no visual black-screen marker, so root cause unresolved.
+- Physical allocator reports 170.4/511 MB handed out and 0 free ranges at the
+  tail, but zero ranges is also reported at startup and remains flat once the
+  map loads; this does not establish out-of-memory. Need friend's Windows
+  Application Error/WER exception code and faulting module if reproduced.
+- Detailed review: outputs/Friend-match-review-2026-10-17.txt in the Codex
+  task outputs. Raw 16 MB log not copied into source tree.
+
+### 208 BUILT AND INSTALLED (Codex, 2026-10-17): player-record relocation + Team Native merge
+
+- Read NEXT-SESSION/HANDOFF/PATCH-NOTES/SHARED-LOG and corrected study.
+- patch_recomp.py patch_player_records redirects exactly three absolute bases:
+  sub_82506540 r3, sub_82593FA8 r29, sub_82595118 r11. All remain 24 loops.
+  level.clients and entity+512 then follow the relocated storage. Allocation
+  is Guest::AllocateExtended(32*2992+64), copied initial 24 records, zero spare
+  eight, A7 guard. MpFixesFrame reports pointer/guard checks every 10 seconds.
+  Environment COD3_NO_PLAYER_RELOCATION bypasses before first use; allocation
+  failure falls back consistently. Patch validates all sites before writes.
+- IMPORTANT CORRECTION: sub_82594FD0 initializes a separate 24 x 6224 array
+  beginning 0x82C03A50. It is NOT a gclient end marker; do not relocate it with
+  the 2992 array. 825611D8/8256CF80 follow pointers; stride stays unchanged.
+- Incoming Downloads/CoD3Recomp-0.5.206-for-Team-Native_1.zip: reconstructed
+  its 0.5.205 ancestor by reversing supplied diff, three-way merged only its
+  code delta. bots.cpp/kernel_video.cpp/mp_fixes.cpp merged without conflicts;
+  added world_model_fit.h, tests/world_model_fit_test.cpp and pose test scripts.
+  Preserved mainline 206 navigation and 207 C3BS. Incoming version not adopted.
+- User reports intermittent black scope on Lee-Enfield ADS. Both installed
+  aim_depth_of_field and shell_shock_blur already 0. No proven cause/fix.
+  Added bounded local scoped ADS transitions and first 3 render frame traces
+  in MpFixesMg42View. No FOV/scope/renderer changes guessed.
+- Release build/install PASS; world-model and climb tests PASS; patch tests
+  3 PASS. Eder Dam automated bot smoke through 84 s: relocated 24, old
+  pointers 0, spare/guard clean. Full matches/map changes/System Link still
+  untested. See docs/build-logs/validation-208.txt and smoke-208.log.
+- Next: run a 20/22-bot match and change maps, look for player-storage lines
+  (old pointers 0, spare clean, guard clean). Then enlarge 4992 server-client
+  list separately; session 784 records/sentinel/UI still follow afterwards.
+
+### 207 SOURCE READY (Claude, 2026-10-17): mirror lives over C3BS; balanced roles
+
+- 0.5.206 friend log ("freeze then disappear"):
+  - Death watch: every mirror's joiner-side record (entity+512) was
+    health 0, state 0 all match. The host's player copy was 100/3, and its
+    deaths run on the joiner: "player dies (sub_82587268): host 1 killed by
+    bot 8", then PLAYER_DEATH_FLYING, DeathState.
+  - The session block +0x100.. is live movement state (changes constantly),
+    not a death record.
+  - Each machine computes deaths of its live copies; bot copies were never
+    spawned there. The host plays bot deaths the no-session way (0.5.167,
+    sub_823FD118 r3 -> zero), so no session death message exists for bots.
+- Fix:
+  - Host: g_botLife[slot]++ after each Respawn spawn. The
+    sub_82587268 hook captures r4 inflictor, r5 attacker, r6 damage, r7
+    means, r8 weapon, r9 dir pointer (3 floats), r10 hitLoc, and the ninth
+    arg at r1+0x54 (the routine reads it at 468(r1) after stwu -384).
+  - SendBotStates: "C3BS", version 1, header 8 + 18 bytes per bot (number,
+    alive (health>0 && state 3), life, killer session number, means, weapon,
+    hitLoc, side, int16 damage, int16 timeOffset, int16 dir*30000), every
+    250 ms. Dispatched in lobby_rules.cpp -> BotsOnStates.
+  - Joiner (MirrorHostBots): a copy not alive here whose host life is new
+    (or never tried) is spawned via MakeString(allies/axis) +
+    SpawnAtPoint(sub_822029F0) with its entity+484 handle (retry 1.5 s).
+    If the host says dead and it's alive here (once per life): call
+    sub_82587268 with the copy, killer entity (session number -> joiner
+    slot -> entity; else self), and the host's values (dir in a 64-byte
+    block, ninth at r1+0x54).
+  - Log lines "mirror number N spawned here ..." / "... dies here as on
+    the host ...". COD3_NO_MIRROR_LIFE disables it. The death watch now
+    logs only health/state transitions (cap 600).
+  - UNTESTED risks: spawn side effects on the joiner (class code, current
+    client 0); the joiner may also kill copies itself from shots (then they
+    stay down until the host's next life).
+- Roles: per side, the role furthest below the target mix (25/25/28/22)
+  goes to each new bot (was a clock-seeded roll: 7 camper, 8 flanker, 4
+  objective, 1 rusher of 20).
+- 0.5.206 host live (mp_fuel, 20 bots, 366 s):
+  - map knowledge 897 -> 1039 places, 2018 -> 2530 ways
+  - 15 kits used (campaign guns included)
+  - stuck 72 (was 272 on 0.5.205)
+  - War flag lines 55; spread median 231-551
+  - grenades 50 / smokes 36
+  - vehicles tried 30x (19 give-ups in fights); medic packs used 3x
+- Grenades: 0.5.206 had 0 weapon events for any grenade/smoke (50
+  "throws a grenade", 36 smoke). 0.5.204 had 6 sticky throws (bursts of 21
+  events = one throw seen per client) for 71 attempts. Kits do hold frags
+  (kit lines: fraggrenade(1/0), mills_bomb(1/0), stickygrenade(2/0)).
+  Command +4 does carry 0x80 (written at the command build). Unknown why
+  Pmove doesn't throw: suspect a command field the client fills on a
+  throw (offhand/weapon byte, cf. cl_grenadeButtonDown in sub_8252DB50) or
+  a weapon-state gate. "bots: throw trace slot N" (first 12 throws, 1.2 s
+  of frames: buttons, command +8, record +160..+215 and +1056..+1071) and
+  "throw trace host" (host's own 0x80/0x2 presses, same words, plus
+  command +12..+23) to compare.
+- Syntax: bots.cpp, lobby_rules.cpp clean. NOT BUILT.
+
+### 206 SOURCE READY (Claude, 2026-10-17): Climb rises bounded by landing tilt; gclient array found
+
+- 0.5.205 live (Justin solo host, mp_fuel War, 20 bots, 366 s, quit):
+  - aps pools made (8192 effects / 4096 nodes); peak effects 329, nodes 516;
+    0 aps errors. No crash. 7 bad calls.
+  - 135 "plays War's flag" lines. Spread median 348-622 (was 154-471).
+  - BUT 272 "stuck" strikes (0.5.204: 51 in 472 s); slot 12 stuck at
+    -356 -450 -62 with 8+ strikes.
+- Cause: Climb let a 48-unit piece rise 18+48 onto any walkable (flat)
+  top, so crates and pipes of 20-60 passed. Fix: allowed rise per piece =
+  18 + piece*tan(landing tilt)*1.1 (fall 30 + same); tilt from the
+  floor normal. test_bot_climb_206.cpp adds 24/40/60 crates rejected;
+  190/196/195 tests PASS.
+- Player limit (0.5.205 probe): the 24 records (entity+512) are a
+  contiguous array at 0x82BF21D0, stride 2992, ending 0x82C03A50.
+  0x82C03A50 is itself referenced (no gap). Entities are at 66E0F440 etc.,
+  step -1072 (heap blocks). Direct addressing of the array: sub_82593FA8
+  (init: timescale/checkpoint strings; base and +2992 steps), sub_82595118,
+  sub_82506540, sub_82594FD0 (uses 0x82C03A50); stride-only users:
+  sub_825611D8, sub_8256CF80. Next: relocate to a 32x2992 block
+  (allocate, patch these sites), plus the server client list (4992 stride)
+  and the session layer.
+- NOT BUILT.
+
+### 205 SOURCE READY (Claude, 2026-10-17): aps pools x2, hill climbing, War flag teams, death watch
+
+- 0.5.204 test (Justin host + friend, Merville War, 22 bots): no endon
+  freeze ("pool:" bins at most ~30%, 0 fallbacks). Host crashed at 472 s.
+  - From 353 s the native error queue fills with "apsMemory : pool(size=128,
+    count=4096) is empty" (caller 8210A504 = sub_8210A4C8, the aps pool
+    alloc), "apsEffect : pool is empty" (sub_820FD110) and "apsGroup : alloc
+    failed" (sub_82109310).
+  - From 434 s, bad indirect calls in sub_82110FD0 <- sub_820FC850 <-
+    sub_824472C0 <- nglListSend sub_82142248 (450 of them). Fatal unhandled
+    C0000005 at 472 s. The joiner had 0 aps errors.
+- aps sizes: sub_82430A58 calls the setters sub_82109F38 (group memory
+  0x200000), F48 (nodes, 2048 x 224 B), F58 (effects, 4096 x 128 B) and F68
+  (1024). They fill the table at 0x825B0FD4 (+0, +4, +6, +8 int16).
+  sub_8210ACB8 then builds the pools:
+  - nodes: sub_82110608, holder *(0x82A89474)
+  - effects: sub_820FD090, holder *(0x82A8786C)
+  - pool = holder+8: +0 count, +4 used, +8 peak, +20 size, +24 data, +28
+    int16 free list (so max 32767)
+  - memory comes from the aps allocator *(0x825B0E80) vtable+4 ->
+    sub_824372A0(size, align, 2)
+- Fix (mp_fixes.cpp, end of file): overrides of F38/F48/F58/F68 double
+  each, capped at 16000. sub_8210ACB8 is wrapped to log whether the pools
+  were made. LogPool appends effects/nodes "used of count (most)".
+  NOT root-caused: load versus leak. Watch the "most" numbers.
+- Also in that log: 46 bad calls sub_823C9F00 <- sub_82403840 <- our
+  per-bot sub_82404580 update (0.5.167). *(r30) is 0, so vtable+72 is
+  garbage. Not fatal (skipped). Same path as the death block send.
+- Hills: BotNavigation::Reachable = Flat (the old test) || Climb. Climb
+  splits the step into at most 4 pieces of 48 or less: up-sweep of 18+len,
+  across, then down-trace to -30-len; floor normal.z >= 0.65.
+  - Test docs/build-logs/test_bot_climb_205.cpp PASS: 10-40 degrees up and
+    down, 5 degrees in 4 queries, 60 degrees/walls rejected, stairs kept,
+    bounded Detour up 25 degrees.
+  - test_bot_navigation_190, unstick_196 and failed_routes_195 still PASS.
+  - When no step was reachable, the bot stood (forward=0); that's the
+    "struggle" on hills.
+- War: the War block in the brain (after Domination::BotGoal) replaced.
+  Quota per side = clamp(round(40%), 3, 7); order is objective, then rusher,
+  then flanker, by slot; campers are excluded. Even rank = taker (20-90
+  from the flag, atFlag < 70). Odd = screen 200-450 out towards
+  SpawnCentre(enemy), +-47 degrees. Takers' toFlag holds while the enemy is
+  over 600 away (was 900). The Domination ring stays (skipped when
+  g_war.valid). Log line "bots: slot N plays War's flag ... as a taker or
+  screen".
+- Death animations on the joiner: friend's 0.5.204 log, every mirror's
+  record health is 100 all match, no death steps for bots. The host fills
+  the bots' death blocks (+0x100..+0x13C; dumps compared). New in
+  MirrorHostBots: "bots: death watch here:" logs, for each mirror and the
+  host's player, block changes plus health/state (+304/+1924) transitions
+  (cap 400). Next: compare the host's player (whose deaths show) with the
+  mirrors.
+- Player limit CORRECTION: 0x82C2ECF0 + 4*6352 = 0x82C35030 (HostInput),
+  and the gun views 0x82C37070 lie in "record 5". That array is the 4
+  LOCAL clients (cg-side, 6352 B), not the 24 server players. 503 constant
+  sites in 174 functions (docs/player-limit/player-state-sites.csv): almost
+  all record 0 (base) plus 4/5 (HostInput, gun views). PlayerLimitProbe now
+  logs each slot's entity and record (entity+512) with steps, once
+  per match with bots, to find the real 24-client array and its size.
+- Syntax: bots.cpp clean; mp_fixes stub-only errors (VirtualQuery). NOT BUILT.
+
+### 204 SOURCE READY (Claude, 2026-10-17): script-pool exhaustion freeze fixed
+
+- 0.5.203 log: bot_add 24 at 133 s, fps 0 from 149 s. Watchdog: guest
+  thread 0 parked in sub_824C0AE0 (callers sub_824C9258 <- ... <-
+  sub_822029F0 (our Respawn) <- sub_82580080). Last lines: "slot 20
+  respawns", "spawning as allies", "before" with no "after". (sub_8231E0E0
+  in the stack is memset, stale.)
+- sub_824C0AE0 walks the running script thread's record list (+24, sentinel
+  +32), looking for type 3 with key (+20 of the link). It is the endon
+  built-in's check: MP built-in table 0x825FF0E0 (offset, func): 0x4C wait
+  sub_824C4840, 0x50 waitframes sub_824C4910, 0x54 sub_824C9350, 0x58 endon
+  sub_824C9258 (cf. docs/builtins-table.md, SP 0x58 = endon). The thread
+  object is *(0x82C72778+2132).
+- Those four allocate from the game's small-block pool *(0x82BCBF5C)
+  (sub_820E0D40(pool,size,0)) and don't null-check: with 0 they link
+  "0+4" into the list, which turns it into an endless cycle.
+- Pool: made in sub_8254A758 (sub_820E0B88(..., 2)); its pointer is also at
+  0x82B3E8F0 and 0x82BCxxxx -16940/-16964/-16792/-16960/-16968/-16880/-16560.
+  Bins 20x4096, 32x2048, 64x4096, 128x1024, 256x450. Pool layout: +0 bin
+  pointers, +36 int16 sizes, +52 count, +56 flags. Bin layout: +4 total, +8
+  free, +20 peak, +24/+28 range, +40 free list. A request tries every bin it
+  fits. Flags bit 1 (heap fallback when the bins are full) is off, so it
+  answers 0 ("all pool exhausted", the print is empty in retail).
+  sub_820E0E60 (free) sends a pointer outside every bin range to
+  sub_820DE980 (heap free).
+- Fix (mp_fixes.cpp, at the end):
+  - sub_820E0D40 override: on 0 it calls sub_820DE750(16,size) (the same
+    call the pool's own fallback makes). It logs the first five, then powers
+    of two, plus a "pool:" fill report every 30 s (checked every 16k calls).
+  - sub_824C0AE0 reimplemented as the original, with a step cap of 100000
+    and link < 0x10000 treated as corrupt (logs; answers 1 = present, so no
+    insert). It also tracks the longest list.
+- NOT root-caused: who fills the pool. Suspects: campaign archives and the
+  sound engine (friend's 0.5.203), 24 bots' script threads, or a leak. The
+  "pool:" lines will show it.
+- FPS: 0.5.203 ran 11-13 FPS from 32 s to 112 s (render 70-90 ms, 365 ms at
+  108 s) with ~2,000 draws, then 10-12 ms at the same draw count from 120 s.
+  This was before bots. It is host render-thread time (guest samples look the
+  same in both stretches). No counter tracks it (uploads were lower in the
+  slow stretch). Next: per-phase render timing.
+- Syntax: mp_fixes clean in the new block (stub-only errors elsewhere).
+  Version 0.5.204. NOT BUILT.
+
+### 203 SOURCE READY (Claude, 2026-10-17): Team Friend's second 0.5.900 merged
+
+- G43-0.5.900-for-friend (1).zip: still a diff vs 0.5.193. Merged as the
+  delta between their first and second package files (56 hunks) applied with
+  patch -F2 onto 0.5.202: all applied (mp_fixes hunk 5, a declaration, and
+  settings.cpp hunk 3, the mg34_no_deploy save line, with fuzz 1, both read).
+  New: CustomWeapons +"mg42" (20) +"lee_enfield_sniper" (21); class grenade
+  kind 4 sticky bomb; MpFixesMg42View (MG34 view-model body swapped per
+  frame); mg34_no_deploy (default 1: stock MG34 gets the BAR's class +176 and
+  no deploy anims); Laison archive + bank; map block 495 MB (sub_820E0158);
+  sub_82554BA0 hook (silences the copy's shot events for lee_enfield_sniper).
+  Their tests PASS here (campaign_sound, campaign_animation); list-order check
+  PASS (only appended). bot_kits.h: mg42 + lee_enfield_sniper known, default
+  kits "1 heavy mg42 2 1", "1 scout lee_enfield_sniper 1 2" (test_bot_kits_203
+  PASS). BotsScopedWeapon matches lee_enfield_sniper (name has "sniper").
+- Syntax: mp_fixes, class_editor, settings, bots clean apart from stub-only
+  errors. NOT BUILT.
+
+### 202 SOURCE READY (Claude, 2026-10-17): ADS, spawn-aware errands, overwatch, site catalogue
+
+- Live 201 (Justin, Rouen, map known 528 cells): spread within-300 12/20,
+  9/20, 9/18, 9/19 (avg ~49%), errands 68 (36 reached); holds fire 97;
+  launcher shots 0 (one antiarmor bot of 20). Justin: own bots struggle to
+  leave spawn, enemy bots never push to his spawn, wants flag checks,
+  defensive/aggressive behaviour, snipers holding and watching flanks.
+- Cause of no rockets: bots never pressed ADS. Command buttons +4: 0x8 is the
+  sights (+speed; mp_fixes reads (command+4)&8). Launchers are ADS-only.
+- bots.cpp:
+  - Fire block: wantAds = visible && reacted && |yawErr|<20 && (launcher ||
+    scoped || (flat>700 && !aggressive && !charge)); adsSince per slot; shot
+    needs 350 ms of ADS (launcher 700); fire presses keep 0x8.
+  - g_spawns[3] (32-ring per side, filled in MapKnowledgeTick on a
+    dead->alive transition of any player), g_spawnedTick[slot],
+    SpawnCentre(side). HeldDef(record).
+  - BotExplore.purpose {Normal, Exit, Push, Flag, Overwatch} + watch[].
+    ExploreStep: justSpawned (15 s, within 900 of own centre) -> Exit
+    (Style::Away from own centre); sniper (held def scoped) -> Overwatch
+    (High, lean 1.5 to enemy centre); rusher && slot%2==0 -> Push (Near
+    enemy centre, 700); slot%4==1 every other errand -> Flag (Near War flag,
+    350); else lean 1.5 to own (camper/form<=-2) or enemy (rusher/form>=2)
+    centre. Fallbacks: reachable, within 1200, then Normal. Hunters run
+    special purposes too. Abort radius: Exit/Push 400, others 550, start 700
+    for special. Holds: Exit 0.5 s, Push 6-12 s, Flag 6-10 s, Overwatch
+    35-60 s (prone + ADS when scoped; looks at Watch() points 4 s each).
+- bot_map_knowledge.h: Style::Near/Away, Pick(..., towards, lean, nearRadius)
+  (lean added after the 4.0 cap), Watch(from, count). test_bot_map_knowledge_202
+  PASS.
+- Player limit: scripts/player_limit_sites.py -> docs/player-limit/sites.csv
+  (1,107 sites in 421 functions; kinds in PLAYER-LIMIT-STUDY.md; addresses
+  only, no instruction text in the repo). Next: bounds-check build (svs
+  clients 32 long, extra records poisoned and watched).
+- Syntax clean (old DWORD warning only). NOT BUILT.
+
+### 201 SOURCE READY (Claude, 2026-10-17): launcher single shot, no team fire
+
+- Live 200 (Justin, Ederdam, new map): "bots: spread:" median nearest
+  190/269/415/290/387, within-300 13/20, 12/20, 5/16, 12/20, 4/16 (avg 48%,
+  was 56% on Rouen 199); errands 36 (14 high, 8 low, 14 outskirts), reached
+  13, took-too-long 20; vehicles: 97 give-ups "a fight", 4 use presses, 0
+  entries; packs: medic mp_revive / support mp_ammo_axis taken out and "used"
+  (effect unconfirmed). Justin: bots kill teammates a lot; a bot's bazooka
+  looks like several rockets.
+- bots.cpp (before Think): BotHoldsLauncher (held def+8 name has bazooka /
+  panzerschreck / panzerfaust / _rg); ForEachMate (living same-side players,
+  chest = origin + 0.7 eye); MateInLine (point-segment distance, t in
+  (0.02,1.02), clearance 30 + 3% of the distance along, z weighted 0.5);
+  MateNear(radius, |dz|<160). Fire block: aimed && !mateBlocks && (!launcher
+  || (flat>300 && now>=g_nextRocket)); launcher = one press, next in 2.5 s;
+  mateBlocks = MateInLine || (launcher && MateNear 300) -> g_sidestepUntil
+  600 ms (dir alternates), applied AFTER the final TacticalMove (it rewrites
+  forward/right). Grenade throw also requires !MateNear(target, 320).
+- Syntax clean (old DWORD warning only). NOT BUILT.
+
+### 200 SOURCE READY (Claude, 2026-10-17): spreading the bots
+
+- Live 199 (Justin, Rouen solo, 20 bots; G43 works per Justin): 980
+  mobility samples: roles objective 539 / rusher 196 / flanker 147 / camper
+  98 (11 of 20 objective); per 5 s round, median nearest-bot distance 225,
+  56% of bots within 300 of another; densest 500-unit cell 170 samples (the
+  War flag). Errands 37 (34 outskirts, 2 high, 1 low), reached 21. Stuck
+  lines 57 (the clock fix works). Packs: 30 "bots: pack:" lines (not yet
+  analysed for success). Vehicles: no presses (no vehicles on Rouen).
+- bots.cpp:
+  - role roll objective <25 (rusher <50, flanker <78, camper rest).
+  - War goal only while objectiveRank < 4 (objective-role bots of his side
+    with a lower slot); flag ring = golden angle, 120 + (slot%4)*80.
+  - g_targetOf[slot] (set in Think after the target loop); rank *= 1 +
+    0.8*(chasers-1) when 2+ same-side bots chase that enemy (not for the
+    preferred/visible one).
+  - lanes: final TacticalMove gets moveGoal = target + perpendicular *
+    ((slot*7%5)-2)*260 * ramp((dist-600)/600) when found, !visible, !atFlag,
+    !flanking, enemyDistance > 600.
+  - Separation radius 220 when !state.visible (90 in a fight; was 72).
+  - ExploreStep: on an errand (dest>=0 or holding) aborts only for a visible
+    enemy or one within 550 (start ranges unchanged).
+  - MapKnowledgeTick: "bots: spread:" every 30 s (median nearest same-side
+    living player for each bot, share <300, bots on errands).
+- bot_map_knowledge.h: Measure zLow/zHigh at the 15th/85th height
+  percentile; High needs >= zHigh and >= zMid+32, Low <= zLow and <=
+  zMid-32; height score /60. test_bot_map_knowledge_198 still PASS.
+- Syntax clean (old DWORD warning only). NOT BUILT.
+
+### 199 SOURCE READY (Claude, 2026-10-17): clock fix, vehicle use, packs
+
+- Live 198 (Justin, mp_guns solo, ~15 min): kits OK (bot_kits.txt written,
+  12 kits, custom primaries requested 48x, "kit grenade" counts set 20x,
+  "kit extras: smokes" 30x); grenades 125, smoke requests 68 + "throws smoke"
+  37 (capped by the shared told<60); errands 44 (24 reached); floor-ignore 2;
+  strikes>=20 respawn 2; map knowledge mp_guns 687 cells. BUG: 30,847
+  "stuck strike 1": BotSeats called TacticalMove with GetTickCount() while
+  Think uses serverTime -> NetProgress since/lastStuck flip clocks every call
+  (stuck twice a frame while walking to a vehicle, strikes never escalate).
+  Vehicles: 45 claims, 40 "presses use" at BMW/Harley motorcycles, 0 entries
+  (buttons were 0x20|0x400). Log ended mid-line (game still running at copy).
+- bots.cpp: BotSeats(..., serverTime) -> TacticalMove(serverTime). ExploreStep
+  sets ex.activeTick = GetTickCount(); MapKnowledgeTick's onErrand uses it (was
+  comparing GetTickCount with the serverTime holdUntil).
+- UseButtons = 0x20 activate | 0x40 activatereload | 0x400 reload (button map
+  from HANDOFF 170). Approach to 75 (was 110). LookAtVehicle(): pitch toward
+  vehicle origin+30 via BotAim::Pitch*PitchSign, 5 deg/frame, also while use is
+  held. Log adds view-off and entity+900 link per try.
+- NEW BotDispense (FeedBots after BotSeats): kit base 0 support / 3 medic;
+  special = mp_ammo / mp_ammo_axis / mp_revive (strings in sub_821F3EC0 /
+  sub_821F3DF0, both HealthAmmoDispenser); 2+ live teammates within 450, no
+  visible enemy, not in vehicle/MG, first after 20-40 s then 60 s apart;
+  stages: switch (mp_fixes MpFixesSwitchWeaponFor -> script +2692 on the
+  bot's handle, found by scanning 0x82BD1FC0 for his entity, cached), 0.9 s,
+  fire 0.4 s, 0.8 s, switch back to the gun that was in hand (def+8 name).
+  UNTESTED: read "bots: pack:" lines; if the special is not in his
+  inventory the switch does nothing (then check how _mp_loadout gives it).
+- mp_fixes.cpp: German smoke gift "smokegrenade_axis".
+- Syntax clean (bots.cpp only the old DWORD warning; mp_fixes only the 4
+  stub errors). NOT BUILT.
+- MERGED Team Friend 0.5.900 (G43-0.5.900-for-friend.zip, diff vs 0.5.193):
+  applied with patch -F3 onto 199 (mp_fixes 23 hunks, offsets +57/+143;
+  settings.cpp save-line hunk fuzz 3, checked by hand: both sniper_walk line
+  and g43_reload present). New CoD3Host/campaign_animation.h,
+  campaign_sound.h; tests/ (campaign_animation_test, campaign_sound_test PASS
+  here; g43_selection_test.py needs git: same check done by hand, all five
+  weapon lists only appended). CustomWeapons +"gewehr43" (index 19), class
+  primary max 19 / sidearm 21. Forest archive = campaign archive 2, forest.wbk
+  bank, sound engine given its own 36 MB physical (AllocatePhysical),
+  OrderedCueLookup, CampaignDonorEvent, G43Fields[] (93 fields via the field
+  table at 0x825D77D0). bot_kits.h: gewehr43 known + default "1 rifleman
+  gewehr43 2 2" (test_bot_kits_199 PASS). Not touched by them: bots.cpp.
+  native_commands must stay 0. UNTESTED in our tree: build, two-PC System Link.
+- 199 first build FAILED (bots.cpp BotDispense): a local named `near` -- minwindef.h
+  defines near/far as empty macros. Renamed nearMates. Never name anything
+  near/far in code after <windows.h> (the Linux syntax stubs now define them).
+
+### 198 SOURCE READY (Claude, 2026-10-17): bot_kits.txt, grenades, 197 test fixes
+
+- Live 197 (Justin, Merville solo, 17 min, 20 bots, 0.5.197 built OK):
+  map knowledge 1054 cells / 2405 links saved (bots\maps\mp_merv.txt 44 KB);
+  errands 41 (12 routed, 29 straight; 22 "took too long"); vehicle claims 77,
+  all "gone" at once (mine looked up before the claim); 0 mounted guns;
+  grenades 75, smokes 16; slot 6 strikes 1..96 at 875 236 -8 (enemy 30-140
+  flat but a floor below, pitch ~67, never visible). Player-limit probe: gap
+  byte 0x82C54082 set after 1 frame, 6215 bytes set all match -> gap IN USE
+  (player states must be relocated); session object on the heap (0x67070970).
+  Scoped test BROKEN in 197: def+0x650 nonzero for every weapon (pointer to
+  ""), so all guns ADS-walked at sniperWalk and all aimed sway halved.
+- NEW bot_kits.h (test_bot_kits_198 PASS): Kit{weight, base 0..6
+  support/light/rifleman/medic/heavy/antiarmor/scout (from 197 kit log),
+  primary (mp_fixes CustomWeapons names), frags, smokes (-1 = class's own)};
+  Parse/DefaultText/Select (team[i]/weight, then total). bots.cpp
+  LoadBotKits(): exe-dir bot_kits.txt (written with defaults if missing,
+  re-read when mtime changes); selection block in the bot add path; g_botKit[]
+  copies; BotsPrimaryName/BotsBaseClass from g_botKit; new BotsKitGrenades
+  (frags, smokes, american = BotSide==1). bot_loadouts.h keeps the old
+  constexpr table (old tests) and declares BotsKitGrenades/BotsScopedWeapon.
+- mp_fixes.cpp: sub_82206028 sets thread_local g_botSpawn/g_botFrags/
+  g_botSmokes for bot kits; sub_821F28C8 writes "grenade"/"smokegrenade"
+  counts for bots and notes which slots the kit had; kits missing one queue a
+  BotGrenadeGift; MpFixesBinoculars gives it after the kit (script +2664
+  give, +2864 clip count; side frag fraggrenade/stielhandgranate, smoke
+  "smokegrenade"), slots 1064..1073 restored. UNTESTED: confirm "bots: kit
+  extras" and that given smokes throw (SmokeButton 0x2).
+- Scoped = BotsScopedWeapon(def): name at def+8 contains sniper/scoped or is
+  springfield (move hook sub_82487718 and the sway block).
+- Grenades: every 9-14 s (was 18-25), 350-1500 visible (300 when 2+ enemies
+  within 300 of the target), 250-1200 for 6 s after losing sight. Smoke:
+  health<=60, cooldown 16-26 s (was 30-45), evasive after 6 s; tactical
+  g_wantSmoke when toFlag or charging >400 with an enemy within 1800 (every
+  25-40 s).
+- Floor-blocked enemy: found && !visible && flat<300 && |dz|>90 for 6 s ->
+  g_ignoreSlot/Until 20 s (skipped in the target loop).
+- BotSeats: progress.strikes >= 20 (and not in a vehicle) -> Respawn.
+  Vehicle claim sets mine = best.
+- MapKnowledge::Reach(from) BFS mask; Pick(..., reach, maxAway). ExploreStep
+  picks reachable first, else within 1200. test_bot_map_knowledge_198 PASS.
+- Syntax: bots.cpp clean (old DWORD warning), mp_fixes only the 4 known stub
+  errors. NOT BUILT.
+- Next: Support ammo / Medic health packs (they are class "specials" from
+  sub_821EE6C0/7C8, sub_821F3DF0/3EC0 via sub_821FB7E0, not weapons with
+  rounds: the 197 kit probe never listed them); verify vehicle entry/seat 0 =
+  driver; real LOD; relocation plan for 16v16.
+
+### 197 SOURCE READY (Claude, 2026-10-17): map knowledge, explore styles, MG/vehicle seats, sprint, sniper, HD texture tool
+
+- Live 196 (Justin, solo): ladder approaches 11 (10 goal above), drops 40,
+  strikes mostly 1-2. ONE frozen bot: slot 9 at 1197 1953 -99, strikes 1..60
+  "another way", mobility move 0 0, view yaw stuck -176.9 while sent 124
+  (aim off -103 for minutes). Cause: on a mounted gun (reload 0x400 = use on
+  the X button). Player state +240 & 0x100000 = mounted; entity +900 link ->
+  vehicle (Guest::Read32(link)), seat = ps+1300 (from the Kangaroo exits).
+- NEW bot_map_knowledge.h (pure; test docs/build-logs/test_bot_map_knowledge_197
+  PASS): cells 128x128x96 (Key cx,cy,cz), first-seen standing point, visits,
+  deaths/kills/reached/failed, directed links on a move within 1.5 s / 260
+  flat / 200 up (no teleport links). Measure(): visit-weighted centre, 70th
+  pct radius = outskirts, z 25/50/75 pct. Pick(style) scores (kills+, deaths-,
+  failed-, claimed within 500 -3, hash jitter). Path(): A* over links, a death
+  costs 200. Save/Load text "CoD3 bot map 1 N".
+- bots.cpp:
+  - MapKnowledgeTick (server frame, after PlayerLimitProbe): Kernel::CurrentMap()
+    change -> save old / load bots\maps\<map>.txt beside the exe; every
+    500 ms Observe all 24 slots (walking only: not in vehicle, not mounted);
+    alive->dead = Death(last feet), g_form-- for bots, style switch after 3
+    deaths on errands (g_styleShift); kill credited to a bot whose
+    g_lastSeenSlot == dead within 1.5 s (Kill at his feet, g_form++); save every 60 s.
+  - BotStyle(slot): slot%10 table {Outskirts,High,Low,Hunter,...}, camper=High.
+  - ExploreStep() called in Think right after the toFlag target block when
+    !toFlag && !atFlag: errand unless an enemy is visible or within range
+    (outskirts 900 / high 1700 / low 1100); hunters explore only with no
+    enemy at all. Gives up on timeout (20 s + 15/unit) or 3 new NetProgress
+    strikes (Failed()). Hold 15-35 s high/low (High odd slots prone), 2-6 s
+    outskirts. Think: `exploring` sets target=look; idle block skipped;
+    flank skipped; explore branch before the toFlag run branch (sprint far,
+    TacticalMove to waypoint with its real z so ladder/drop logic fires).
+  - g_aimOff (yaw error), g_form (+-5, decays 1/min): form>=2 aggressive,
+    <=-3 defensive (not rushers).
+  - BotSeats (FeedBots, after BotStanceControl): mounted -> remember MG spot,
+    fight while target visible and |aimOff|<30, else press 0x20|0x400 (use)
+    for 150+250n ms, 5 tries then Respawn(). Near known MG spot: strip 0x400
+    (no accidental reload/mount); camper/High bots mount on purpose
+    (cooldown 45-60 s). Vehicles (Settings botVehicles, default on): pool
+    0x82BCBDB4, count int16 0x82C281D0+3088, 1872-byte records, handle +368
+    -> 0x82BD1FC0 table; kind +376 -> 0x82B2DC90 name. Up to 2 bot-crewed
+    vehicles a side, slot%3!=2, no visible enemy, within 1800 (600 beside a
+    human driver). Approach with TacticalMove, at 110 press use (6 tries).
+    Inside: seat 0 = driver ASSUMED (log "seat %d"); steer right=-turn*2.5
+    and view yaw toward the War flag / an outskirts spot; reverse 1.5 s when
+    <40 units in 2.5 s; out after 120 s or 6 stuck checks. Riders: Think aim/
+    fire, no moves; out after 20 s with no driver and nothing to shoot.
+    ALL UNTESTED: read "bots: vehicle:" lines. If use never enters, try 0x20
+    alone or a longer hold; if seat 0 is not the driver, use the moved test.
+  - BotKitProbe: weapons with rounds, once a life, 6 times a bot -> find the
+    Support ammo pack / Medic health pack weapon (special slot) for next build.
+  - PlayerLimitProbe: gap 0x82C54070..0x82C67CBC zero check each server
+    frame, report every 2 min; session object static/heap once.
+  - sub_82487718: scoped (def+0x650 overlay != 0) walk = sniperWalk (30%)
+    even below the game's 40%; others unchanged.
+- mp_fixes.cpp: quick sprint: dry -> stamina pinned 0 for 1.5 s, then 0.25;
+  refill after 0.75 s at full-in-3 s (was half in 0.33 s, refill at 250 ms
+  full in 1.5 s). Scoped weapons: aimed sway 0x6D0,0x6D8,0x6DC,0x6E0,0x6E4
+  and aimed idle 0x69C = original * sniperSway% (50), every 2 s, originals
+  kept per def (re-taken when values change). Weapon def field table found
+  at 0x825D77D0 (354 entries: name, offset, type).
+- Settings: sniper_walk (30), sniper_sway (50), bot_vehicles (1); F11 sliders
+  + checkbox (overlay.cpp).
+- texture_pack.cpp: dumps on a worker thread (256 MB queue cap, written as
+  .part then renamed), cap 30000; NoteMap(key) -> textures\maps\<map>.txt
+  (texture_dump only, >=32 px); VRAM total logged every 100 loads.
+  render_resources.cpp calls NoteMap after Key.
+- Port scripts (in the game folder, copies in port/): UPSCALE-TEXTURES.ps1/.bat
+  (realesrgan-ncnn-vulkan x4 + texconv BC7 -m 0, alpha via System.Drawing,
+  colour dilation before upscale, -keepcoverage 0.5 for hard alpha, normal
+  maps and R8 skipped, out textures\replace\hd), HD-TEXTURES-README.txt;
+  MAKE/INSTALL-FRIEND-UPDATE now carry vehicles.txt (friend never saw the
+  Kangaroo: it is a local placement) and leave replace\hd out of the update.
+- Found: model_detail (r_lodscale/r_lodbias) is a placebo; those dvar
+  globals (0x82BA3314/0x82BA3344) are read by nothing but their registration.
+- Syntax: bots.cpp clean (old DWORD warning only); mp_fixes, settings,
+  texture_pack: only stub-environment errors outside the edits. NOT BUILT.
+- Next: read 197 log (vehicle/MG/explore lines, player-limit probe), bots
+  hand out ammo/health packs (from the kit probe), real LOD (XModel/SpeedTree),
+  12v12 fill setting, objectives in CTF/HQ.
+
+### 196 BUILT FROM SOURCE (Claude, 2026-10-17): net-progress unstick, separation, ladders, drops
+
+- Live 195 (Justin, solo): prone WORKS (63x "prone -> standing" from eye 8;
+  crouch eye ~25-30). Stuck problem: only 1 "stuck going" and 3 failed
+  jumps logged, yet mobility samples show bots static up to 20 s with route
+  1 / stalled 0 (jitter >12 units per 900 ms sample defeats stalledSamples).
+  Pairs stuck on identical spots (slots 4/15 at 577 2081 -236; 10/14 at
+  -1954 2329 -96). One ladder approach in the whole match.
+- New CoD3Host/bot_unstick.h (pure, tests PASS):
+  * NetProgress (3.5 s window, 56 units, strikes forgiven after 15 s quiet).
+  * DropDown (64 out, floor 30..180 below, normal z>=0.65).
+  * Wander (300..500 reachable, away from failed spots/goal line).
+  * Separation (teammates <72 units, same floor +-64).
+  * SpreadGoal (golden angle ring 40..100, inside War's 120 hold radius).
+- bots.cpp TacticalMove:
+  * goalZ=target[2] kept (planner flattens to feet) and g_goalZ[slot]; on a
+    ladder forward=-127 when goalZ<feet-90 (down).
+  * scanLadder lambda: 8 dirs x 160 units at +32/+72, 700 ms throttle,
+    triggered by no step/stalled/strikes/goal above(>+140)/below(<-90).
+    Replaces the 5-dir/80 inline scan.
+  * NetProgress escalation: strike1 Remember+flip+escape; 2 JumpOver,
+    DropDown, ladder; 3+ Wander 5 s (goal override).
+  * Planner tries DropDown when goal below before the jump/detour.
+  * Separation added to final stick (70*min(push,1.5)).
+- Think: SpreadGoal on War/Domination goal when !atFlag.
+- Logs: "stuck (no progress in 3.5 s, strike N) at x y z: tries ...",
+  "approaches native ladder D away (goal above|below|level)",
+  "drops down toward a lower goal (D below)",
+  "stuck N times: tries the ladder".
+- Risks: ladder DESCENT from the top still needs the bot to find the ladder
+  face from above (scan at +32/+72 may miss it below the ledge); drops cover
+  most high spots. Fall damage threshold assumed >180 units (unverified).
+
+### 195 BUILT FROM SOURCE (Claude, 2026-10-17): failed-jump/stall route memory + combat brain
+
+- Brain (same build, Justin's asks: more prone/cover when hurt, smoke for
+  evasion, retreat, melee rush, flank, defensive/aggressive, vertical tracking):
+  * Stance: BotCrouch only records a wish; new BotProne; BotStanceControl after
+    BotExtras each command: closed loop on eye height record+220 (<24 prone,
+    <50 crouch): hold 0x2000 up to 900 ms for prone (retry 1.6 s), tap for
+    stand/crouch (0.7 s settle). Prone downgraded to crouch while moving,
+    stand while jumping. HOLD-FOR-PRONE IS INFERRED from 0.5.89's note; if the
+    log shows "-> prone" repeating with eye staying ~40-60, the hold length or
+    semantics are wrong. ResetBotStance on death.
+  * Target: top-3 nearest kept; if chosen not visible, every 300 ms trace LOS
+    to the others and switch (g_preferSlot sticky 1.5 s, rank x0.25).
+    Last seen pos (with height) kept 3 s; target = it while hidden.
+  * Fight style: aggressive (rusher, or health>=70 vs target<=40), defensive
+    (health<=45, camper). Ranges: closeIn 250/500/900, backOff 80/150/450;
+    stop-and-shoot prone when hurt/defensive/>1100 half the time.
+  * Charge (visible, <230, empty clip via BotClipEmpty / aggressive / +30 hp):
+    forward 127, sprint until 110; melee reach 96 when charging.
+  * Retreat (health<=35, visible, <750, 9 s cooldown, not in cover): 450 ms
+    facing enemy with g_wantSmoke, then sprint 3 s to a point 420 away.
+  * Flank (flanker or every 3rd objective slot with no goal; enemy 500-2200;
+    not defensive): point 75 deg round at 0.6*dist (max 700); TacticalMove
+    new moveGoal param; ends at 90 units or enemy <400 visible.
+  * TacticalMove: proactive cover in long fights (seen >3 s, not rusher, 1/3
+    of 2.5 s windows), cover 6.5 s when health<=35 + smoke if <=50; at cover
+    prone if <=35 else peek (crouch/stand every 1.5 s).
+  * BotExtras smoke also on g_wantSmoke if last smoke >=15 s ago.
+
+- Justin's 191 report: bots fail a jump and retry the same obstacle. Cause in
+  TacticalMove: a failed jump only set nextJump=now+8000 and pushed the
+  landing into the 8-entry visits ring, which the 900 ms position samples
+  overwrite in ~7 s; after 8 s JumpOver at the same spot passed again.
+  g_tactical is also zeroed on every death.
+- New CoD3Host/bot_failed_routes.h (pure, tested): FailedRoutes, 6 spots
+  {start,target,until,strikes}; Remember (same place = start AND target
+  within 72 -> strike+1, memory 45 s x min(strikes,4)); Blocks (target within
+  48, or start+target within 72); NearFailedTarget; Tick clears when time
+  goes backwards (new map).
+- bots.cpp: g_failedRoutes[slot] + g_failedEntity[slot] (kept across deaths,
+  cleared for a new entity). Failed jump -> Remember(jumpStart, step), flip
+  hand, escape 3 s. Straight step stalled 3 samples -> Remember(feet, step).
+  Direct step, JumpOver and Detour (new optional failed/now params; skips
+  candidates on failed targets) all consult it. Logs: "navigation slot N
+  jump at X Y failed (strike S, P places remembered): going round",
+  "navigation slot N stuck going to ... (strike S): rerouting".
+- Tests: docs/build-logs/test_bot_failed_routes_195.cpp PASS (memory, strikes,
+  expiry, capacity, new-map clear, NaN, detour takes the other side of a
+  wall); test_bot_navigation_190 PASS unchanged. clang syntax check of
+  bots.cpp with stubs PASS. 194 roster code included, still untested.
+
+### 194 BUILT FROM SOURCE (Claude, 2026-10-17): host bots replicated to joiners
+
+- Test on 193 (friend hosts, Justin joins): host bot_add -> only host sees
+  them. Joiner bot_add -> bots on joiner's scoreboard only, invisible. When
+  both ran it, each saw "bots" (host's data landing on the joiner's local
+  session entries 2..21 + joiner's own local AI). Logs: host
+  CoD3MP.previous.log from friend (D:\cod3\CoD3-for-friend), Justin's CoD3MP.log.
+  Both logs: humans are session numbers 0 (host, local place 0) and 1, bots
+  get session players 2..21 = slots 4..23 on WHICHEVER machine ran bot_add.
+- Cause: P2P design (lobby_rules: every machine runs its own server). A remote
+  player exists on a machine only through a session player entry (object
+  +0x1010, 24x784, indexed by session number) joined by sub_824046D8(object,
+  player, &origin, &angles). Remote path of 824046D8: free svs slot,
+  SetUpSlot 82532540, ConnectIntoWorld 82593608(e,origin,angles,0,0),
+  state 1, record +1920/+1922 = -1 (kit set later by owner's class message),
+  side from +604, BeginPlayer 8257A6C8, gamestate 82530720. Callers:
+  82405158 (HandlePlayerSetup, mid-match, checks object+22933 started) and
+  82407538 (match start; joins entries with +8 < 0; origin entry+496..+504,
+  angles (0, entry+536, 0)). Host bots had no entries on joiners.
+- 194: bots.cpp block "BotRoster" (before UavShowsBots decl).
+  Host (ThisMachineHosts: no session, or local place byte object+0x5991 == 0,
+  unless a roster from another machine came within 10 s) sends "C3BR" over
+  Net::SideSend every 1 s: ver 1, host number, count, then 20 bytes/bot
+  (number, slot, side, kit int8, name 15+nul). lobby_rules SideThread
+  dispatches C3BR to BotsOnRoster (mutex copy). Joiner MirrorHostBots (after
+  UavShowsBots in the SV_Frame hook, only when g_bots==0, roster < 5 s old,
+  object+22933 != 0): copies the HOST'S entry on this machine (its holder,
+  +4 refcount+1 = host machine) into entry[number], sets number, +8=-1,
+  name +104, side +604, calls 824046D8 (vectors at new r1+0x200), then sets
+  record +1920/+1922 to the roster kit while it reads 0xFFFF. Never touches
+  an entry that is already a real player. bot_add refused on non-host
+  ("bots: only the host can add bots").
+- Logs to read: host "bots: roster sent"; joiner "bots: roster from",
+  "given a session player here", "joined here in slot", "given the host's
+  kit", every 5 s "bots: mirror number N slot S: health, at x y z, kit,
+  drawable". Moving positions = host packets apply. Static = need state sync
+  (fallback: host streams per-bot origin/angles/health over side channel).
+- NOT handled yet: removal of mirrors when host bots leave (stale until map
+  change; map start re-joins entries with +8<0 via 82407538). Entry copy
+  carries the host's XUID/stats fields like the host-side bot copies do.
+  Syntax-checked with clang (stubs) only; Justin builds. No GitHub push.
+
+
+### 193 INSTALLED: Varied native/custom bot kits and primary weapon selection
+
+- User confirms191 bots now move. Some still fail jumps and retry the same
+  obstacle; explicit failed-route memory is the next separate patch.
+- Balance11 loadout templates by team count, then total count: seven native
+  kits plus existing FG42, Sten, Bren and Lee-Enfield custom-primary kits.
+  Seven native classes remain0..6; custom primaries use suitable base kits,
+  NOT invented out-of-range native class IDs. Bots retain their assigned kit.
+- Enforce assigned base class inside native82206028 kit callback. Override
+  its main-weapon name through existing WeaponName/CampaignStandIn handling,
+  so native grant/ammo/model setup and map fallback remain in use. Humans'
+  custom classes and sidearms are unchanged.
+- Live191 proved slot order differs: rifle/pistol in either1065/1066, and
+  previous comment claiming fixed secondslot primary was wrong. Examine both
+  slots, reject Colt/P38 as primary, require owned valid definition and ammo.
+  Request armed primary through normal usercmd; preserve sidearm fallback
+  when primary runs out. No forced unlimited ammo or fabricated ownership.
+- Tests PASS balanced20-bot distribution/all11 profiles, custom four present,
+  both inventory orders, pistol-only/empty/unowned rejection and ammo fallback.
+  MP/SP builds PASS;191 movement/aim and death/network/input hooks preserved.
+  Four installed hashes match. Live loadout/model/respawn verification pending.
+-192 prototype was never installed; this corrects its slot assumption before
+  testing.189 peer visibility remains unconfirmed despite all20 native sender
+  schedules advancing. No GitHub push/package/game file upload.
+
+NEXT: user start hosted match/bot_add, verify all four custom gun names
+in kit requests and held weapons; inspect native inventory/name/owned bits
+after respawn. Scope bot_loadouts.h and BotsPrimaryName/BotsBaseClass APIs.
+191 live/user movement confirmed; failed-jump reroute still requested and
+being prepared separately (194). Keep capsule checks, no box regression.
+
+### LIVE191 CONFIRMED - bots moving; loadout193 in progress
+
+User confirms bots moving, some fail jumps then retry rather than reroute.
+Initial telemetry all20 changed position;19/20 latest route1. Capsule191
+is helping; do not revert to box mode. Still needs failed-jump route memory.
+192 built/testsPASS, never installed: live inspection proved secondslot is
+usually PISTOL (first rifle), sometimes reversed.193 checks BOTH slots using
+names+ammo and enforces assigned base class in native82206028 kit callback.
+Adds existing four custom primaries via existing mp_fixes WeaponName fallback,
+not new assets. Seven vanilla+four custom templates balance by team/total.
+Custom names user confirmed FG42/Sten/Bren/Lee-Enfield, already loaded.
+NEXT AFTER193: failed-jump corridor memory and reroute (separate194 build).
+Friend same188 all-bots invisible remains UNRESOLVED;189 clocks are only a
+candidate fix, no two-PC confirmation. Records never claim peer success.
+
+### 191 INSTALLED: Use native rounded-capsule navigation traces
+
+- User190: many bots on both teams still stand at spawn. Live20-bot match
+  confirms several living bots repeatedly have route0 and move0/0; others
+  move.189 counters advance for all20 bots, but peer visibility is untested.
+- Navigation body checks were box traces (r9=0). Native82571EA0 selects
+  rounded-capsule mode with r9=1 into82534200, forwarded into824A0468.
+  Use that mode for body clearance/support; point sight rays remain0.
+- Add throttled completed-result trace logs, including actual fraction,
+  solid flags, normal and hit handle. Read-only external scratch sampling
+  can catch a query in flight; zero fields there are not completed results.
+- MP/SP builds PASS; source checks verify capsule wrapper contract and
+  unchanged190 AI/network/death/input code. Four installed hashes match.
+  Startup/native live movement test pending; do not claim idle bots fixed.
+- User also reports pistol spawns and requests diverse classes, including
+  already-customized FG42, Sten, Bren, Lee-Enfield. All four are loaded in
+  the current live MP weapon table (names verified). Loadout patch next.
+
+NEXT: test native capsule movement on current map; capture completed trace
+logs for still-idle bots and compare mobility positions.190 geometric tests
+passed but failed to explain actual native idle behavior; native trace mode
+was not modeled by those tests. Body bounds live verified[-15,-15,0] to
+[15,15,70] on host and all20 bots. Current map had stuck6/14/16/17/18/23.
+Do not infer no movement is resolved until live191. Keep189 network clock
+isolation; friend all-bots visibility still open, needs same-build two PCs.
+Next separate loadout patch: balance native classes instead of random0..6;
+prefer owned class primary over pistol at spawn, preserve ammo fallback.
+User explicitly requested existing custom guns FG42/Sten/Bren/Lee-Enfield.
+Live names+8 confirmed IDs42..46 on this map (42Enfield43Bren44Sten45FG42
+46scopedFG42); NEVER hardcode these IDs across maps. Resolve names per map.
+Inspect existing mp_fixes custom class hooks before selecting extended kits.
+Raw catalog/trace/runtime records local only. No game-file uploads.
+
+### 190 INSTALLED - movement recovery; includes189 network clocks
+
+USER188 host sees friend, bots, and dropped weapons on ground. Same188 on
+friend's PC: ALL bots invisible, still lethal. Both teams have idle bots at
+spawn. Ground weapon visibility host CONFIRMED; pickup usability and remote
+drop visibility not tested. Archived188 runtime log includes friend match.
+
+- Route checks now try normal feet height first; only use an18-unit step
+  after checking upward clearance. Previously raising the entire hull could
+  reject a doorway the standing player can walk through.
+- If the96-unit detour has no route, try a bounded32-unit supported escape.
+  Still require body clearance and floor support. No forced movement through
+  walls, teleportation, invented ladders or paths across missing floor.
+- Long-range shooting pauses now require a visible enemy. Hidden enemies
+  no longer cause the bot to stop and crouch to aim through a wall. Campers
+  patrol8seconds before a maximum3second no-enemy lookout pause, replacing
+  the old40-60second spawn hold. Objective flag defense/cover holds remain.
+- Add5second per-bot mobility diagnostics: role, health, position, requested
+  movement, route availability, stalled samples and visibility.
+- Geometry tests PASS: low doorway, too-low ceiling, cramped-spawn escape,
+  enclosed/void rejection, wall detours, low jumps and ladder detection.
+  MP/SP builds PASS.189 network integration and185 death/input/crash hooks
+  preserved;188 drop rearm preserved. All four installed hashes match.
+- Includes189 send-clock isolation. Startup PASS: visible190 MP menu144FPS. Hosted live movement and two-PC
+  bot visibility pending. Local collision steering remains bounded; this is
+  not a global map navigation mesh or completed squad-intelligence rewrite.
+
+Startup smoke PASS:190 visible MP menu144FPS, System Link player selection
+reachable. Automated Ready/A taps did not advance selection. Asked user to
+start a hosted match and bot_add4; no further automated input pending reply.
+
+NEXT TESTS: in a normal hosted match add4+ bots, observe spawn departure
+and low doorway routes. Check mobility logs for requested moves versus real
+position changes; route0 repeatedly means collision search failure, not a
+successful hold. Test kills/drop rearm and host prone/input regression.
+Friend must run190 too; verify both teams before/after respawns and latejoin.
+Native189 replication counters count serializer/send CALLS, not delivery.
+If friend still invisible, compare host189/190 replication counters against
+friend session roster and remote state823EC930/82400810. Do not claim clock
+isolation alone proves visibility. Bots copy host session entries; native
+roster registration/peer receive still needs investigation if sends succeed.
+Other unresolved: UAV compass markers, artillery, original corrupting writer
+of renderer list82C89A60;185 guard only contains the resulting bad clear.
+No GitHub upload or friend package created. Never upload game/generated files.
+
+### 189 BUILT: Isolate each bot's native network-send timers
+
+- User188 confirms host sees dropped guns. Friend running the same188 can
+  see the host but ALL bots are invisible and can kill him. Both teams have
+  bots stuck after spawning. Pick-up usability remains unconfirmed.
+- Native82403840 uses CurrentClient-indexed full/near/far send timers at
+  object+(8884/8888/8892+client)*4. All bots borrow client3, so one consumes
+  that timer before the next bot runs. Save/load persistent timers per bot,
+  restore scratch client's timers, reset on changed session/player identity.
+- Add per-bot native serialization/send-call counters for diagnosis. These
+  are calls, NOT proof of peer receipt, roster creation or rendered models.
+- MP/SP builds PASS; scheduling test PASS for20 independent bots across
+  3seconds, scratch restoration and changed identity reset. Think unchanged.
+- Built checkpoint; not installed separately. Included in the next movement
+  build. Remote visibility still requires a two-PC test; roster/receiver
+  diagnostics may still be needed. No guarantee this alone fixes all peers.
+
+Native send-throttle branches verified at82403BE4..82403E50. Full/near/far
+clock offsets for scratch3:8ADC/8AEC/8AFC. Existing global85B0/861C timer
+restore did not isolate these. New bot_network_clock.h stores each bot clock.
+Do not claim friend visibility fixed without user test. Original188 drop
+visibility confirmed by host; keep successful lifecycle fix.
+
+### 188 INSTALLED - re-arm bot weapon drops after asynchronous respawn
+
+USER187: no visible gun/pickup prompt. Initial native drops returned nonzero
+items, but the requested fresh kill produced no new drop attempt. Native
+respawn can finish after Respawn returns, so the healthy-return-only reset
+left the previous life's attempted flag set. ObserveAlive now re-arms the
+per-life state when ThinkBots actually observes positive health. Preserve
+the existing dead-state else chain; no continuous respawning of living bots.
+Native drop eligibility, model creation and replication remain unchanged.
+Fresh creation now logs item handle, position, model, rig and expiry before
+the item can expire or its address be reused. Old item addresses are not
+proof of a fresh bot drop; do not infer ownership from stale memory.
+
+Tests PASS: eight successive asynchronous respawn lives, one attempt per
+corpse, independent bots, pre-death capture and owned-kit fallback. Source
+checks PASS: aim/navigation/185 crash guard and narrow local-place override
+preserved. MP/SP build PASS; all four installed EXE/PDB hashes match.
+Startup and live repeated-kill visibility/pickup tests PENDING. Do not claim
+visible dropped weapons fixed yet. Next: kill one bot twice across respawn,
+check both fresh native-drop/snapshot records, inspect the fresh item promptly
+if models/prompts still absent. Keep logs local. No GitHub upload/package.
+Other open work unchanged: UAV compass markers, idle/navigation validation,
+friend visibility, artillery and original renderer-list corruption writer.
+Stop after this update as requested; resume from this checkpoint next time.
+
+### 187 INSTALLED - native bot death weapon drop; live test pending
+
+USER186: bots now seem able to kill them while prone (positive vertical-aim
+result; high/low platforms not yet confirmed). Still no visible dropped guns.
+Archive CoD3MP-0.5.186-prone-feedback.log;186 aim retained unchanged.
+
+Drop investigation: native82580E38 first calls823E5CC0, which directly walks
+this machine's4local-player places. Bots intentionally have none. Existing
+bot-local823D9B50 hook cannot satisfy this gate. Native call only found in
+network spawn receiver82405058; bots' custom Respawn bypasses it. PlayerDie
+82587268 clearsheld164/entity+3 and never calls82580E38. So need both queued
+native drop call and narrowly scoped local-place gate for that call.
+
+187 captures an owned kit weapon in PlayerDie wrapper BEFORE native clears
+held fields. bot_death_drop.h tracks one attempt per entity/life; reset on
+slot creation and healthy Respawn. Dead-frame Think sets native deadstate4,
+then attempts drop before respawning4seconds later. Uses isolatedBotClientScope,
+firstslot1065 swapped only when selected weapon is secondslot1066, then
+normal82580E38. If no pickup created, restore our temporaryslot swap.
+All native eligibility/ammo/model/pickup/cleanup/network replication remains
+native. No forced models/inventory or human changes. Native823E5CC0 override
+ONLY while explicitdrop active, r4 exact botentity, caller82580E74. Outside
+that scope runs original.82580080 hook logs returned pickup entity (0means
+native rejection, not necessarily rendering). DropDeadBotWeapon logs slot,
+weapon and pickup. No repeatedattempts/infinite itemcreation on corpse.
+TestsPASS pre-death capture, duplicates, perbot independence, nextlife/entity
+reuse, ownedfallback/noinventory. SourceguardsPASS aim/nav/185crashguard intact.
+MP/SP buildsPASS, no gameprocess beforeinstall;4EXE/PDB SHA256match,
+VERSION187/portnotes updated. Startup187 PASS: visible multiplayer menu
+144FPS, left open. Live dropped-weapon creation/visibility pending.
+Next test: bot_add4, kill rifle/pistol bots; inspect ground/pickup prompt and
+'native dropped item' / 'death drop' logs, then respawnkill again. If pickup
+entity nonzero but invisible, inspect native item model path82486BF8/world
+model1436/1432 next; do not create duplicate items as rendering workaround.
+Friend-side pickup visibility still untested. UAV/idleAI/high-low aim queued.
+185guard still catches renderer list floatcorruption; rootwriter unresolved.
+No187GitHub push/friendpackage. Keep rawlogs/generatednativecode local.
+
+### 186 INSTALLED - vertical aiming correction; live test pending
+
+USER185: heldbotguns visible and bots killable; no dropped guns; UAV no
+compass enemy markers; some idle bots; high-ground enemybot fires level,
+not downwards. Also earlier prone target shot overhead. Address vertical
+aim only186; keep drops/UAV/idling as separate next patches.
+
+185 live snapshot:11 native death calls logged (includes host),4 prevented
+zero-byte-copy cases and no hardware queue-pointer writes. Example list
+metadata buffer4318B8FE capacityBF992A6E count3F800000(float1.0). Looks like
+float/vector data overwriting list, root writer still unknown. Guard catches
+it and queue remains82685ED0. Several successful kills USERconfirmed;
+not proof all death crashes resolved. Evidence live-feedback-185-summary.json
+and CoD3MP-0.5.185-live-feedback.log archived locally.
+
+186 proof: native8256E978 takes view/shotpitch into8254E120, which outputs
+forward.z=-sin(pitch). Old Think used +atan2(dz,flat), exactly inverted.
+Live185 bot6 needed-2.88 degrees to higher target, view/shot+2.89 instead.
+Correct wantPitch=-atan2; upward grenade loft negative14 insteadpositive.
+Normalize native viewPitch to signed[-180,180] before adaptive offset, so
+357deg doesn't become360deg offset. Actual command/shot already both use
+wantPitch, now consistent. New bot_aim.h tested nativevector dot alignment
+across yawquadrants/elevations and16bit command wrapping, prone/crouch eyes,
+invalid fallback and grenade loft. PASS.
+Old muzzlehook raised ALL botmuzzlesbelow50 to60 even legitimate prone/
+crouch eye heights.186 only replaces invalid/unset eyeheight; valid native
+stance origin retained, matching Think's sourceeye. No gameplay stateflag
+or aiming pose forced directly. No change to185guard,184navigation, team
+assignment or shot schedule (sourceguardsPASS). MP/SP buildsPASS.
+User closed185; no gameprocess verified beforeinstall. All4EXE/PDB hashes
+match sourcebuild; VERSION186/portnotes current. Startup186 PASS: visible
+multiplayer menu144FPS, left open. Live vertical-aim test pending. Next live: proneinfront ofstandingbot; standbelow and
+above enemy; check botlook/shot elevation, then kill/respawn stability.
+Drops/UAV/idleAI queued. Friend visibility still unconfirmed. No newGitHub
+push/friendpackage this patch.
+
+### 185 INSTALLED - renderer-list clear guard; kill test pending
+
+USER184: game crashed again. Runtime184 reproduced same failure after bot7
+killed by host: normal PlayerDie/deferrednotifications then watch82A87860
+written by820D3638, lr820D367C, from82436FC0/824483C0. Globalszero/invalid
+calls/gamehang. Saved local CoD3MP-0.5.184-crash.log. 184 log also shows two
+cleared-low-jump attempts; no proof of successful jump/ladder/detour yet.
+
+185 only adds wrapper820D3638 and bot_list_clear.h. Native caller82436FC0
+passes exact secondary renderer vector82C89A60. Layout buffer+0, capacity+4,
+count+8 (verified820D35A0/820D3638/820D36E8). Nonnegativecapacity nativeclear
+only zeroscount. Negativecapacity nativebranch allocates0 bytes then copies
+old positivecount before cleanup and finalcount0. Prepare clearscountFIRST
+only for this exact vector and negativecapacity/positivecount. Calls native
+for original allocation/free/metadata cleanup; other lists and normal clears
+unchanged. Logs original buffer/capacity/count/caller and completedreset queue.
+This is defensive protection of the observed copy path, NOT proof of why
+capacity became negative or initial corruption's root cause. Need actual
+runtime metadata/kill repro. Do not claim crash fixed without live evidence.
+Existing184 nav/team/weapon/death/input wrappers byte-identical (sourceguard).
+No new aim change; prone-target overheadshots still open. MP/SP buildsPASS.
+Regression harness models nativezeroalloccopy and catches baseline overflow;
+actual Prepare helper prevents it for counts1/4/176/INT_MAX, normal/empty/
+other lists unchanged, cleanup/canaries preserved. PASS.
+No gameprocess beforeinstall, all4EXE/PDB SHA256match; VERSION185 andportnotes.
+Startup185 PASS: visible multiplayer menu144FPS, leftopen. Automated live
+menu test interrupted by userinput; no botdeath test performed by assistant.
+Next: match, bot_add4, kill several and keepopen;
+inspect 'renderer list clear' logs, queue watch, killfeed/respawn/heldguns.
+If guard never triggers yetwatch fires, use context diagnostics at allocator
+8213F780 (caller820D367C) to verify savedr31 and destination/count aftercall.
+Keep rawlogs/dumps local; no185 GitHub upload or friendpackage made.
+
+### 184 INSTALLED - navigation patch; live test pending
+
+USER183: bots stop at obstacles or keep pushing forward. Requests detours,
+jump attempts with another route after failure, and ladders. Also confirms
+bot guns visible183 (dropped guns and friend visibility NOT confirmed).
+User sees3 bots on enemy team/1 alongside them: with solo host total3v2,
+expected balancing for5 total players. Other human presence unconfirmed.
+NEW aiming repro: prone directly in front of bot; it shoots above player.
+Keep as separate pitch/target-height issue; NOT fixed184.
+
+184 navigation only: all four moving/no-enemy roaming returns now route.
+Persist waypoints until reached/blocked instead of recomputing each250ms.
+Bounded local detour search64 collision queries/32nodes/depth4; body sweeps
+and floor support on every edge, recent-position avoidance and committed
+escape direction. No global map/navmesh or guarantee every maze is solved.
+Supported low jump:40-unit clearance,64 forward, safe landing;100ms upmove
+pulse,700ms commitment, cooldown8sec after failed progress. Removes old
+blind/random hops, which couldn't fire when routing zeroed forward input.
+Ladder: static native824A5270 validates surfaceFlags&8, ps+44 bit0x10,
+normalps+100..108.824A9D28 uses forward input for vertical climbing. Read
+trace+36 flags; near ladder chest ray plus body/floor-supported approach.
+Native ladder move priority over aiming; no sprint/fire/jump whileclimbing,
+stand command via existing BotCrouch. Failed vertical progress3500ms gives
+cooldown8sec and alternate route. Approach radius80, not full map discovery.
+Source regression guards: four roaming branches route, death/render/input
+isolation hooks byte-identical183. No changes to team/weapon recovery or
+teleport. C++ testsPASS wall detour across successive waypoints,64querycap,
+enclosed/cliff/NaN rejection, lowjump and tall/roof/gap rejection, ladderflag.
+Initial and final MP/SP buildsPASS. Game19332 exited; no game process
+verified before installation. All4EXE/PDB installed and SHA256matched.
+VERSION184/port patch notes updated. Startup184 PASS: visible multiplayer
+menu144FPS, left open. Live detour/jump/ladder test still pending.
+
+CRASH183 REPRO CAPTURED: bot7 killed by host, lethal/PlayerDie and deferred
+DeathState/Player_Dying completed; watch FINALLY named clearing writer:
+sub_820D3638 <-82436FC0 <-824483C0 <-82448A18 <-8231E0E0 <-82463978.
+82A87860 becomes0, then broad globals0/invalidindirectcalls, game hangs.
+820D3638 is native dynamic array reset; negativecapacity path allocates0
+bytes then loops copying priorcount. Need capture vector pointer/capacity/
+count/allocator return BEFORE invocation; don't assume queueoverflow or
+patch allocator size without proof. Pointerwatch report lr820D367C locates
+copy-loop path; this is new hard evidence, not a crash fix. Retain hooks.
+Evidence chat work/CoD3MP-0.5.183-combat-crash.log (localarchive only).
+184 does NOT fix combat crash. Next patch should target this captured writer,
+then prone aiming; original navigation remains experimental pending live.
 
 ### 183 INSTALLED - stable balanced bot teams; live test pending
 
@@ -310,7 +3194,7 @@ Startup smoke test PASS:174 visible at multiplayer menu; left open for user.
 Next: test prone hands-off15sec, bot guns, multi-kill stability.
 Then separate UAV fade/marker update, weapon selection if still0, artilleryfire.
 
-### 173 INSTALLED — recover 172 weapon regression; isolate supplemental session ticks
+### 173 INSTALLED ï¿½ recover 172 weapon regression; isolate supplemental session ticks
 
 LATEST USER TEST on172: killed one bot, crashed shooting second; bot weapons
 missing. Kill-feed credit AND death animations confirmed by user.172 is failed;
@@ -2010,3 +4894,12 @@ backup chat work/CoD3Recomp-before-volume118.ini. Tests/build pending.
 No bot/UAV/weapon changes118.117 drawable change awaits live result, and
 weapon switching with Y/Triangle AND mousewheel remains unresolved; first
 fresh-match test before bot_add still requested. Do not lose AI roadmap.
+
+
+
+
+
+
+
+
+

@@ -87,7 +87,8 @@ set(COD3_HOST_SOURCES
     "dom.cpp"
     "class_editor.cpp"
     "mouse_look.cpp"
-    "native_options.cpp")
+    "native_options.cpp"
+    "coop.cpp")   # 0.5.223: co-op campaign experiment (COD3_COOP=host|join; empty in multiplayer)
 add_executable(CoD3 WIN32 ${COD3_HOST_SOURCES} "resources/CoD3.rc")
 
 # The HDR mode's shaders (hdr/cod3_hdr.hlsl on RenoDX's shader library and
@@ -225,7 +226,11 @@ if (TARGET CoD3RecompLibMP)
     endforeach()
 
     add_executable(CoD3MP WIN32 ${mpSources} "resources/CoD3.rc" "${COD3_HDR_EMBED_OUTPUT}")
-    set_target_properties(CoD3MP PROPERTIES WIN32_EXECUTABLE OFF)
+    # 0.5.215: no console window beside the game (Justin: "a separate cmd
+    # window opens"). A windows program, still started through main();
+    # everything printed still goes to CoD3MP.log (log.cpp handles a start
+    # with no console). --console or COD3_CONSOLE=1 opens one (main.cpp).
+    set_target_properties(CoD3MP PROPERTIES WIN32_EXECUTABLE ON)
     target_link_libraries(CoD3MP PRIVATE
         CoD3RecompLibMP XenonUtils ole32 winmm dbghelp d3d11 dxgi d3dcompiler windowscodecs shell32 ws2_32 iphlpapi)
     file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/mp_levels/cod3_levels.inc"
@@ -238,5 +243,5 @@ if (TARGET CoD3RecompLibMP)
     endif()
     target_compile_definitions(CoD3MP PRIVATE COD3_MP=1 NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
     target_compile_options(CoD3MP PRIVATE -Wno-unused-parameter -g -gcodeview)
-    target_link_options(CoD3MP PRIVATE /STACK:16777216 /DEBUG)
+    target_link_options(CoD3MP PRIVATE /STACK:16777216 /DEBUG /ENTRY:mainCRTStartup)
 endif()

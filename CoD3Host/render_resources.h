@@ -167,6 +167,10 @@ namespace RenderResources
     // the frame). LookRange: the part a draw reads, compared with what went
     // up and sent again where it differs.
     bool NeedsRangeLook(Handle handle);
+    // 0.5.374: a small buffer the title rewrites within the frame, kept by
+    // a copy: its part a draw reads is compared, or all of it when the
+    // draw's vertices can't be told.
+    bool MidFrameRangeLook(Handle handle);
     void LookRange(Handle handle, uint32_t physical, uint32_t firstByte, uint32_t endByte);
     // Verify mode (verify.h): the part a draw reads held against what was
     // sent of the buffer; a difference is said and sent again.

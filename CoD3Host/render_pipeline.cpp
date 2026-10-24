@@ -221,6 +221,17 @@ namespace
         {
             desc.DepthBias += 32;
             desc.SlopeScaledDepthBias += 1.0f;
+            // 0.5.379: but never by more than this much depth. The slope's
+            // part has no end of its own: on a surface seen nearly edge on
+            // (Marseille's rails and sleepers, lying down by them or under
+            // a wagon) it grew past whole objects, and the rails drew over
+            // the crates, the posts and the player's own gun (Justin's
+            // video, 2026-10-22; Steady decals off cured it). Two hundred
+            // thousandths of the depth is still thousands of times the few
+            // bits a layer needs over its surface. COD3_DECALNUDGECLAMP=0:
+            // no limit, as before.
+            static const float clamp = []() { const char* t = getenv("COD3_DECALNUDGECLAMP"); return t != nullptr ? float(atof(t)) : 0.00002f; }();
+            desc.DepthBiasClamp = clamp;
         }
         ComPtr<ID3D11RasterizerState> state;
         g_device->CreateRasterizerState(&desc, &state);

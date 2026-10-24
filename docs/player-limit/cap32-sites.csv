@@ -1,0 +1,238 @@
+address,function,asm,occurrence,total,kind,note
+825304DC,825304B0,"ori r27,r10,54272",0,1,set4992,client list walk end (0x1D400)
+82531758,82531700,"ori r9,r10,54272",0,1,set4992,clear +360 of every client
+825350B4,82534F18,"ori r30,r11,54272",0,1,set4992,client list walk end
+825314EC,82531488,"li r30,24",0,1,N,countdown over clients
+825315F4,82531538,"li r19,24",0,1,N,countdown over clients
+82530294,82530270,"cmpwi cr6,r31,24",0,1,N,client index range check
+8240480C,824046D8,"cmpwi cr6,r11,24",0,2,N,join: find client loop
+824048E4,824046D8,"cmpwi cr6,r11,24",1,2,N,join: slot == max means full
+82594A08,82593FA8,"li r11,24",0,1,N,level.maxclients (level+148)
+82594A38,82593FA8,"addi r11,r11,9076",0,1,delta2992,level init: player records init loop end
+82595128,82595118,"li r29,23",0,1,N-1,player records countdown (23..0)
+8249B1FC,8249B1E0,"li r31,24",0,1,N,spawn the player entities (EntityList slots)
+824BADC8,824BADB8,"li r27,24",0,1,N,reset per-player records (EntityList walk)
+824B1BE0,824B1B28,"li r10,24",0,1,N,EntityList clear player slots (ctr)
+825627DC,82562680,"cmpwi cr6,r27,96",0,1,N4,EntityList walk (bytes 4..96)
+82562944,82562680,"cmpwi cr6,r26,96",0,1,N4,EntityList walk (bytes 4..96)
+8258ADA0,8258AC70,"cmpwi cr6,r26,96",0,1,N4,EntityList walk (bytes 4..96)
+824BEADC,824BEA80,"cmpwi cr6,r3,24",0,1,N,entity -> client index
+8248FEB4,8248FE00,"li r9,24",0,1,N,EntityList walk
+82535CDC,82535A18,"stw r3,100(r31)",0,1,guard100,level entity store copy
+8259419C,82593FA8,"stw r11,100(r31)",0,1,guard100,level entity store copy
+82483128,824830E0,"stw r8,100(r3)",0,1,guard100,level entity store copy
+824B1BF8,824B1B28,"stw r11,100(r28)",0,1,guard100,level entity clear copy
+823D40A0,823D4090,"cmplwi cr6,r10,24",0,1,N,local place -> roster
+823D86B0,823D8630,"cmpwi cr6,r31,24",0,1,N,roster mask loop
+823D8FFC,823D8FF0,"cmplwi cr6,r11,24",0,1,N,local place -> roster
+823D9510,823D9438,"cmplwi cr6,r10,24",0,1,N,local place -> roster
+823D9548,823D9438,"li r6,24",0,1,N,ranged write max (player number)
+823DAAB0,823DAA10,"cmplwi cr6,r11,24",0,1,N,local place -> roster
+823DAAEC,823DAA10,"li r6,24",0,1,N,ranged write max (player number)
+823DAB08,823DAA10,"li r6,25",0,1,N+1,ranged write max
+823DC904,823DC870,"cmpwi cr6,r31,24",0,1,N,roster mask loop
+823DCDC4,823DCD88,"cmplwi cr6,r9,24",0,1,N,local place sentinel
+823DCDEC,823DCD88,"li r28,24",0,1,N,roster walk
+823DCFFC,823DCF70,"cmplwi cr6,r30,24",0,1,N,roster walk
+823DD06C,823DD068,"li r8,24",0,1,N,number -> roster (valid if < max)
+823DD0F4,823DD0E8,"addi r11,r6,4248",0,1,R4248,find by xuid: base was not redirected
+823DD0F8,823DD0E8,"li r7,24",0,1,N,find by xuid
+823DD154,823DD0E8,"cmplwi cr6,r8,24",0,1,N,find by xuid
+823E1328,823E1308,"li r10,24",0,1,N,number valid
+823E1418,823E1308,"cmplwi cr6,r11,24",0,1,N,local place -> roster
+823E1AF8,823E1978,"cmplwi cr6,r26,24",0,1,N,roster walk
+823E4E74,823E4D80,"li r24,24",0,1,N,roster walk register
+823E53C4,823E4D80,"cmpwi cr6,r30,24",0,1,N,roster walk
+823E562C,823E55E8,"li r30,24",0,1,N,roster walk register
+823E5838,823E57D0,"li r29,24",0,1,N,roster walk register
+823E59CC,823E5978,"li r22,24",0,1,N,roster walk register
+823E5C18,823E5978,"cmpwi cr6,r29,24",0,1,N,roster walk
+823E5CD4,823E5CC0,"cmplwi cr6,r11,24",0,1,N,local place -> roster
+823E5D48,823E5D38,"li r7,24",0,1,N,find entity in roster
+823E5F08,823E5D38,"cmplwi cr6,r3,24",0,1,N,find entity in roster (unrolled 4)
+823E5F48,823E5F30,"li r5,24",0,1,N,find entity in roster
+823E5FC0,823E5F30,"cmplwi cr6,r8,24",0,1,N,find entity in roster
+823E717C,823E70D8,"cmplwi cr6,r11,24",0,1,N,local place -> roster
+823E72E4,823E70D8,"li r6,24",0,1,N,ranged write max
+823EA37C,823EA360,"cmplwi cr6,r10,24",0,1,N,local place -> roster
+823EB144,823EB0E8,"li r24,24",0,1,N,roster walk register
+823EB1F4,823EB0E8,"cmpwi cr6,r26,24",0,1,N,roster walk
+823EB538,823EB4A0,"cmplwi cr6,r11,24",0,1,N,local place -> roster
+823EB59C,823EB4A0,"li r6,24",0,1,N,ranged write max
+823EBF58,823EBF08,"li r31,24",0,1,N,roster walk register
+823EC1AC,823EC140,"li r11,24",0,1,N,sentinel store
+823EC354,823EC2E8,"li r11,24",0,1,N,sentinel store
+823EC6D0,823EC678,"li r29,23",0,1,N-1,roster countdown
+823ED170,823ED0E0,"cmplwi cr6,r11,24",0,1,N,local place -> roster
+823FA848,823FA740,"li r28,24",0,1,N,roster walk register
+823FA964,823FA740,"cmpwi cr6,r27,24",0,1,N,roster walk
+823FA9D4,823FA9B8,"li r28,24",0,1,N,roster init: number byte sentinel
+823FAA9C,823FA9B8,"cmplwi cr6,r27,24",0,1,N,roster init loop
+823FB180,823FB170,"li r28,24",0,1,N,roster walk register
+823FBC4C,823FBC28,"li r23,24",0,1,N,roster walk register
+823FDBA0,823FDB88,"li r9,24",0,1,N,roster
+824038B4,82403840,"cmplwi cr6,r11,24",0,1,N,local place -> roster
+8240447C,82403840,"li r29,24",0,1,N,roster walk register
+82404600,82404580,"cmplwi cr6,r9,24",0,1,N,second local list sentinel
+82404630,82404580,"cmplwi cr6,r11,25",0,1,N+1,second local list special
+82405190,82405158,"li r27,24",0,1,N,sentinel register
+824054A8,82405158,"cmpwi cr6,r30,24",0,2,N,roster walk
+82405658,82405158,"cmpwi cr6,r30,24",1,2,N,roster walk
+82405AE4,82405A88,"li r28,24",0,1,N,sentinel register
+82405B70,82405A88,"cmplwi cr6,r11,24",0,2,N,local place -> roster
+82405C40,82405A88,"cmplwi cr6,r11,24",1,2,N,local place -> roster
+82405DEC,82405D50,"li r29,23",0,1,N-1,roster init countdown
+824075B0,82407538,"cmplwi cr6,r11,24",0,2,N,local place -> roster
+8240769C,82407538,"cmplwi cr6,r11,24",1,2,N,local place -> roster
+824076D4,82407538,"li r25,24",0,1,N,roster walk register
+824EEC44,824EEC00,"cmplwi cr6,r11,24",0,1,N,local place -> roster
+824EED1C,824EEC00,"cmpwi cr6,r27,24",0,1,N,roster number loop
+8250438C,825042D0,"li r29,24",0,1,N,roster number loop register
+825044B0,825042D0,"cmpwi cr6,r26,24",0,1,N,roster number loop
+824F9284,824F9208,"li r23,24",0,1,N,roster number loop register
+824F9400,824F9208,"cmpwi cr6,r26,24",0,1,N,roster number loop
+823D91EC,823D9060,"cmplwi cr6,r11,25",0,1,N+1,local place special
+823D927C,823D9060,"li r11,25",0,1,N+1,local place special store
+823F4324,823F42A0,"cmplwi cr6,r10,25",0,1,N+1,local place special
+823D93A0,823D9398,"li r9,24",0,1,N,party list init
+823D9B24,823D9AD0,"li r10,24",0,1,N,roster entry reset
+823DD3F4,823DD3E8,"li r8,24",0,1,N,party list init
+823DD44C,823DD420,"li r9,24",0,1,N,party list init
+823E1F28,823E1EC8,"li r11,24",0,1,N,message struct number none
+823E3764,823E36E8,"li r31,24",0,1,N,message struct number none
+823E38DC,823E3860,"li r31,24",0,1,N,message struct number none
+823E3BFC,823E3B88,"li r31,24",0,1,N,message struct number none
+823E4388,823E4358,"li r11,24",0,1,N,message struct number none
+823E45C4,823E4560,"li r11,24",0,1,N,message struct number none
+823E4AB4,823E4A90,"li r9,24",0,1,N,message struct number none
+823EC598,823EC538,"li r11,24",0,1,N,message struct number none
+823F3C7C,823F3C10,"li r11,24",0,1,N,message struct number none
+823F4388,823F42A0,"li r11,24",0,2,N,message struct number none
+823F4B1C,823F42A0,"li r11,24",1,2,N,local place store none
+823F8528,823F8518,"li r11,24",0,1,N,roster entry init none
+823F8FEC,823F8F88,"li r11,24",0,1,N,message struct number none
+823F9638,823F9610,"li r10,24",0,1,N,party list remove
+823FA120,823FA0F0,"li r11,24",0,1,N,message struct number none
+823FB3D4,823FB298,"li r8,24",0,1,N,local place store none
+823FB4CC,823FB4A0,"li r9,24",0,1,N,party list init
+823FC994,823FC930,"li r11,24",0,1,N,message struct number none
+823FD05C,823FD050,"li r8,24",0,1,N,party list
+82404A4C,824049E8,"li r11,24",0,1,N,message struct number none
+82405EFC,82405D50,"li r8,24",0,1,N,local place store none
+823EC6CC,823EC678,"addi r11,r31,22928",0,1,Rend22928,roster backwards walk start (was inline)
+823D9BE4,823D9BE0,"li r10,24",0,1,N,entry number valid
+823D4274,823D4270,"li r10,24",0,1,N,number valid
+823D406C,823D4060,"cmplwi cr6,r9,24",0,1,N,local place find
+823D7388,823D7378,"li r11,24",0,1,N,ranged read default none
+823DC0D0,823DC0A0,"li r11,24",0,1,N,ranged read default none
+823D842C,823D8378,"li r10,24",0,1,N,number none init
+823DC680,823DC678,"addi r10,r11,4900",0,1,R4900,count players: base was inline (6-unrolled)
+823DC684,823DC678,"li r8,4",0,1,groups6,count players: groups of 6
+823DC688,823DC678,"li r9,24",0,1,N,count players
+823DC918,823DC918,"addi r11,r3,4256",0,1,R4256,clear field: base was inline (6-unrolled)
+823DC91C,823DC918,"li r7,4",0,1,groups6,clear field: groups of 6
+823DC920,823DC918,"li r8,24",0,1,N,clear field
+823D7394,823D7378,"li r6,24",0,1,N,ranged 821AF1E0
+823D73E8,823D73D0,"li r6,24",0,1,N,ranged 821AFF20
+823DC0D8,823DC0A0,"li r6,24",0,1,N,ranged 821AF1E0
+823DC4B8,823DC480,"li r6,24",0,1,N,ranged 821AFF20
+823DE8CC,823DE7B8,"li r6,24",0,1,N,ranged 821AFF20
+823E1C44,823E1B50,"li r6,24",0,1,N,ranged 821AFF20
+823E4D00,823E4C68,"li r6,24",0,1,N,ranged 821AFF20
+823E6C88,823E6BA0,"li r6,24",0,1,N,ranged 821AFF20
+823E6DBC,823E6CF0,"li r6,24",0,1,N,ranged 821AFF20
+823E6EF4,823E6E18,"li r6,24",0,1,N,ranged 821AFF20
+823E7078,823E6F60,"li r6,24",0,1,N,ranged 821AFF20
+823E74FC,823E7340,"li r6,24",0,1,N,ranged 821AFF20
+823E7780,823E7678,"li r6,24",0,1,N,ranged 821AFF20
+823E7980,823E7820,"li r6,24",0,2,N,ranged 821AFF20
+823E79D0,823E7820,"li r6,24",1,2,N,ranged 821AFF20
+823E7E04,823E7C48,"li r6,24",0,1,N,ranged 821AFF20
+823E8038,823E7E70,"li r6,24",0,2,N,ranged 821AFF20
+823E80EC,823E7E70,"li r6,24",1,2,N,ranged 821AFF20
+823E87A0,823E86A8,"li r6,24",0,2,N,ranged 821AFF20
+823E87E0,823E86A8,"li r6,24",1,2,N,ranged 821AFF20
+823E8924,823E8840,"li r6,24",0,1,N,ranged 821AFF20
+823E8B44,823E8A50,"li r6,24",0,2,N,ranged 821AFF20
+823E8B98,823E8A50,"li r6,24",1,2,N,ranged 821AFF20
+823E8E1C,823E8CE0,"li r6,24",0,1,N,ranged 821AFF20
+823E8FD4,823E8E88,"li r6,24",0,1,N,ranged 821AFF20
+823E92C4,823E90F0,"li r6,24",0,1,N,ranged 821AFF20
+823E949C,823E93B8,"li r6,24",0,1,N,ranged 821AFF20
+823E9664,823E9560,"li r6,24",0,3,N,ranged 821AFF20
+823E96D4,823E9560,"li r6,24",1,3,N,ranged 821AFF20
+823E987C,823E9560,"li r6,24",2,3,N,ranged 821AFF20
+823E9AB4,823E9998,"li r6,24",0,3,N,ranged 821AFF20
+823E9C14,823E9998,"li r6,24",1,3,N,ranged 821AFF20
+823E9CFC,823E9998,"li r6,24",2,3,N,ranged 821AFF20
+823EA0BC,823E9FD0,"li r6,24",0,1,N,ranged 821AFF20
+823EA304,823EA250,"li r6,24",0,1,N,ranged 821AFF20
+823EBDF0,823EBBE0,"li r6,24",0,2,N,ranged 821AFF20
+823EBE30,823EBBE0,"li r6,24",1,2,N,ranged 821AFF20
+823ED78C,823ED658,"li r6,24",0,4,N,ranged 821AFF20
+823ED8A8,823ED658,"li r6,24",1,4,N,ranged 821AFF20
+823EDA68,823ED658,"li r6,24",2,4,N,ranged 821AFF20
+823EDB3C,823ED658,"li r6,24",3,4,N,ranged 821AFF20
+823F31C8,823F2E20,"li r6,25",0,2,N+1,ranged 821AFF20
+823F344C,823F2E20,"li r6,25",1,2,N+1,ranged 821AFF20
+823F368C,823F3480,"li r6,24",0,2,N,ranged 821AFF20
+823F3834,823F3480,"li r6,24",1,2,N,ranged 821AFF20
+823F3CB0,823F3C10,"li r6,25",0,1,N+1,ranged 821AF1E0
+823F5618,823F53F8,"li r6,24",0,1,N,ranged 821AFF20
+823F7B38,823F78B0,"li r6,25",0,2,N+1,ranged 821AF1E0
+823F8050,823F78B0,"li r6,25",1,2,N+1,ranged 821AF1E0
+823F93D0,823F8F88,"li r6,24",0,1,N,ranged 821AFF20
+823FC510,823FBF78,"li r6,24",0,1,N,ranged 821AF1E0
+823FD774,823FD558,"li r6,24",0,2,N,ranged 821AF1E0
+823FD9A8,823FD558,"li r6,24",1,2,N,ranged 821AF1E0
+823FE100,823FDE18,"li r6,24",0,1,N,ranged 821AFF20
+823FE644,823FE1C0,"li r6,24",0,1,N,ranged 821AFF20
+823FEBC8,823FEAD0,"li r6,24",0,1,N,ranged 821AF1E0
+8239EF3C,8239EC38,"addi r6,r11,4216",0,1,R4216,scoreboard: player name (inline roster)
+823A03B4,823A0180,"addi r6,r9,4216",0,1,R4216,scoreboard: player name (inline roster)
+823D9054,823D9048,"addi r3,r11,4216",0,1,R4216,name of session player n (inline roster)
+823D82B4,823D82A0,"addi r10,r3,4716",0,1,R4716,count teams (+604) over the roster (inline roster)
+820D660C,820D6580,"cmpwi cr6,r7,24",0,1,N,pool init loop (6 at a time)
+824271A8,82427170,"cmpwi cr6,r10,24",0,1,N,pool alloc: none left at max
+820D5C00,820D5BD0,"addi r27,r10,-32032",0,1,P504,free: index array
+820D5C9C,820D5BD0,"addi r5,r5,-32128",0,1,P504,free: pointer array
+820D5CAC,820D5BD0,"addi r8,r11,-32128",0,1,P504,free: pointer array
+820D5CB0,820D5BD0,"addi r10,r10,-32128",0,1,P504,free: pointer array
+820D5CB8,820D5BD0,"addi r6,r6,-32032",0,1,P504,free: index array
+820D651C,820D64E8,"addi r29,r10,-32128",0,1,P504,reset: pointer array
+820D65B0,820D6580,"addi r11,r11,-32128",0,1,P504,init: pointer array
+820D65C8,820D6580,"stw r7,96(r11)",0,1,P504d,init: index array (+96 from the pointers)
+820D65E4,820D6580,"stw r6,100(r11)",0,1,P504d,init: index array
+820D65FC,820D6580,"stw r5,104(r11)",0,1,P504d,init: index array
+820D6620,820D6580,"stw r4,108(r11)",0,1,P504d,init: index array
+820D663C,820D6580,"stw r3,112(r11)",0,1,P504d,init: index array
+820D6654,820D6580,"stw r30,116(r11)",0,1,P504d,init: index array
+824223C0,82422390,"addi r8,r10,-32128",0,1,P504,users: pointer array
+824223D0,82422390,"addi r10,r10,-32128",0,1,P504,users: pointer array
+824223D4,82422390,"addi r31,r11,-32128",0,1,P504,users: pointer array
+82426A80,82426A48,"addi r8,r10,-32128",0,1,P504,users: pointer array
+82426A90,82426A48,"addi r10,r10,-32128",0,1,P504,users: pointer array
+82426A94,82426A48,"addi r31,r11,-32128",0,1,P504,users: pointer array
+824271C0,82427170,"addi r11,r11,-32128",0,1,P504,alloc: pointer array
+82580D84,82580B40,"addi r11,r10,337",0,1,SINK337,damage-from table: attacker past slot 24 (index -1) to a spare word not record +1344
+823A023C,823A0180,"li r23,24",0,1,N,scoreboard: player loop walks every player (was 24)
+823A024C,823A0180,"cmplwi cr6,r28,0",0,1,ROWFULL0,scoreboard: rows full (24) - skip the rest
+8239ECE4,8239EC38,"li r20,24",0,1,N,scoreboard 2: player loop walks every player (team totals too)
+8239EE40,8239EC38,"cmpw cr6,r28,r10",0,1,ROWFULLNE,scoreboard 2: rows full (24) - not a row (totals still added)
+8239EE4C,8239EC38,"cmplwi cr6,r10,0",1,2,ROWFULLNZ,scoreboard 2: rows full (24) - not a row
+8250689C,82506540,"cmpwi cr6,r25,24",0,1,N,friendly markers (rank icon over heads): walk every player; table holds 32 (824E2CB0 draws li r26 32)
+82506384,82505CE8,"cmpwi cr6,r23,24",0,1,N,compass players: walk every player (8 a pass); table +0x5F8 is 0x500 = 32 x 0x28
+824F97C4,824F9410,"addi r27,r27,12",0,1,SIDE12W,overhead icons (rank/medic/spotted over heads): entries past slot 24 to a side block
+824F97C8,824F9410,"cmpwi cr6,r17,96",0,1,N4,overhead icons: walk every player (was 24 x 4)
+8250812C,82507D28,"addi r29,r29,12",0,1,SIDE12R,overhead icon drawer: entries past slot 24 from the side block
+82508130,82507D28,"cmpwi cr6,r24,96",0,1,N4,overhead icon drawer: walk every player (was 24 x 4)
+823D934C,823D9338,"addi r10,r10,-24",0,1,N,vehicle seat empty test (seat bytes start as N: 823D93A0 party list init)
+823D937C,823D9338,"addi r11,r11,-24",0,1,N,vehicle seat empty test (seat 1 / +0xE)
+823F35F4,823F3480,"addi r11,r11,-24",0,1,N,vehicle seats: occupied test over the seat bytes
+823FDFB4,823FDE18,"addi r11,r11,-24",0,1,N,vehicle leave: seat +0xF empty test
+823FDFF4,823FDE18,"addi r10,r11,-24",0,1,N,vehicle leave: seat +0xE empty test
+823DD3F4,823DD3E8,"li r8,24",0,1,N,vehicle seats init: empty = N (as 823D93A0)
+823DD44C,823DD420,"li r9,24",0,1,N,vehicle seats reset: empty = N
+823FB4CC,823FB4A0,"li r9,24",0,1,N,vehicle seats reset: empty = N
+823F9638,823F9610,"li r10,24",0,1,N,vehicle seat freed: empty = N
+823FD05C,823FD050,"li r8,24",0,1,N,vehicle seat change: old seat empty = N

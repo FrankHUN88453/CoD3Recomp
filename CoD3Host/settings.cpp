@@ -160,6 +160,7 @@ void Settings::Load(const std::filesystem::path& exeDirectory)
             else if (key == "antialiasing") v.antialiasing = atoi(value.c_str());
             else if (key == "texture_quality") v.textureQuality = atoi(value.c_str());
             else if (key == "fov") v.fov = atoi(value.c_str());
+            else if (key == "brightness") v.brightness = std::clamp(atoi(value.c_str()), 50, 150);
             else if (key == "model_detail") v.modelDetail = atoi(value.c_str());
             else if (key == "fog") v.fog = atoi(value.c_str()) != 0;
             else if (key == "draw_distance") v.drawDistance = atoi(value.c_str());
@@ -178,7 +179,7 @@ void Settings::Load(const std::filesystem::path& exeDirectory)
             else if (key == "native_commands") v.nativeCommands = atoi(value.c_str()) != 0;
             else if (key == "watch_writes") v.watchWrites = atoi(value.c_str()) != 0;
             else if (key == "film_video_levels") v.filmVideoLevels = atoi(value.c_str()) != 0;
-            else if (key == "opt_depth_thread") v.depthThread = atoi(value.c_str()) != 0;
+            else if (key == "opt_depth_thread2") v.depthThread = atoi(value.c_str()) != 0;   // 0.5.341: new name, so a 0.5.340 file's 1 is not kept
             else if (key == "opt_fast_constants") v.fastConstants = atoi(value.c_str()) != 0;
             else if (key == "opt_shader_load_cache") v.shaderLoadCache = atoi(value.c_str()) != 0;
             else if (key == "opt_strong_change_check") v.strongChangeCheck = atoi(value.c_str()) != 0;
@@ -238,18 +239,25 @@ void Settings::Load(const std::filesystem::path& exeDirectory)
             else if (key == "bren_ads_fov") v.brenAdsFov = std::clamp(float(atof(value.c_str())), 0.0f, 90.0f);
             else if (key == "enfield_ads_fov") v.enfieldAdsFov = std::clamp(float(atof(value.c_str())), 0.0f, 90.0f);
             else if (key == "bren_reload") v.brenReload = std::clamp(float(atof(value.c_str())), 0.0f, 10.0f);
+            else if (key == "g43_reload") v.g43Reload = std::clamp(float(atof(value.c_str())), 0.0f, 10.0f);
+            else if (key == "mg34_no_deploy") v.mg34NoDeploy = atoi(value.c_str()) != 0;
             else if (key == "extra_map_memory") v.extraMapMemory = std::clamp(atoi(value.c_str()), 0, 18);
             else if (key == "launcher") v.launcher = atoi(value.c_str()) != 0;
             else if (key == "texture_dump") v.textureDump = atoi(value.c_str()) != 0;
             else if (key == "texture_replace") v.textureReplace = atoi(value.c_str()) != 0;
+            else if (key == "max_players") v.maxPlayers = atoi(value.c_str()) >= 32 ? 32 : 24;
             else if (key == "binoculars") v.binoculars = atoi(value.c_str()) != 0;
             else if (key == "killstreak_artillery") v.killstreakArtillery = atoi(value.c_str()) != 0;
             else if (key == "killstreak_kills" || key == "killstreak_artillery_kills") v.killstreakKills = std::clamp(atoi(value.c_str()), 1, 30);
             else if (key == "killstreak_uav_kills") v.killstreakUav = std::clamp(atoi(value.c_str()), 1, 30);
             else if (key == "killstreak_typhoon_kills") v.killstreakTyphoon = std::clamp(atoi(value.c_str()), 1, 30);
             else if (key == "uav_seconds") v.uavSeconds = std::clamp(atoi(value.c_str()), 5, 120);
+            else if (key == "uav_plane") v.uavPlane = atoi(value.c_str()) != 0;
             else if (key == "four_secondary") v.fourSecondary = atoi(value.c_str()) != 0;
             else if (key == "aim_walk") v.aimWalk = atoi(value.c_str());
+            else if (key == "sniper_walk") v.sniperWalk = atoi(value.c_str());
+            else if (key == "sniper_sway") v.sniperSway = atoi(value.c_str());
+            else if (key == "bot_vehicles") v.botVehicles = atoi(value.c_str()) != 0;
             else if (key == "ability_recharge") v.abilityRecharge = atoi(value.c_str());
             else if (key.compare(0, 6, "class_") == 0 && key.size() > 7)
             {
@@ -306,13 +314,15 @@ void Settings::Load(const std::filesystem::path& exeDirectory)
     if (v.customPrimary < 0 || v.customPrimary > 13) v.customPrimary = 0;
     if (v.activeClass < 0 || v.activeClass > Values::CustomClasses) v.activeClass = 0;
     if (v.aimWalk < 40 || v.aimWalk > 100) v.aimWalk = 80;
+    if (v.sniperWalk < 15 || v.sniperWalk > 100) v.sniperWalk = 30;
+    if (v.sniperSway < 0 || v.sniperSway > 100) v.sniperSway = 50;
     if (v.abilityRecharge < 10 || v.abilityRecharge > 100) v.abilityRecharge = 50;
     for (int i = 0; i < Values::CustomClasses; i++)
     {
-        if (v.classPrimary[i] < 0 || v.classPrimary[i] > 18) v.classPrimary[i] = 0;
-        if (v.classSidearm[i] < 0 || v.classSidearm[i] > 20) v.classSidearm[i] = 0;
+        if (v.classPrimary[i] < 0 || v.classPrimary[i] > 21) v.classPrimary[i] = 0;
+        if (v.classSidearm[i] < 0 || v.classSidearm[i] > 23) v.classSidearm[i] = 0;
         if (v.classBase[i] < 0 || v.classBase[i] > 7) v.classBase[i] = 0;
-        if (v.classGrenadeType[i] < 0 || v.classGrenadeType[i] > 3) v.classGrenadeType[i] = 0;
+        if (v.classGrenadeType[i] < 0 || v.classGrenadeType[i] > 4) v.classGrenadeType[i] = 0;
         if (v.classGrenades[i] < 0 || v.classGrenades[i] > 4) v.classGrenades[i] = 0;
         if (!v.className[i][0]) snprintf(v.className[i], sizeof(v.className[i]), "CUSTOM %d", i + 1);
     }
@@ -342,12 +352,13 @@ void Settings::Save()
         else snprintf(resolution, sizeof(resolution), "desktop");
         fprintf(file, "[graphics]\nrenderer = %d\nresolution = %s\nresolution_scale = %d\ntexture_filter = %d\nanisotropy = %d\nvsync = %d\nunlock_frame_rate = %d\nframe_cap = %d\nantialiasing = %d\ntexture_quality = %d\nfov = %d\nmodel_detail = %d\naim_depth_of_field = %d\nconsole_depth = %d\nnative_commands = %d\nwatch_writes = %d\nwindow_mode = %d\nfps_overlay = %d\nstats_overlay = %d\n",
             v.renderer, resolution, v.resolutionScale, v.textureFilter, v.anisotropy, v.vsync ? 1 : 0, v.unlockFrameRate ? 1 : 0, v.frameCap, v.antialiasing, v.textureQuality, v.fov, v.modelDetail, v.aimBlur ? 1 : 0, v.consoleDepth ? 1 : 0, v.nativeCommands ? 1 : 0, v.watchWrites ? 1 : 0, v.windowMode, v.fpsOverlay ? 1 : 0, v.statsOverlay ? 1 : 0);
+        fprintf(file, "brightness = %d\n", v.brightness);
         fprintf(file, "fog = %d\ndraw_distance = %d\neffects = %d\ndynamic_lights = %d\n", v.fog ? 1 : 0, v.drawDistance, v.effects,
                 v.dynamicLights ? 1 : 0);
         fprintf(file, "sharp_shadows = %d\neffects_resolution = %d\nfoliage_coverage = %d\nfast_shadow_maps = %d\n", v.sharpShadows ? 1 : 0,
                 v.effectsResolution, v.foliageCoverage ? 1 : 0, v.fastShadowMaps ? 1 : 0);
         fprintf(file, "film_video_levels = %d\nsteady_decals = %d\n", v.filmVideoLevels ? 1 : 0, v.steadyDecals ? 1 : 0);
-        fprintf(file, "opt_depth_thread = %d\nopt_fast_constants = %d\nopt_shader_load_cache = %d\nopt_strong_change_check = %d\nopt_range_looks = %d\nopt_opaque_shaders = %d\nopt_staging_uploads = %d\nopt_texture_pool = %d\n",
+        fprintf(file, "opt_depth_thread2 = %d\nopt_fast_constants = %d\nopt_shader_load_cache = %d\nopt_strong_change_check = %d\nopt_range_looks = %d\nopt_opaque_shaders = %d\nopt_staging_uploads = %d\nopt_texture_pool = %d\n",
                 v.depthThread ? 1 : 0, v.fastConstants ? 1 : 0, v.shaderLoadCache ? 1 : 0, v.strongChangeCheck ? 1 : 0,
                 v.rangeLooks ? 1 : 0, v.opaqueShaders ? 1 : 0, v.stagingUploads ? 1 : 0, v.texturePool ? 1 : 0);
         fprintf(file, "hdr = %d\nhdr_tone_mapper = %d\nhdr_peak_nits = %.0f\nhdr_game_nits = %.0f\nhdr_ui_nits = %.0f\nhdr_gamma_correction = %d\n",
@@ -356,6 +367,7 @@ void Settings::Save()
                 v.hdrExposure, v.hdrHighlights, v.hdrShadows, v.hdrContrast, v.hdrSaturation, v.hdrHighlightSaturation, v.hdrBlowout,
                 v.hdrFlare, v.hdrHueCorrection, v.hdrConeResponse, v.hdrBloom, v.hdrTvRamp, v.hdrFilmUpgrade ? 1 : 0, v.hdrHudMatch ? 1 : 0);
         fprintf(file, "[game]\nplayer_name = %s\nlan_address = %s\nsystem_link_peers = %s\nmaster_volume = %d\naudio_channels = %d\naim_assist = %d\nbounces = %d\ncontroller = %d\nrumble = %d\nstick_deadzone = %d\nmouse_sensitivity = %.2f\nstick_vertical_scale = %d\nraw_mouse = %d\ndirect_mouse = %d\ntoggle_sprint = %d\nshell_shock_blur = %d\nmelee_lunge = %d\n", v.playerName, v.lanAddress, v.systemLinkPeers, v.masterVolume, v.audioChannels, v.aimAssist ? 1 : 0, v.bounces ? 1 : 0, v.controller ? 1 : 0, v.rumble ? 1 : 0, v.stickDeadzone, v.mouseSensitivity, v.stickVerticalScale, v.rawMouse ? 1 : 0, v.directMouse ? 1 : 0, v.toggleSprint ? 1 : 0, v.shellShockBlur ? 1 : 0, v.meleeLunge ? 1 : 0);
+        fprintf(file, "max_players = %d\n", v.maxPlayers >= 32 ? 32 : 24);
         fprintf(file, "quick_landing = %d\nquick_sprint = %d\ncustom_primary = %d\n", v.quickLanding ? 1 : 0, v.quickSprint ? 1 : 0,
                 v.customPrimary);
         fprintf(file, "active_class = %d\ntwo_grenades = %d\nfaster_ads = %d\nfour_secondary = %d\n", v.activeClass, v.twoGrenades ? 1 : 0,
@@ -363,9 +375,12 @@ void Settings::Save()
         fprintf(file, "texture_dump = %d\ntexture_replace = %d\n", v.textureDump ? 1 : 0, v.textureReplace ? 1 : 0);
         fprintf(file, "binoculars = %d\nkillstreak_artillery = %d\nkillstreak_uav_kills = %d\nkillstreak_artillery_kills = %d\nkillstreak_typhoon_kills = %d\nuav_seconds = %d\n",
                 v.binoculars ? 1 : 0, v.killstreakArtillery ? 1 : 0, v.killstreakUav, v.killstreakKills, v.killstreakTyphoon, v.uavSeconds);
+        fprintf(file, "uav_plane = %d\n", v.uavPlane ? 1 : 0);
         fprintf(file, "ability_recharge = %d\naim_walk = %d\nlauncher = %d\ncampaign_guns = %d\ncampaign_test = %d\nextra_map_memory = %d\nbig_memory = %d\ncampaign_sounds = %d\ncampaign_gunshots = %d\ncampaign_icons = %d\n", v.abilityRecharge, v.aimWalk, v.launcher ? 1 : 0, v.campaignGuns ? 1 : 0, v.campaignTest, v.extraMapMemory, v.bigMemory ? 1 : 0, v.campaignSounds ? 1 : 0, v.campaignGunshots ? 1 : 0, v.campaignIcons ? 1 : 0);
-        fprintf(file, "campaign_shot_sounds = %d\ncampaign_shot_events = %d\nads_in_air = %d\nsten_reload = %.2f\nfg42_reload = %.2f\nbren_reload = %.2f\nfg42_ads_fov = %.1f\nsten_ads_fov = %.1f\nbren_ads_fov = %.1f\nenfield_ads_fov = %.1f\n", v.campaignShotSounds ? 1 : 0, v.campaignShotEvents,
-                v.adsInAir ? 1 : 0, v.stenReload, v.fg42Reload, v.brenReload, v.fg42AdsFov, v.stenAdsFov, v.brenAdsFov, v.enfieldAdsFov);
+        fprintf(file, "sniper_walk = %d\nsniper_sway = %d\nbot_vehicles = %d\n", v.sniperWalk, v.sniperSway, v.botVehicles ? 1 : 0);
+        fprintf(file, "campaign_shot_sounds = %d\ncampaign_shot_events = %d\nads_in_air = %d\nsten_reload = %.2f\nfg42_reload = %.2f\nbren_reload = %.2f\ng43_reload = %.2f\nfg42_ads_fov = %.1f\nsten_ads_fov = %.1f\nbren_ads_fov = %.1f\nenfield_ads_fov = %.1f\n", v.campaignShotSounds ? 1 : 0, v.campaignShotEvents,
+                v.adsInAir ? 1 : 0, v.stenReload, v.fg42Reload, v.brenReload, v.g43Reload, v.fg42AdsFov, v.stenAdsFov, v.brenAdsFov, v.enfieldAdsFov);
+        fprintf(file, "mg34_no_deploy = %d\n", v.mg34NoDeploy ? 1 : 0);
         for (int i = 0; i < Values::CustomClasses; i++)
             fprintf(file, "class_%d_name = %s\nclass_%d_primary = %d\nclass_%d_sidearm = %d\nclass_%d_base = %d\nclass_%d_grenade_type = %d\nclass_%d_grenades = %d\n",
                     i + 1, v.className[i], i + 1, v.classPrimary[i], i + 1, v.classSidearm[i], i + 1, v.classBase[i], i + 1,

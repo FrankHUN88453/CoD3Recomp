@@ -68,6 +68,7 @@ namespace
     {
         const auto* record = info->ExceptionRecord;
         const uintptr_t exe = uintptr_t(GetModuleHandleW(nullptr));
+        _fflush_nolock(stdout);   // 0.5.370: stdout is buffered now (log.cpp): what came before the crash first (no lock: the crash may hold it)
         fprintf(stderr, "unhandled: code %08lX at %p (exe+%llx) info %llx %p thread %lu\n",
             record->ExceptionCode, record->ExceptionAddress,
             (unsigned long long)(uintptr_t(record->ExceptionAddress) - exe),
@@ -95,6 +96,10 @@ namespace
     LONG CALLBACK GuestFaultHandler(EXCEPTION_POINTERS* info)
     {
         const auto* record = info->ExceptionRecord;
+
+        // 0.5.240: the multiplayer program's own first look (the roster trap).
+        if (Kernel::FaultHook != nullptr && Kernel::FaultHook(info))
+            return EXCEPTION_CONTINUE_EXECUTION;
 
         // A write to a page the renderer watches (write_watch.cpp): noted,
         // the page made writable, and the write made again.
@@ -1016,7 +1021,9 @@ void Kernel::Exit(int code)
     // to read the output after the process ends.
     DWORD processes[2] = {};
     const DWORD attached = GetConsoleProcessList(processes, 2);
-    if (attached <= 1)
+    // 0.5.215: with no console at all (the multiplayer program's normal
+    // start now) there is no window to keep open and nothing to wait for.
+    if (attached <= 1 && GetConsoleWindow() != nullptr)
     {
         printf("\nPress Enter to close this window.\n");
         fflush(stdout);
@@ -1211,6 +1218,8 @@ void Kernel::SetCurrentContext(PPCContext* context)
     if (context != nullptr) g_contexts[GetCurrentThreadId()] = context;
     else g_contexts.erase(GetCurrentThreadId());
 }
+
+bool (*Kernel::FaultHook)(void* exceptionPointers) = nullptr;
 
 PPCContext* Kernel::ContextOf(uint32_t hostThreadId)
 {

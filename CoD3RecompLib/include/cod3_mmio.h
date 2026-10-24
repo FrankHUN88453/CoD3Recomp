@@ -56,6 +56,12 @@ namespace Mmio
     // made on, and the chain of guest functions that got there.
     void CallIndirect(::PPCContext& ctx, uint8_t* base, uint32_t address);
 
+    // 0.5.401: true when any of the call traces (COD3_TRACECALL,
+    // COD3_TRACETARGET, COD3_TRACEMODULE) is on. Otherwise a call to a
+    // function of the title's that is there goes straight to it, inline;
+    // only the rest (a level's DLL, a bad pointer) goes through CallIndirect.
+    extern bool g_callChecks;
+
     // The register aperture.
     //
     // 0x7FC80000 is where the console maps it, and the registers are indexed by
@@ -149,7 +155,18 @@ namespace Mmio
 #define __rdtsc() ::Mmio::Timebase()
 
 // The recompiler guards this one, so defining it first replaces it everywhere.
-#define PPC_CALL_INDIRECT_FUNC(x) ::Mmio::CallIndirect(ctx, base, uint32_t(x))
+// 0.5.401: the common case inline (the out of line call and its checks were
+// 1.7% of the main thread on Marseille at 32 players).
+#define PPC_CALL_INDIRECT_FUNC(x) \
+    do { \
+        const uint32_t callAddress = uint32_t(x); \
+        PPCFunc* callTarget = nullptr; \
+        if (!::Mmio::g_callChecks && callAddress - uint32_t(PPC_CODE_BASE) < uint32_t(PPC_CODE_SIZE) && \
+            (callTarget = PPC_LOOKUP_FUNC(base, callAddress)) != nullptr) \
+            callTarget(ctx, base); \
+        else \
+            ::Mmio::CallIndirect(ctx, base, callAddress); \
+    } while (0)
 
 // The recompiler emits longjmp(*reinterpret_cast<jmp_buf*>(base + r3), r4)
 // for the title's own longjmp; this puts the check in front of it.

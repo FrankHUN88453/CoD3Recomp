@@ -40,6 +40,7 @@ namespace Settings
         bool textureDump = false;     // every texture the game uploads saved once as textures\\dump\\<key>.png (texture_pack.cpp)
         bool textureReplace = true;   // textures\\replace\\<key>.png or .dds used in the game's place
         int textureQuality = 2;       // 0 low (two mip levels dropped), 1 medium (one), 2 high (all)
+        int brightness = 100;         // 0.5.249: the picture's brightness, 50 .. 150 % (100 the game's own), over the game's display colour table
         int fov = 65;                 // the title's cg_fov, 65 (its own) .. 100
         int modelDetail = 1;          // 0 the title's own level of detail (r_lodscale 1), 1 the most detailed models at every distance (r_lodscale 0)
         bool fog = true;              // the title's fog (r_fog)
@@ -58,7 +59,7 @@ namespace Settings
         bool watchWrites = false;     // still textures and vertex buffers known unchanged by their pages, not hashed every frame (write_watch.h; experimental, after a restart)
         // The optimizations, each of which can be turned off to find one
         // behind something that looks wrong (tuning.h).
-        bool depthThread = true;        // depth copies for the title converted on a thread of their own
+        bool depthThread = false;       // depth copies for the title converted on a thread of their own (0.5.341: off by default: on, it crashed 0.5.340 multiplayer, the late copy writing over memory the game had reused)
         bool fastConstants = true;      // the constant packets stored as runs
         bool shaderLoadCache = true;    // programs loaded again matched without hashing them byte by byte
         bool strongChangeCheck = true;  // the eight lane fingerprint for telling whether memory changed
@@ -103,7 +104,7 @@ namespace Settings
         int classPrimary[CustomClasses] = {};   // 0 the class's own; else mp_fixes.cpp's list
         int classSidearm[CustomClasses] = {};   // 0 the side's own; 1 Colt; 2 P38; 3 to 19 a main weapon (mp_fixes.cpp's list, from the M1 Garand) in the pistol's place
         int classBase[CustomClasses] = {};      // 0 the class picked; 1..7 heavy assault .. scout (its ability and kit)
-        int classGrenadeType[CustomClasses] = {}; // 0 the side's own; 1 American frag; 2 German stick
+        int classGrenadeType[CustomClasses] = {}; // 0 the side's own; 1 American frag; 2 German stick; 3 Mills bomb; 4 sticky bomb
         int classGrenades[CustomClasses] = {};  // 0 the usual; 1..4 grenades at a spawn
         bool fasterAds = true;        // walking with the sights up a third quicker (bots.cpp's move scale hook)
         bool twoGrenades = true;
@@ -116,6 +117,8 @@ namespace Settings
         float stenReload = 0.0f;       // the campaign guns' reload times in seconds (0: mp_fixes.cpp's own), for tuning without a build
         float fg42Reload = 0.0f;
         float brenReload = 0.0f;
+        float g43Reload = 0.0f;
+        bool mg34NoDeploy = true;   // the MG34 aims from the shoulder (no bipod, no forced prone)
         float fg42AdsFov = 0.0f;       // the FG42's field of view with the sights up, degrees (0: its copy's, the BAR's)
         float stenAdsFov = 0.0f;
         float brenAdsFov = 0.0f;
@@ -130,9 +133,13 @@ namespace Settings
         int killstreakKills = 5;           // for the artillery barrage, called with the binoculars
         int killstreakTyphoon = 7;         // for the Typhoon's strafing run
         int uavSeconds = 30;
+        bool uavPlane = true;              // 0.5.253: the UAV's plane over the map (its P-47/Stuka archives loaded with every map)
         bool binoculars = true;        // everyone's own spawn: binoculars besides, out on d-pad up, away on d-pad down (mp_fixes.cpp)
         bool fourSecondary = true;
         int aimWalk = 80;             // walking with the sights up, per cent of walking from the hip (the game: 40)
+        int sniperWalk = 30;          // 0.5.197: walking with a scope up, per cent of the hip walk (slower than other guns' 40)
+        int sniperSway = 50;          // 0.5.197: scoped rifles' sway while aiming, per cent of the game's own
+        bool botVehicles = true;      // 0.5.197: bots crew vehicles (drive, ride, man the gun) and use mounted guns
         int abilityRecharge = 50;     // per cent of the usual wait for the artillery, health packs and ammo (100: the game's own)    // four of the second grenade slot (smoke) and of the special (mines)      // everyone's own spawn: at least two grenades (the title gives one, two and three by rank)        // 0 the class's own main weapon; else one of mp_fixes.cpp's list, whatever the class      // stamina back soon after a sprint, not after a second's wait (mp_fixes.cpp)     // a heavy landing slows for a moment, not up to two seconds (mp_fixes.cpp)
         bool bounces = true;          // jumps onto slopes bounce, as in Call of Duty 4 (movement_fixes.cpp)
         bool controller = true;       // read a pad when one is there
@@ -150,6 +157,7 @@ namespace Settings
         float mouseSensitivity = 1.0f;   // both axes, 0.1 .. 3
         bool rawMouse = true;            // the mouse's own counts, not the pointer's travel
         bool directMouse = true;         // the mouse turns the view itself, not through the right stick (mouse_look.cpp)
+        int maxPlayers = 24;             // 0.5.247: players in a match, 24 (the game's) or 32 (test; read at start; both PCs the same)
         bool meleeLunge = true;          // a melee carries the player at the enemy it locks on to (mp_fixes.cpp)
         bool shellShockBlur = false;     // the blurred, dark screen of a nearby explosion's shell shock (mp_fixes.cpp)
         bool toggleSprint = true;        // a press of sprint starts a run that lasts, not one held (input.cpp)

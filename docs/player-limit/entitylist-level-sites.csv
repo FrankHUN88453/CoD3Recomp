@@ -1,0 +1,47 @@
+function,address,instruction,occurrence_in_function,count_in_function,role,status_0.5.218
+820B9680,820B98E0,"lwz r3,100(r11)",0,1,level read,moved to +132
+824278E8,82427920,"lwz r11,100(r11)",0,1,level read,moved to +132
+82428DC8,824298EC,"lwz r10,100(r11)",0,1,level read,moved to +132
+82460390,82460400,"lwz r11,100(r11)",0,1,level read,moved to +132
+824604A8,82460518,"lwz r11,100(r11)",0,1,level read,moved to +132
+82462588,82462B14,"lwz r11,100(r11)",0,1,level read,moved to +132
+82463B78,82463F64,"lwz r30,100(r11)",0,1,level read,moved to +132
+824642D0,8246441C,"lwz r3,100(r29)",0,1,level read,moved to +132
+824799D8,82479A74,"lwz r29,100(r11)",0,1,level read,moved to +132
+8247AF70,8247B138,"lwz r3,100(r11)",0,1,level read,moved to +132
+8247B208,8247B24C,"lwz r28,100(r11)",0,1,level read,moved to +132
+8248EBC8,8248EBFC,"lwz r9,100(r10)",0,1,level read,moved to +132
+824AD3A0,824AD3C0,"lwz r31,100(r11)",0,1,level read,moved to +132
+824AD3F0,824AD410,"lwz r31,100(r11)",0,1,level read,moved to +132
+824AD6B8,824AD704,"lwz r31,100(r11)",0,2,level read,moved to +132
+824AD6B8,824AD744,"lwz r31,100(r11)",1,2,level read,moved to +132
+824AD6B8,824AD7D4,"lwz r30,100(r11)",0,2,level read,moved to +132
+824AD6B8,824AD818,"lwz r30,100(r11)",1,2,level read,moved to +132
+824BEA68,824BEA70,"lwz r11,100(r11)",0,1,level read,moved to +132
+824CA448,824CA530,"lwz r10,100(r10)",0,1,level read,moved to +132
+824CCAA0,824CCF60,"lwz r11,100(r11)",0,1,level read,moved to +132
+824CD770,824CD7CC,"lwz r31,100(r11)",0,1,level read,moved to +132
+824CDA60,824CDAC4,"lwz r3,100(r11)",0,1,level read,moved to +132
+824CF498,824CF560,"lwz r11,100(r11)",0,1,level read,moved to +132
+824CFD60,824CFDA0,"lwz r5,100(r11)",0,1,level read,moved to +132
+824D05D0,824D06DC,"lwz r3,100(r11)",0,1,level read,moved to +132
+82531860,825318E4,"lwz r11,100(r11)",0,1,level read,moved to +132
+82533B98,82533C04,"lwz r11,100(r11)",0,1,level read,moved to +132
+82534200,825342BC,"lwz r11,100(r11)",0,2,level read,moved to +132
+82534200,82534380,"lwz r11,100(r11)",1,2,level read,moved to +132
+82535A18,82535CDC,"stw r3,100(r31)",0,1,level store,also written at +132
+82573E58,8257462C,"lwz r11,100(r11)",0,1,level read,moved to +132
+82578AD8,82578EBC,"lwz r11,100(r11)",0,1,level read,moved to +132
+825862F8,82586E1C,"lwz r11,100(r11)",0,1,level read,moved to +132
+82587268,825872B8,"lwz r28,100(r11)",0,1,level read,moved to +132
+8258BFD0,8258C1D0,"lwz r11,100(r11)",0,1,level read,moved to +132
+8258C6F0,8258C738,"lwz r11,100(r11)",0,1,level read,moved to +132
+8258C778,8258CCB0,"lwz r11,100(r11)",0,1,level read,moved to +132
+8258D550,8258D630,"lwz r11,100(r11)",0,1,level read,moved to +132
+8258F120,8258F274,"lwz r11,100(r11)",0,1,level read,moved to +132
+82590500,82590578,"lwz r25,100(r11)",0,1,level read,moved to +132
+82593FA8,8259419C,"stw r11,100(r31)",0,1,level store,also written at +132
+824830E0,82483128,"stw r8,100(r3)",0,1,constructor clear,also written at +132
+824B1B28,824B1BF8,"stw r11,100(r28)",0,1,map-restart clear,also written at +132
+825583F8,82558A24,"li r4,104",0,1,allocation size,136
+824830E0,82483124,"li r9,24",0,1,constructor clear count,32

@@ -18,6 +18,30 @@ $Port = Join-Path (Split-Path -Parent (Split-Path -Parent $Root)) 'CoD3-PC-Port-
 $Game = Join-Path $Port 'game'
 
 function Step([string]$text) { Write-Host "`n==> $text" -ForegroundColor Cyan }
+
+# Claude (2026-10-23): a test started for Claude after a build, or instead of
+# one. test-request.txt beside this file names one of the game folder's
+# benchmark batch files (BENCH-*.bat or BIG-PROFILE-32.bat, nothing else); it
+# is started (the game runs and closes itself) and the request removed. A
+# build request whose text begins "test only" builds nothing, only starts
+# the test. Claude's clicks in Explorer could not start the batch files.
+$TestRequest = Join-Path $Root 'test-request.txt'
+function Start-RequestedTest {
+    if (-not (Test-Path $TestRequest)) { return }
+    $bat = ((Get-Content $TestRequest -Raw -ErrorAction SilentlyContinue) -replace '\s+', ' ').Trim()
+    Remove-Item $TestRequest -Force -ErrorAction SilentlyContinue
+    if ($bat -notmatch '^(BENCH-[A-Za-z0-9-]+|BIG-PROFILE-32)\.bat$') { Write-Host "    test request ignored: $bat" -ForegroundColor Yellow; return }
+    $path = Join-Path $Port $bat
+    if (-not (Test-Path $path)) { Write-Host "    test request: $bat is not in the game folder" -ForegroundColor Yellow; return }
+    Start-Process -FilePath $path -WorkingDirectory $Port
+    Write-Host "    started the test $bat" -ForegroundColor Green
+}
+$Taken = Join-Path $Root 'build-request.taken.txt'
+if ((Test-Path $Taken) -and ((Get-Content $Taken -Raw -ErrorAction SilentlyContinue) -match '^\s*test only')) {
+    Start-RequestedTest
+    Write-Host "`nDone. (a test only; nothing built)" -ForegroundColor Green
+    exit 0
+}
 function Fail([string]$text) { Write-Host "`nSTOPPED: $text" -ForegroundColor Red; exit 1 }
 
 # A native command's warnings on stderr are not failures; its exit code is.
@@ -99,3 +123,4 @@ Set-Content -Path $VersionFile -Value $Version -Encoding ASCII
 if (Test-Path $Notes) { Copy-Item $Notes (Join-Path $Port 'PATCH-NOTES.txt') -Force }
 Write-Host "`nVersion $Version is in your game folder." -ForegroundColor Green
 Write-Host "`nDone. CoD3MP.exe is in $Port (its log is CoD3MP.log). Multiplayer from the single player menu starts it too." -ForegroundColor Green
+Start-RequestedTest

@@ -1,4 +1,4 @@
-# CoD3Recomp  full campaign + multiplayer fork
+# CoD3Recomp â€” full campaign + multiplayer fork
 
 **Call of Duty 3 (Xbox 360), statically recompiled to run natively on Windows PC.**
 This is a fork of **[FrankHUN88453/CoD3Recomp](https://github.com/FrankHUN88453/CoD3Recomp)**,
@@ -6,30 +6,30 @@ built on Frank's recompilation work (made with [XenonRecomp](https://github.com/
 Full credit to Frank for the original port: the recompiled engine, the kernel, the Direct3D 11 renderer
 and the installer all come from his project.
 
-> **Where this fork is at:** Frank's public 0.4.0 build only let me play through the first 4-5 campaign
-> missions. In this fork **the whole campaign plays through**, and **multiplayer works** ” System Link
+> **Where this fork is at:** Frank's public 0.4.0 build only let me play through the first 4â€“5 campaign
+> missions. In this fork **the whole campaign plays through**, and **multiplayer works** â€” System Link
 > over LAN or Tailscale, with bots, custom classes, DLC maps and restored cut content.
 >
-> Current source version: **0.5.183**. Every change since 0.4.0 is logged in
+> Current source version: **0.5.407**. Every change since 0.4.0 is logged in
 > [docs/PATCH-NOTES.md](docs/PATCH-NOTES.md).
 
 You need your **own** Xbox 360 disc image of Call of Duty 3. No game files are included in this repository.
 
 ## What this fork adds since 0.4.0
 
-**Multiplayer (0.4.1 - 0.4.10)**
+**Multiplayer (0.4.1 â€“ 0.4.10)**
 - Multiplayer runs: System Link between PCs (LAN or Tailscale), the F11 settings menu for addresses and options
 - DLC maps and bots (experimental), custom rules for everyone
 - **Domination**, the cut game mode, restored
 - Custom classes, loadout extras, aiming and ability tweaks, graphics options and movement fixes
 
-**Campaign weapons in multiplayer (0.5.0 - 0.5.56)**
+**Campaign weapons in multiplayer (0.5.0 â€“ 0.5.56)**
 - The campaign's Lee-Enfield, Sten, FG42 (and scoped FG42), Bren and Mills bomb usable in multiplayer,
   with their models, arms, reload timing, gunshots, reload sounds and pick-up icons
 - Memory past 512 MB (big memory), so Poissons and other big maps load whole with the campaign guns
 - Pick up and swap the gun in your hands; dying drops the gun you are holding; aim in the air
 
-**Console, binoculars and killstreaks (0.5.57 - 0.5.84)**
+**Console, binoculars and killstreaks (0.5.57 â€“ 0.5.84)**
 - The developer console works in multiplayer (`devmap`, `god`, `noclip`, `setviewpos`, ...)
 - Binoculars for every class (d-pad up / down, light zoom)
 - **Killstreaks**: UAV (enemies on the compass), artillery barrage, and the **Typhoon strafing run**
@@ -37,27 +37,27 @@ You need your **own** Xbox 360 disc image of Call of Duty 3. No game files are i
   strikes are marked with the spotter's binoculars. Players who join get their artillery/Typhoon armed too.
 - `streak_give uav|artillery|typhoon` for testing
 
-**Vehicles and the Kangaroo APC (0.5.59 - 0.5.86)**
+**Vehicles and the Kangaroo APC (0.5.59 â€“ 0.5.86)**
 - `spawnvehicle`, vehicles on any map (`vehicles_everywhere`), saved vehicle spots (`vehicle_mark`, `vehicle_clear`, `vehicle_list`)
 - The campaign's **Kangaroo APC** brought into multiplayer as its own vehicle: drivable, mountable gun,
   six passenger seats, its own driving curve, wheels, suspension and treads drawn
 
 **Menus and textures**
-- Texture replacement packs; the menu art, banners, fonts, controller diagrams and HUD icons upscaled 4x
+- Texture replacement packs; the menu art, banners, fonts, controller diagrams and HUD icons upscaled 4Ã—
 
 **HDR mode, on RenoDX**
-- F11 → **HDR**: an scRGB HDR picture. The game's 8 bit colour targets become 16 bit float, so fire,
+- F11 â†’ **HDR**: an scRGB HDR picture. The game's 8 bit colour targets become 16 bit float, so fire,
   sky and muzzle flashes keep their highlights. The frame is tone mapped right after the bloom and
   before the HUD, which keeps its own brightness.
 - Tone mappers: Vanilla, None, ACES, RenoDRT, PsychoV 17 / 22 / 30 and Prism; peak, game and UI
   brightness, gamma correction, the console's TV gamma ramp, film upgrade and bloom strength
-- F11 → **RenoDX**: RenoDX's sliders (exposure, highlights, shadows, contrast, saturation, highlight
+- F11 â†’ **RenoDX**: RenoDX's sliders (exposure, highlights, shadows, contrast, saturation, highlight
   saturation, blowout, flare, hue correction, cone response), applied as they move
 - Built on **[RenoDX](https://github.com/clshortfuse/renodx)** by Carlos Lopez Jr. and its contributors
   (MIT; `thirdparty/renodx`), with the **Prism** tone mapper by Musa Haji and OopyDoopy / KickFister / Jon
   (MIT; `thirdparty/prism`)
 
-## Recent work (0.5.87 – 0.5.183)
+## Recent work (0.5.87 â€“ 0.5.183)
 
 - Kangaroo entry/exit improvements, native controller sensitivity up to 200%,
   persistent audio/controller settings, and menu input fixes.

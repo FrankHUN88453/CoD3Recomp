@@ -210,7 +210,14 @@ namespace
         localtime_s(&local, &now);
         char name[64];
         strftime(name, sizeof(name), "CoD3-%Y%m%d-%H%M%S.png", &local);
-        const std::filesystem::path file = folder / name;
+        std::filesystem::path file = folder / name;
+        // several in one second (test runs): -2, -3, ... after the first
+        for (int n = 2; std::filesystem::exists(file, ec) && n < 100; n++)
+        {
+            char more[80];
+            snprintf(more, sizeof(more), "%.*s-%d.png", int(strlen(name)) - 4, name, n);
+            file = folder / more;
+        }
 
         ComPtr<IWICImagingFactory> factory;
         ComPtr<IWICBitmapEncoder> encoder;
@@ -361,6 +368,7 @@ namespace
                     const char* qualities[] = { "Low", "Medium", "High" };
                     ImGui::Combo("Texture quality", &g_edit.textureQuality, qualities, 3);
                     ImGui::SliderInt("Field of view", &g_edit.fov, 65, 100, g_edit.fov == 65 ? "65 (the game's own)" : "%d");
+                    ImGui::SliderInt("Brightness", &g_edit.brightness, 50, 150, g_edit.brightness == 100 ? "100%% (the game's own)" : "%d%%");
                     const char* details[] = { "The game's own", "Maximum" };
                     ImGui::Combo("Model detail", &g_edit.modelDetail, details, 2);
                     ImGui::SameLine();
@@ -753,10 +761,10 @@ namespace
                     {
                         const char* weapons[] = { "The class's own", "M1 Garand", "Thompson", "BAR", "Springfield (scoped)",
                                                   ".30 cal machine gun", "Bazooka", "Trench gun", "Kar98k", "MP40", "StG 44",
-                                                  "Kar98k (scoped)", "MG34", "Panzerschreck", "Lee-Enfield", "Bren", "Sten", "FG42", "FG42 (scoped)" };
+                                                  "Kar98k (scoped)", "MG34", "Panzerschreck", "Lee-Enfield", "Bren", "Sten", "FG42", "FG42 (scoped)", "Gewehr 43", "MG42", "Lee-Enfield (scoped)" };
                         const char* sidearms[] = { "The side's own", "Colt .45", "P38", "M1 Garand", "Thompson", "BAR", "Springfield (scoped)",
                                                    ".30 cal machine gun", "Bazooka", "Trench gun", "Kar98k", "MP40", "StG 44",
-                                                   "Kar98k (scoped)", "MG34", "Panzerschreck", "Lee-Enfield", "Bren", "Sten", "FG42", "FG42 (scoped)" };
+                                                   "Kar98k (scoped)", "MG34", "Panzerschreck", "Lee-Enfield", "Bren", "Sten", "FG42", "FG42 (scoped)", "Gewehr 43", "MG42", "Lee-Enfield (scoped)" };
                         ImGui::TextDisabled("Pick one on the class screen with L1 / R1 (or here). The class you pick in the game's\n"
                                             "menu still gives its grenades and ability (medic healing, scout artillery and so on).");
                         ImGui::RadioButton("None: the class's own kit", &g_edit.activeClass, 0);
@@ -781,6 +789,14 @@ namespace
                         ImGui::SetTooltip("Walking while aiming down the sights is quicker (never quicker than from the hip).");
                     if (g_edit.fasterAds)
                         ImGui::SliderInt("Aiming walk speed", &g_edit.aimWalk, 40, 100, "%d%% of the hip walk");
+                    // 0.5.197: scoped rifles their own walk and sway.
+                    ImGui::SliderInt("Scoped walk speed", &g_edit.sniperWalk, 15, 100, "%d%% of the hip walk");
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Walking with a sniper scope up (the game's own is 40%%; other guns use Aiming walk speed).");
+                    ImGui::SliderInt("Scoped sway", &g_edit.sniperSway, 0, 100, "%d%% of the game's");
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("How much a sniper scope drifts while you aim (hold breath still steadies it).");
+                    ImGui::Checkbox("Bots use vehicles and mounted guns", &g_edit.botVehicles);
                     ImGui::Checkbox("Rocket launcher on d-pad left", &g_edit.launcher);
                     if (ImGui::IsItemHovered())
                         ImGui::SetTooltip("Every spawn also gets your side's launcher (bazooka or Panzerschreck) with a few rockets:\n"
@@ -803,6 +819,15 @@ namespace
                         ImGui::SliderInt("Kills for the Typhoon", &g_edit.killstreakTyphoon, 1, 25, "%d in a row");
                     }
                     ImGui::Checkbox("Four of the second grenade and mines", &g_edit.fourSecondary);
+                    {
+                        // 0.5.247: 32 players (a test): read when the game starts.
+                        bool thirtyTwo = g_edit.maxPlayers >= 32;
+                        if (ImGui::Checkbox("32 players (test, restart the game)", &thirtyTwo)) g_edit.maxPlayers = thirtyTwo ? 32 : 24;
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Up to 32 players in a match instead of 24 (you and up to 28 bots). Takes effect\n"
+                                              "the next time the game starts. Both PCs of a System Link game must use the\n"
+                                              "same setting. Still a test: the scoreboard lists only 24 players.");
+                    }
                     ImGui::SliderInt("Ability recharge", &g_edit.abilityRecharge, 10, 100, g_edit.abilityRecharge >= 100 ? "the game's own" : "%d%% of the wait");
                     if (ImGui::IsItemHovered())
                         ImGui::SetTooltip("Multiplayer: the scout's artillery (three minutes normally), the medic's health packs\n"
@@ -845,7 +870,7 @@ namespace
             ImGui::SameLine();
             if (ImGui::Button("Close", ImVec2(140 * g_fontScale, 0))) open = false;
             if (dirty) { ImGui::SameLine(); ImGui::TextDisabled("(unapplied changes)"); }
-            ImGui::TextDisabled("F11: this menu   F12: screenshot   ` (left of 1): console   Esc: back to the game");
+            ImGui::TextDisabled("F10: photo mode (no HUD or gun)   F11: this menu   F12: screenshot   ` (left of 1): console   Esc: back to the game");
         }
         ImGui::End();
         (void)changed;
@@ -1088,7 +1113,18 @@ bool Overlay::HandleMessage(void* hwnd, uint32_t message, uint64_t wParam, int64
         if (wParam == VK_F11) { Toggle(); return true; }
         // F12: the picture, and the next frame's draws to the log, so a
         // fault seen while playing can be read afterwards.
-        if (wParam == VK_F12) { RequestScreenshot(); Render::LogNextFrame(); return true; }
+        // 0.5.228: F10, the photo mode: the HUD and the gun off (cg_draw2D,
+        // cg_drawGun) for clean pictures, and F12 then takes the picture
+        // alone (no draw log). F10 again puts them back.
+        static bool photo = false;
+        if (wParam == VK_F10)
+        {
+            photo = !photo;
+            Kernel::QueueConsoleCommand(photo ? "cg_draw2D 0\ncg_drawGun 0" : "cg_draw2D 1\ncg_drawGun 1");
+            printf("photo mode %s\n", photo ? "on (HUD and gun hidden)" : "off"); fflush(stdout);
+            return true;
+        }
+        if (wParam == VK_F12) { RequestScreenshot(); if (!photo) Render::LogNextFrame(); return true; }
         // The key left of 1 (scan code 0x29: ` and ~ on a US keyboard, 0
         // on a Hungarian one): the console, as the title's own configs
         // bind it. By scan code, so it is that key on every layout.

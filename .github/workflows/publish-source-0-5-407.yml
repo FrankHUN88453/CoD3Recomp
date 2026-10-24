@@ -1,0 +1,48 @@
+name: Publish source release 0.5.407
+on:
+  push:
+    branches: [release/v0.5.407]
+permissions:
+  contents: write
+concurrency:
+  group: source-release-0.5.407
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'hovg-N8/CoD3Recomp' && github.ref == 'refs/heads/release/v0.5.407'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Publish notes only (no build or binary assets)
+        env:
+          RELEASE_TOKEN: ${{ github.token }}
+          RELEASE_REPO: ${{ github.repository }}
+          RELEASE_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, urllib.request, urllib.error
+          repo = os.environ['RELEASE_REPO']
+          sha = os.environ['RELEASE_SHA']
+          assert repo == 'hovg-N8/CoD3Recomp'
+          api = 'https://api.github.com/repos/' + repo
+          headers = {'Authorization': 'Bearer ' + os.environ['RELEASE_TOKEN'], 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'CoD3-source-release'}
+          def request(path, payload=None):
+              data = None if payload is None else json.dumps(payload).encode()
+              with urllib.request.urlopen(urllib.request.Request(api + path, data=data, headers=headers), timeout=60) as response:
+                  return json.load(response)
+          notes = base64.b64decode(request('/contents/docs/RELEASE-0.5.407.md?ref=' + sha)['content']).decode('utf-8')
+          patch = base64.b64decode(request('/contents/docs/PATCH-NOTES.md?ref=' + sha)['content']).decode('utf-8')
+          assert 'Current source version: 0.5.407.' in patch
+          assert patch.index('## 0.5.407:') < patch.index('## 0.5.406:')
+          assert 'source only' in notes.lower() and 'FrankHUN88453/CoD3Recomp' in notes
+          try:
+              existing = request('/releases/tags/v0.5.407')
+          except urllib.error.HTTPError as error:
+              if error.code != 404:
+                  raise
+          else:
+              raise SystemExit('Release already exists; left untouched: ' + existing['html_url'])
+          release = request('/releases', {'tag_name': 'v0.5.407', 'target_commitish': sha, 'name': 'CoD3 PC Port 0.5.407 (source only)', 'body': notes, 'draft': False, 'prerelease': False, 'make_latest': 'true'})
+          print('Published source-only release:', release['html_url'])
+          PY

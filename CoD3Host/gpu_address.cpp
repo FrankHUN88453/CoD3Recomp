@@ -91,7 +91,7 @@ int64_t GpuWindow(int64_t value)
 // memory (dark and black patches on some surfaces with big_memory, 0.5.32).
 uint32_t GpuMaskBits(uint32_t value, uint32_t mask)
 {
-    if (Guest::IsExtendedCpu(value)) return (value - Guest::ExtendedShift) & (mask | 0x20000000u);
+    if (Guest::IsExtendedCpu(value)) return (value - Guest::ExtendedShift) & (mask | 0xE0000000u);   // 0.5.287: bits 29-31 (the window reaches 0x47000000)
     return value & mask;
 }
 

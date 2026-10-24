@@ -64,6 +64,8 @@ namespace RenderStats
     bool Profiled();
     void Enter(Section section);
     void Leave();
+    // 0.5.391: the drawing thread, for its CPU line beside the command thread's.
+    void SetDrawThread(void* thread);
 
     // The frame's edges: the swap ends one and starts the next. Begin
     // issues the GPU timestamp, End the closing one and folds the frame's

@@ -1071,6 +1071,9 @@ PPC_FUNC(__imp__XamLoaderSetLaunchData)
     ctx.r3.u32 = X_ERROR_SUCCESS;
 }
 
+#ifndef COD3_MP
+void CoopBeforeRelaunch();   // coop.cpp
+#endif
 PPC_FUNC(__imp__XamLoaderLaunchTitle)
 {
     Kernel::CountImport("XamLoaderLaunchTitle");
@@ -1124,8 +1127,10 @@ PPC_FUNC(__imp__XamLoaderLaunchTitle)
 
 #ifndef COD3_MP
     // Itself: the next mission. Started again, and this process ends.
+    // (A co-op host tells the joining copy first: coop.cpp.)
     if (endsWith("default.xex"))
     {
+        CoopBeforeRelaunch();
         if (Relaunch())
         {
             printf("Relaunched for the next mission; this process ends.\n");

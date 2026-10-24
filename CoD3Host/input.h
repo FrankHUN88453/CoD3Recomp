@@ -36,6 +36,10 @@ namespace Input
 
     // The Xbox button mask the pad is currently reporting.
     uint16_t Buttons();
+    // 0.5.231: a pad button pressed from code (the photo tour's way through
+    // the team and class menus): "a", "b", "start", ... for two of the
+    // title's reads of the pad, as COD3_PAD's presses.
+    void PressButton(const char* name);
 
     // Whether the mouse is being held by the window and turned into the right
     // stick. Clicking in the window takes it; Escape gives it back.
@@ -80,6 +84,16 @@ namespace Input
     void TakePresses(int& start, int& up, int& down);
     // Presses of d-pad right since the last call (the killstreaks' call, 0.5.82).
     int TakeRightPresses();
+    // 0.5.285: the mortar killstreak set up (mp_fixes.cpp): the player held
+    // in place for the title (left stick, A, B, X, Y, the sticks' clicks,
+    // the shoulders and both triggers kept from it), the right trigger's
+    // presses counted instead (TakeMortarFires: how many since the last call).
+    void SetMortar(bool on);
+    // 0.5.300: the right trigger passed on to the title too while at the
+    // mortar (the campaign mortar interaction reads it to load a round).
+    void SetMortarPassFire(bool pass);
+    void PressCrouch();   // 0.5.307: one tap of crouch (B) for a few reads
+    int TakeMortarFires();
     // MP gameplay consumes each Y/wheel edge once through the native weapon
     // command; native menu/vehicle Y remains available when the bridge is off.
     unsigned TakeWeaponCyclePresses();
@@ -90,6 +104,8 @@ namespace Input
     // Whether the player is running: the left stick (or the keys) pushed most
     // of the way, or sprint held (the tap-to-sprint's hold too).
     bool Running();
+    // the sprint button held (or latched by tap-to-sprint) while going forward, not aiming (0.5.237)
+    bool SprintHeld();
     // Multiplayer scoped L3: native hold breath, never a latched sprint.
     void SetScopedBreath(bool enabled);
 }

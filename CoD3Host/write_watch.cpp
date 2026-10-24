@@ -13,13 +13,17 @@ namespace
     constexpr uint32_t PageShift = 12;
     constexpr uint32_t WindowSize = 0x20000000u;           // 512 MB of physical memory
     // The pages: the 512 MB of physical memory, then the extended window
-    // (kernel.h; GPU addresses 0x20000000 to 0x3F000000, one view each).
-    constexpr uint32_t Pages = 0x40000000u >> PageShift;
+    // (kernel.h; GPU addresses 0x20000000 to 0x47000000, one view each).
+    constexpr uint32_t Pages = (Guest::ExtendedCpuLimit - Guest::ExtendedShift) >> PageShift;   // 0.5.287: to the window's end
     constexpr uint32_t PhysicalPages = WindowSize >> PageShift;
     constexpr uint32_t Windows[] = { 0xA0000000u, 0xC0000000u, 0xE0000000u };
 
     std::atomic<uint8_t> g_armed[Pages];
     std::atomic<uint64_t> g_written[Pages];   // the sequence the page was last noted written at
+    // 0.5.405: Clean's answer in one word a page: 0 while not armed, else
+    // the written sequence plus one (Clean read two arrays, two cache misses
+    // a page, for every buffer and texture a draw uses).
+    std::atomic<uint64_t> g_clean[Pages];
     std::atomic<uint64_t> g_sequence{ 1 };
     std::mutex g_lock;                        // arming and disarming
 
@@ -60,6 +64,7 @@ namespace
             const uint64_t now = g_sequence.fetch_add(1) + 1;
             for (uint32_t p = page; p < last; p++)
             {
+                g_clean[p].store(0, std::memory_order_relaxed);
                 g_written[p].store(now, std::memory_order_relaxed);
                 g_armed[p].store(0, std::memory_order_release);
             }
@@ -118,12 +123,16 @@ bool WriteWatch::Arm(uint32_t physical, uint32_t bytes)
         {
             for (uint32_t p = page; p < last; p++)
             {
+                g_clean[p].store(0, std::memory_order_relaxed);
                 g_written[p].store(g_sequence.fetch_add(1) + 1, std::memory_order_relaxed);
                 g_armed[p].store(0, std::memory_order_release);
             }
             Protect(page, last - page, PAGE_READWRITE);
             return false;
         }
+        // Armed and read only now: clean as of the last write noted.
+        for (uint32_t p = page; p < last; p++)
+            g_clean[p].store(g_written[p].load(std::memory_order_relaxed) + 1, std::memory_order_release);
         page = last;
     }
     return true;
@@ -134,8 +143,7 @@ bool WriteWatch::Clean(uint32_t physical, uint32_t bytes, uint64_t since)
     uint32_t first, end;
     if (!PagesOf(Guest::GpuOffset(physical), bytes, first, end)) return false;
     for (uint32_t page = first; page < end; page++)
-        if (g_armed[page].load(std::memory_order_acquire) == 0 || g_written[page].load(std::memory_order_relaxed) > since)
-            return false;
+        if (g_clean[page].load(std::memory_order_acquire) - 1 > since) return false;   // 0 - 1: not armed
     return true;
 }
 

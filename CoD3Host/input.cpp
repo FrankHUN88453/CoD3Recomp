@@ -412,14 +412,19 @@ namespace
             { "start", PadStart }, { "back", PadBack }, { "a", PadA }, { "b", PadB },
             { "x", PadX }, { "y", PadY }, { "up", PadUp }, { "down", PadDown },
             { "left", PadLeft }, { "right", PadRight },
-            { "ls", PadLeftShoulder }, { "rs", PadRightShoulder },
+            { "ls", PadLeftShoulder }, { "rs", PadRightShoulder }, { "l3", PadLeftThumb }, { "r3", PadRightThumb },
         };
         for (const auto& entry : names) if (name == entry.first) return entry.second;
         return 0;
     }
 
+    // 0.5.231: Input::PressButton's press, from the game's thread.
+    std::atomic<uint16_t> g_pressButtons{ 0 };
+    std::atomic<int> g_pressReads{ 0 };
+
     uint16_t ScriptedButtons()
     {
+        if (g_pressReads.load() > 0) { g_pressReads.fetch_sub(1); return g_pressButtons.load(); }
         if (!g_scriptParsed)
         {
             g_scriptParsed = true;
@@ -676,9 +681,14 @@ namespace
         return pad;
     }
 
-    std::atomic<bool> g_binoculars{false}, g_binocularFire{false}, g_sprinting{false};
+    std::atomic<bool> g_binoculars{false}, g_binocularFire{false}, g_sprinting{false}, g_sprintHeld{false};
     std::atomic<int> g_aimPresses{0}, g_startPresses{0}, g_upPresses{0}, g_downPresses{0}, g_rightPresses{0};
     bool g_aimWasDown = false;
+    std::atomic<bool> g_mortar{false};   // 0.5.285
+    std::atomic<int> g_mortarFires{0};
+    std::atomic<bool> g_mortarPassFire{false};   // 0.5.300
+    bool g_mortarFireWas = false;
+    std::atomic<int> g_crouchTap{0};   // 0.5.307: reads left of a crouch tap
     std::mutex g_mutex;
     Input::Pad g_pad{};
     uint32_t g_packet = 1;
@@ -783,6 +793,7 @@ namespace
             pad.buttons=SprintInput::Filter(sprint,pad.buttons,pad.thumbLY,pad.leftTrigger,
                                             pad.rightTrigger,Settings::Get().toggleSprint,scopedBreath,standing);
         }
+        g_sprintHeld.store((pad.buttons & PadLeftThumb)!=0 && pad.thumbLY>8000 && pad.leftTrigger<=30);
 #ifndef COD3_MP
         // The Binoculars out key: the left stick held in, while not pushing
         // forward (forward, the title would take it for a run).
@@ -833,6 +844,23 @@ namespace
             if (!g_binocularFire.load()) pad.rightTrigger = 0;
         }
         else g_aimWasDown = false;
+        // 0.5.285: at the mortar: held in place, the right trigger's presses
+        // the mortar's (mp_fixes.cpp), the view still turned by the right
+        // stick and the mouse.
+        if (g_mortar.load())
+        {
+            const bool fire = pad.rightTrigger > 60;
+            if (fire && !g_mortarFireWas) g_mortarFires.fetch_add(1);
+            g_mortarFireWas = fire;
+            if (!g_mortarPassFire.load()) pad.rightTrigger = 0;
+            pad.leftTrigger = 0;
+            pad.thumbLX = 0;
+            pad.thumbLY = 0;
+            pad.buttons &= uint16_t(~(PadA | PadB | PadX | PadY | PadLeftThumb | PadRightThumb | PadLeftShoulder | PadRightShoulder));
+        }
+        else g_mortarFireWas = false;
+        // 0.5.307: a crouch tap asked for by the mortar (down at it, up after).
+        if (g_crouchTap.load() > 0) { pad.buttons |= PadB; g_crouchTap.fetch_sub(1); }
 
         if (!Same(pad, g_pad))
         {
@@ -886,7 +914,12 @@ void Input::TakePresses(int& start, int& up, int& down)
     down = g_downPresses.exchange(0);
 }
 int Input::TakeRightPresses() { Refresh(); return g_rightPresses.exchange(0); }
+void Input::SetMortar(bool on) { g_mortar.store(on); if (!on) { g_mortarFires.store(0); g_mortarPassFire.store(false); } }
+void Input::SetMortarPassFire(bool pass) { g_mortarPassFire.store(pass); }
+void Input::PressCrouch() { g_crouchTap.store(3); }
+int Input::TakeMortarFires() { Refresh(); return g_mortarFires.exchange(0); }
 bool Input::Running() { Refresh(); return g_sprinting.load(); }
+bool Input::SprintHeld() { Refresh(); return g_sprintHeld.load(); }
 
 bool Input::MouseHeld()
 {
@@ -990,3 +1023,11 @@ uint16_t Input::NativeButtons(uint16_t buttons,bool paused)
 void Input::SetTacticalPointInput(bool active,bool canReturn) {g_tacticalPointActive.store(active);g_tacticalPointCanReturn.store(canReturn);}
 bool Input::TacticalPointSaveHeld() {Refresh();return g_tacticalPointSaveHeld.load();}
 bool Input::TacticalPointReturnHeld() {Refresh();return g_tacticalPointReturnHeld.load();}
+
+void Input::PressButton(const char* name)
+{
+    const uint16_t buttons = ButtonNamed(name);
+    if (!buttons) return;
+    g_pressButtons.store(buttons);
+    g_pressReads.store(2);
+}

@@ -8,16 +8,87 @@
 // point ray for cover. No guessed navigation or game-memory structures.
 namespace BotNavigation {
 struct Point { float x, y, z; };
-struct Hit { bool valid = false; bool solid = true; float fraction = 0; Point end{}, normal{}; uint32_t handle=0; };
+struct Hit { bool valid = false; bool solid = true; float fraction = 0; Point end{}, normal{}; uint32_t handle=0, surfaceFlags=0; };
 inline float Distance(Point a, Point b) { return std::hypot(a.x-b.x, a.y-b.y); }
 inline bool Finite(Point p) { return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z); }
+
+template<class Query> bool Flat(Point from, Point candidate, Query&& query, Point& landing);
+
+// 0.5.205: up and down hills. Justin, on 0.5.204: "bots struggle to walk up
+// inclines like hills". The flat test below sweeps the body level at the
+// feet over the whole step (up to 128 units) and lets the far floor be at
+// most 18 above or 30 below: any slope over about 8 degrees up or 13 down
+// was a wall (0.5.204's log: a level sweep stopped at 3.5% by ground whose
+// normal was 0.96 up). When the flat test fails, the step is walked in
+// pieces of at most 48 units instead: each piece rises by up to a stair
+// (18) plus its length (a 45 degree slope, as steep as a player walks), or
+// falls by up to 30 plus its length, and must land on walkable ground
+// (normal 0.65 up or more), so cliffs and walls still stop it. And (0.5.206)
+// the height it gains or loses must match the tilt of the ground it lands
+// on: a flat-topped crate is a ledge, not a hill.
+template<class Query>
+bool Climb(Point from, Point candidate, Query&& query, Point& landing) {
+    const float length = Distance(from, candidate);
+    if (!(length > 1)) return false;
+    const int pieces = int(std::ceil(length / 48.0f));
+    if (pieces < 1 || pieces > 4) return false;
+    Point at = from;
+    for (int i = 1; i <= pieces; ++i) {
+        const float t = float(i) / float(pieces), piece = length / float(pieces);
+        const Point to{from.x + (candidate.x - from.x) * t, from.y + (candidate.y - from.y) * t, at.z};
+        const float rise = 18.0f + piece * 1.0f, fall = 30.0f + piece * 1.0f;
+        // Up first (the headroom), then across at that height, then down
+        // onto the ground at the piece's end.
+        Point start{at.x, at.y, at.z + 1}, top{at.x, at.y, at.z + rise};
+        Hit up = query(start, top, true);
+        if (!up.valid || up.solid) return false;
+        top.z = start.z + (top.z - start.z) * up.fraction - 1;
+        if (top.z < start.z + 18.0f) return false;   // not even a stair of room
+        Hit across = query(top, {to.x, to.y, top.z}, true);
+        if (!across.valid || across.solid || across.fraction < 0.999f) return false;
+        Hit floor = query({to.x, to.y, top.z}, {to.x, to.y, at.z - fall}, true);
+        if (!floor.valid || floor.solid || floor.fraction >= 1 || !Finite(floor.end) ||
+            !Finite(floor.normal) || floor.normal.z < 0.65f) return false;
+        // 0.5.206: the rise (or fall) must be the ground's own tilt, not a
+        // ledge. 0.5.205 on Fuel Plant: a piece could rise 66 onto any flat
+        // top, so crates and pipes 20-60 high were "climbable" and bots
+        // walked into them for good (272 stuck strikes in 6 minutes, one
+        // bot 8+ times in one place). Now a flat landing allows the usual
+        // stair (18) up or drop (30) down, and a tilted one that plus its
+        // slope over the piece (with 10% to spare).
+        const float nz = std::fmin(1.0f, floor.normal.z);
+        const float tilt = std::sqrt(std::fmax(0.0f, 1.0f - nz * nz)) / nz;
+        const float allowedUp = 18.0f + piece * tilt * 1.1f, allowedDown = 30.0f + piece * tilt * 1.1f;
+        const float dz = floor.end.z - at.z;
+        if (dz > allowedUp || -dz > allowedDown) return false;
+        at = floor.end; at.z += 1;
+    }
+    landing = at;
+    return true;
+}
 
 template<class Query>
 bool Reachable(Point from, Point candidate, Query&& query, Point& landing) {
     if (!Finite(from) || !Finite(candidate)) return false;
-    Point start{from.x, from.y, from.z+18}, end{candidate.x,candidate.y,from.z+18};
-    Hit travel = query(start,end,true);
-    if (!travel.valid || travel.solid || travel.fraction < 0.999f) return false;
+    if (Flat(from, candidate, query, landing)) return true;
+    return Climb(from, candidate, query, landing);
+}
+
+template<class Query>
+bool Flat(Point from, Point candidate, Query&& query, Point& landing) {
+    if (!Finite(from) || !Finite(candidate)) return false;
+    // Try walking at actual feet height first. Raising the entire standing
+    // hull18 units rejects low doorways the player can walk through normally.
+    Point start{from.x,from.y,from.z+1},end{candidate.x,candidate.y,from.z+1};
+    Hit travel=query(start,end,true);
+    if (!travel.valid || travel.solid || travel.fraction<0.999f) {
+        Point raised{from.x,from.y,from.z+18};
+        Hit up=query(start,raised,true);
+        if(!up.valid || up.solid || up.fraction<0.999f)return false;
+        start=raised;end.z=raised.z;
+        travel=query(start,end,true);
+        if(!travel.valid || travel.solid || travel.fraction<0.999f)return false;
+    }
     Hit floor = query(end,{end.x,end.y,from.z-32},true);
     if (!floor.valid || floor.solid || floor.fraction < 0 || floor.fraction >= 1 ||
         !Finite(floor.end) || !Finite(floor.normal) || floor.normal.z < 0.65f ||

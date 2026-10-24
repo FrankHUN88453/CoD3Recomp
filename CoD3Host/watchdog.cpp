@@ -27,8 +27,11 @@
 #include <Windows.h>
 #include <dbghelp.h>
 #include <tlhelp32.h>
+#include <psapi.h>
+#include <winternl.h>
 
 #pragma comment(lib, "dbghelp.lib")
+#pragma comment(lib, "psapi.lib")
 
 namespace
 {
@@ -244,6 +247,99 @@ void Kernel::PrintHostStack(void* context)
 
 namespace
 {
+    // 0.5.396: the modules' unwind tables, found once, so a stack can be
+    // walked while its thread is stopped, without RtlLookupFunctionEntry
+    // (whose lock the stopped thread may hold) and without reading outside
+    // the stopped thread's own stack (so nothing faults: a fault's handlers
+    // can wait on locks the stopped thread holds). The self only profile of
+    // 0.5.371 could not say who called NtFreeVirtualMemory, 4% of the main
+    // thread in Marseille's heavy views.
+    struct UnwindModule { DWORD64 base, end; const RUNTIME_FUNCTION* table; DWORD count; };
+    std::vector<UnwindModule> g_unwindModules;
+
+    void LoadUnwindModules()
+    {
+        std::vector<UnwindModule> found;
+        HMODULE modules[1024];
+        DWORD needed = 0;
+        if (!EnumProcessModules(GetCurrentProcess(), modules, sizeof(modules), &needed)) return;
+        for (DWORD i = 0; i < std::min<DWORD>(needed / sizeof(HMODULE), 1024); i++)
+        {
+            const auto* base = reinterpret_cast<const uint8_t*>(modules[i]);
+            const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+            if (dos->e_magic != IMAGE_DOS_SIGNATURE) continue;
+            const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+            if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) continue;
+            const IMAGE_DATA_DIRECTORY& directory = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
+            if (directory.VirtualAddress == 0 || directory.Size < sizeof(RUNTIME_FUNCTION)) continue;
+            found.push_back({ DWORD64(base), DWORD64(base) + nt->OptionalHeader.SizeOfImage,
+                reinterpret_cast<const RUNTIME_FUNCTION*>(base + directory.VirtualAddress), DWORD(directory.Size / sizeof(RUNTIME_FUNCTION)) });
+        }
+        std::sort(found.begin(), found.end(), [](const UnwindModule& a, const UnwindModule& b) { return a.base < b.base; });
+        g_unwindModules.swap(found);
+    }
+
+    // RtlLookupFunctionEntry's answer from the tables above: no lock, no
+    // allocation. `known` false: the address is in no module.
+    PRUNTIME_FUNCTION LookupEntry(DWORD64 pc, DWORD64& imageBase, bool& known)
+    {
+        known = false;
+        size_t lo = 0, hi = g_unwindModules.size();
+        while (lo < hi) { const size_t mid = (lo + hi) / 2; if (g_unwindModules[mid].base <= pc) lo = mid + 1; else hi = mid; }
+        if (lo == 0) return nullptr;
+        const UnwindModule& m = g_unwindModules[lo - 1];
+        if (pc >= m.end) return nullptr;
+        known = true;
+        imageBase = m.base;
+        const DWORD rva = DWORD(pc - m.base);
+        size_t a = 0, b = m.count;
+        while (a < b)
+        {
+            const size_t mid = (a + b) / 2;
+            if (m.table[mid].EndAddress <= rva) a = mid + 1;
+            else if (m.table[mid].BeginAddress > rva) b = mid;
+            else return const_cast<PRUNTIME_FUNCTION>(&m.table[mid]);
+        }
+        return nullptr;
+    }
+
+    // A stopped thread's stack, walked by the tables above, stopping at
+    // anything outside the stack [low, high) or outside every module.
+    void FunctionsOfStopped(CONTEXT* context, DWORD64 low, DWORD64 high, DWORD64* starts, int& count, int limit)
+    {
+        __try
+        {
+            for (int depth = 0; depth < 64 && count < limit; depth++)
+            {
+                DWORD64 imageBase = 0;
+                bool known = false;
+                PRUNTIME_FUNCTION entry = LookupEntry(context->Rip, imageBase, known);
+                if (!known) { if (count == 0) starts[count++] = context->Rip; break; }
+                // The unwind reads the frame above the stack pointer: the
+                // whole of it must be in the stack (a frame is far smaller).
+                if (context->Rsp < low || context->Rsp + 0x1000 > high) { starts[count++] = entry ? imageBase + entry->BeginAddress : context->Rip; break; }
+                if (entry == nullptr)
+                {
+                    starts[count++] = context->Rip;
+                    context->Rip = *reinterpret_cast<DWORD64*>(context->Rsp);
+                    context->Rsp += 8;
+                }
+                else
+                {
+                    starts[count++] = imageBase + entry->BeginAddress;
+                    void* handlerData = nullptr;
+                    DWORD64 establisherFrame = 0;
+                    RtlVirtualUnwind(UNW_FLAG_NHANDLER, imageBase, context->Rip, entry,
+                        context, &handlerData, &establisherFrame, nullptr);
+                }
+                if (context->Rip == 0) break;
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+        }
+    }
+
     // The functions on a stack, innermost first, by their start addresses:
     // a copy of the registers taken while the thread was stopped, unwound
     // after it runs on (a stale stack costs one wrong sample at worst).
@@ -317,6 +413,21 @@ void Kernel::ProfileHostThread(uint32_t osId, const char* name, const char* tag)
         LoadSymbols(process);
         const HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, osId);
         if (thread == nullptr) return;
+        // 0.5.396: COD3_HOSTPROFILE_SELF=stopped (the default now) walks the
+        // stack while the thread is stopped (above); =1 where it was only;
+        // =0 the old walk after it runs on.
+        static const int mode = []() { const char* t = getenv("COD3_HOSTPROFILE_SELF"); return !t ? 2 : t[0] == '0' ? 0 : t[0] == '1' ? 1 : 2; }();
+        // The stack's bounds, from the thread's TEB (NT_TIB: StackBase +8, StackLimit +16).
+        const uint8_t* teb = nullptr;
+        if (mode == 2)
+        {
+            static std::mutex modulesLock;
+            { std::lock_guard<std::mutex> lock(modulesLock); if (g_unwindModules.empty()) LoadUnwindModules(); }
+            using Query = LONG(NTAPI*)(HANDLE, int, PVOID, ULONG, PULONG);
+            struct BasicInformation { LONG status; PVOID teb; CLIENT_ID client; ULONG_PTR affinity; LONG priority, basePriority; } info{};
+            if (auto query = reinterpret_cast<Query>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationThread")))
+                if (query(thread, 0, &info, sizeof(info), nullptr) == 0) teb = static_cast<const uint8_t*>(info.teb);
+        }
         std::unordered_map<DWORD64, uint32_t> self, inclusive;
         // For the busiest functions, who called them: (function, caller).
         std::map<std::pair<DWORD64, DWORD64>, uint32_t> callers;
@@ -330,23 +441,53 @@ void Kernel::ProfileHostThread(uint32_t osId, const char* name, const char* tag)
         {
             CONTEXT context{};
             context.ContextFlags = CONTEXT_FULL;
+            DWORD64 starts[64];
+            int count = 0;
             if (SuspendThread(thread) == DWORD(-1)) break;
             const BOOL captured = GetThreadContext(thread, &context);
+            const DWORD64 rip = context.Rip;   // the unwind moves the context on
+            if (captured && mode == 2 && teb != nullptr)
+            {
+                const DWORD64 high = *reinterpret_cast<const DWORD64*>(teb + 8), low = *reinterpret_cast<const DWORD64*>(teb + 16);
+                FunctionsOfStopped(&context, low, high, starts, count, 24);
+            }
             ResumeThread(thread);
             if (captured)
             {
-                DWORD64 starts[64];
-                int count = 0;
-                Kernel::SetUnwinding(true);
-                const DWORD64 rip = context.Rip;   // the unwind moves the context on
-                FunctionsOf(&context, starts, count, 64);
-                Kernel::SetUnwinding(false);
+                // 0.5.371: COD3_HOSTPROFILE_SELF=1 (on by default): only where the
+                // thread WAS, not its callers. The full stack walk reads a
+                // running thread's stack and froze the game twice (0.5.236 at
+                // 307 s, 0.5.370 at 95 s in the match); "in the function itself"
+                // is what the fixes need anyway. COD3_HOSTPROFILE_SELF=0: walk.
+                const bool selfOnly = mode == 1 || (mode == 2 && count == 0);
+                if (count > 0) {}
+                else if (selfOnly)
+                {
+                    DWORD64 imageBase = 0;
+                    PRUNTIME_FUNCTION entry = RtlLookupFunctionEntry(rip, &imageBase, nullptr);
+                    starts[count++] = entry ? imageBase + entry->BeginAddress : rip;
+                }
+                else
+                {
+                    Kernel::SetUnwinding(true);
+                    FunctionsOf(&context, starts, count, 64);
+                    Kernel::SetUnwinding(false);
+                }
                 if (count > 0)
                 {
                     samples++;
                     self[starts[0]]++;
                     if (byLine) at[starts[0]][rip]++;
-                    if (count > 1) callers[{ starts[0], starts[1] }]++;
+                    // The caller: for a function outside the executable (the
+                    // system's, the driver's), the first frame back in it.
+                    if (count > 1)
+                    {
+                        static const DWORD64 exeLow = DWORD64(GetModuleHandleW(nullptr));
+                        auto inExe = [](DWORD64 a) { return a >= exeLow && a < exeLow + (1ull << 31); };
+                        int i = 1;
+                        if (!inExe(starts[0])) while (i + 1 < count && !inExe(starts[i])) i++;
+                        callers[{ starts[0], starts[i] }]++;
+                    }
                     for (int i = 0; i < count; i++)
                     {
                         bool seen = false;
