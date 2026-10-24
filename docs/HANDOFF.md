@@ -1,8 +1,10 @@
+# Current source / local install: 0.5.409 / 0.5.409; built OK, Rimling test running. Source-only GitHub release407 published; see top NEXT-SESSION STATE. Read PICK-ME-UP.md and top STATE lines.
+
 # CoD3 Recomp: handoff for the next assistant
 
-Last updated **October 23, 2026**. Source / local install: **0.5.407 / 0.5.407** (Claude 18:35: Rimling 32p median 45 -> 65 fps; heap-freeze watch "heapwait:"; see NEXT-SESSION top "STATE")
+Last updated **October 23, 2026**. Source / local install: **0.5.409 / 0.5.409** (built OK; read newest NEXT-SESSION STATE for test result).
 
-**START HERE (Claude, 2026-10-23 19:55):** docs/PICK-ME-UP.md, then the top "# STATE" lines of docs/NEXT-SESSION.md and the newest entries of docs/PATCH-NOTES.md. Next build is **0.5.408**. docs/CODEX-HANDOFF-0.5.384.md is HISTORY (it says next is 0.5.385; that is out of date). GitHub release NOT done yet: public repo hovg-N8/CoD3Recomp is still at 0.5.183. Claude's session had no GitHub account linked (add_repo refused). Release text ready: docs/RELEASE-0.5.407.md (source only, no binaries, credit FrankHUN88453/CoD3Recomp). Upload handwritten source/docs/scripts only.
+**START HERE:** docs/PICK-ME-UP.md, then top STATE lines in docs/NEXT-SESSION.md and newest PATCH-NOTES.md. GitHub source-only v0.5.407 is published at https://github.com/hovg-N8/CoD3Recomp/releases/tag/v0.5.407; main/tag both verified at 40db64a6856fbf7dce494f715b1c9284e587a4fe. Release excludes local408/409. Local nested Git checkout is untouched and stale: fetch before pushing. Older sections below are historical.
 
 **READ FIRST (2026-10-23, Codex):** the detailed older sections below stop
 at 0.5.304. Current work is documented in docs/PICK-ME-UP.md and

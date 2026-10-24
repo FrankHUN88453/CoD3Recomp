@@ -1213,8 +1213,8 @@ clean). Long matches, map changes and System Link remain untested.
 - Shipped handguns: only `colt` (MP ID 8) and `p38` (MP ID 15), both MP only.
   The campaign has no handgun weapon or asset in any of its 15 levels.
 - Cut feature found: `sub_821EE270` in codmp_xenonf.xex (from
-  `_mp_loadout.bro`) gives `coltdual`/`p38dual` (by team) with pistol ammo Ã—2
-  or Ã—4 by level. It is in the loadout native table at 0x82094578, next to the
+  `_mp_loadout.bro`) gives `coltdual`/`p38dual` (by team) with pistol ammo ×2
+  or ×4 by level. It is in the loadout native table at 0x82094578, next to the
   bazooka/satchel/mine helpers. The weapons it names have no definition or
   assets anywhere, so restoring means registering them as Colt/P38 copies.
 - Luger, Beretta M1934, MAS1935 (+ dual names): text-bank display names only
@@ -1327,3 +1327,10 @@ same384 with COD3_REMEMBERALLPACKETS=1, COD3_WATCHSTILL_KB=4,
 COD3_INDEXLOOKUPCACHE=0; restores pre380 performance behavior. IN PROGRESS.
 No performance source edits made; proposed constant-shadow-copy reduction
 NOT implemented. Pause performance changes until crash investigation.
+
+## 0.5.408 Codex preparation (2026-10-23)
+HeapWait exact phase request and safe eight-heap metadata audit. Off COD3_HEAPWAIT_AUDIT=0. No allocation semantics changed; freeze cause unresolved. Build/test pending. Release407 still needs GitHub connection.
+
+## 408 result and release407 publication (Codex)
+408 BUILT OK (3.6min), installed, Rimling32 completed clean: heapwait0/fxguard0/native differs0/Guest fault0. Median gameplay55.5fps at3015draws vs saved40758.3fps at2319draws, no >4000-draw samples; not matched-load regression evidence. Main CPU17.345 vs16.025ms. Freeze NOT reproduced; diagnostic path unexercised. Fresh407 city baseline also completed clean (~58.75/57.41/53.32/55.41 fps,3782/2371/4111/3642 draws); camera yaw differs from historical comparisons.
+GitHub account hovg-N8 linked; source-only v0.5.407 PUBLISHED https://github.com/hovg-N8/CoD3Recomp/releases/tag/v0.5.407 at40db64a6856fbf7dce494f715b1c9284e587a4fe, treeb64cf3fa9c33be3ff7fe89bf3d5785238fade1fc. 101 text/source changes audited, no game assets/generatedPPC/binaries/logs uploaded. Release snapshot excludes408. Source release workflow40051496183 succeeded, release draftfalse/assets[], tagSHA verified. Public main fast-forward requested to sameSHA. Nested local checkout untouched atA3; fetch before future pushes.

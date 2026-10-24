@@ -11429,6 +11429,51 @@ namespace NativeCull
         std::vector<Item> local;
         std::vector<Item>& stack = level < 8 ? pool[level] : local;
         level++;
+        // 0.5.415: the stack as a plain array with its own top, sized once
+        // for the deepest it can get (each step down leaves at most three
+        // brothers waiting, so the roots and three a level), instead of
+        // push_back's capacity check each time (1.1% of the main thread on
+        // Marseille besides the walk's own 3.3%). A tree whose numbers say
+        // more than 65536 goes the old way. COD3_CULL_VECTORSTACK=1: always
+        // the old way.
+        static const bool vectorStack = []() { const char* t = getenv("COD3_CULL_VECTORSTACK"); return t != nullptr && t[0] == '1'; }();
+        const uint64_t bound = uint64_t(roots) + 3ull * uint64_t(depthLimit) + 4ull;
+        if (!vectorStack && bound <= 65536)
+        {
+            if (stack.size() < bound) stack.resize(size_t(bound));
+            Item* const items = stack.data();
+            size_t top = 0;
+            for (uint32_t i = roots; i > 0; i--) items[top++] = Item{ (i - 1) * 16, 1 };
+            while (top != 0)
+            {
+                const Item item = items[top - 1];
+                const uint32_t node = nodes + item.offset;
+                const __m128i raw = _mm_loadu_si128(reinterpret_cast<const __m128i*>(base + node));
+                const __m128i words = _mm_or_si128(_mm_slli_epi16(raw, 8), _mm_srli_epi16(raw, 8));
+                if (_mm_movemask_epi8(_mm_cmpgt_epi16(query, words)) != 0) { top--; continue; }
+                const uint32_t child = R32(base, node + 12);
+                if (item.depth >= depthLimit)
+                {
+                    top--;
+                    if (out != nullptr) { out->push_back(child); continue; }
+                    ctx.r3.u64 = object; ctx.r4.u64 = child; ctx.r5.u64 = tree; ctx.r6.u64 = object;
+                    ctx.r1.u64 = sp - 2304;
+                    ctx.lr = 0x8241966C;
+                    Guest::Lookup(R32(base, R32(base, object)))(ctx, base);
+                    ctx.r1.u64 = sp;
+                    continue;
+                }
+                const uint32_t depth = item.depth + 1;
+                _mm_prefetch(reinterpret_cast<const char*>(base + nodes + child), _MM_HINT_T0);
+                _mm_prefetch(reinterpret_cast<const char*>(base + nodes + child + 48), _MM_HINT_T0);
+                items[top - 1] = Item{ child, depth };
+                items[top++] = Item{ child + 16, depth };
+                items[top++] = Item{ child + 32, depth };
+                items[top++] = Item{ child + 48, depth };
+            }
+            level--;
+            return;
+        }
         stack.clear();
         for (uint32_t i = roots; i > 0; i--) stack.push_back(Item{ (i - 1) * 16, 1 });
         while (!stack.empty())
@@ -11578,6 +11623,51 @@ namespace HeapWait
 {
     thread_local uint32_t t_cache = 0, t_size = 0, t_empty = 0;
     std::atomic<int> g_told{ 0 };
+    std::atomic<uint32_t> g_audits{ 0 };
+
+    // 0.5.408: diagnostics must not demand-commit memory while inspecting
+    // a possibly broken cache. These reads happen only on empty reclaims.
+    bool Peek(uint8_t* base, uint32_t at, uint32_t& value)
+    {
+        uint32_t raw = 0;
+        SIZE_T got = 0;
+        if (!ReadProcessMemory(GetCurrentProcess(), base + uint64_t(at), &raw, sizeof(raw), &got) || got != sizeof(raw)) return false;
+        value = _byteswap_ulong(raw);
+        return true;
+    }
+    void Audit(PPCContext& ctx, uint8_t* base, uint32_t empty)
+    {
+        static const bool enabled = []() { const char* v = getenv("COD3_HEAPWAIT_AUDIT"); return !(v && v[0] == '0'); }();
+        if (!enabled || (empty != 1 && empty != 100) || g_audits.fetch_add(1) >= 12) return;
+        const uint32_t caller = uint32_t(ctx.lr);
+        uint32_t count = 0, sizes = 0, units = 0;
+        const bool phase = caller == 0x82185D80u || caller == 0x82185E34u;
+        const uint32_t header = caller == 0x82185D80u ? 32u : 16u;
+        const bool readable = phase && Peek(base, ctx.r28.u32, count) && Peek(base, ctx.r28.u32 + 4, sizes)
+            && uint64_t(sizes) + ctx.r31.u32 <= 0xFFFFFFFCull && Peek(base, sizes + ctx.r31.u32, units);
+        const uint64_t bytes = uint64_t(units) * ctx.r27.u32 + header;
+        printf("heapwait: audit cache %08X empty-reclaim %u caller %08X list %08X count %u index-bytes %08X stride %u; ",
+            t_cache, empty, caller, ctx.r28.u32, count, ctx.r31.u32, ctx.r27.u32);
+        if (readable) printf("EXACT request %llu bytes (%u units + %u header), low32 %u, overflow %s\n",
+            (unsigned long long)bytes, units, header, uint32_t(bytes), bytes > 0xFFFFFFFFull ? "YES" : "no");
+        else printf("exact request unavailable (unrecognized caller or unreadable list); entry maximum %u\n", t_size);
+        uint32_t allocator = 0, table = 0, allocFn = 0, freeFn = 0, active = 0;
+        Peek(base, t_cache, allocator); Peek(base, allocator, table);
+        Peek(base, table + 4, allocFn); Peek(base, table + 8, freeFn);
+        constexpr uint32_t heaps = 0x82A84120u;  // sub_820DE188's eight 1172-byte heap descriptors
+        Peek(base, heaps + 9392, active);
+        printf("heapwait: allocator %08X vtable %08X alloc %08X free %08X active-game-heap %08X\n", allocator, table, allocFn, freeFn, active);
+        for (uint32_t i = 0; i < 8; i++)
+        {
+            const uint32_t heap = heaps + i * 1172;
+            uint32_t capacity = 0, used = 0, peak = 0, fallback = 0;
+            if (!Peek(base, heap + 1156, capacity) || !Peek(base, heap + 1160, used)
+                || !Peek(base, heap + 1164, peak) || !Peek(base, heap + 1168, fallback))
+            { printf("heapwait: heap %u metadata unreadable\n", i); continue; }
+            printf("heapwait: heap %u at %08X capacity %u used %u peak %u fallback %08X\n", i, heap, capacity, used, peak, fallback);
+        }
+        fflush(stdout);
+    }
 }
 extern "C" PPC_FUNC(__imp__sub_82185D18);
 PPC_FUNC(sub_82185D18)
@@ -11596,7 +11686,8 @@ PPC_FUNC(sub_82185B40)
 {
     if (ctx.r4.u32 == 0 && HeapWait::t_cache != 0)
     {
-        const uint32_t empty = ++HeapWait::t_empty;
+        const uint32_t empty = HeapWait::t_empty == UINT32_MAX ? UINT32_MAX : ++HeapWait::t_empty;
+        HeapWait::Audit(ctx, base, empty);
         if (empty == 100 && HeapWait::g_told.fetch_add(1) < 4)
         {
             const uint32_t cache = HeapWait::t_cache;
@@ -11620,9 +11711,12 @@ PPC_FUNC(sub_824193E0)
     {
         std::vector<uint32_t> mine, game;
         Walk(ctx, base, &mine);
-        // The stand-in: an object well below the stack in use whose first
-        // virtual is this function, which lists what it is called with.
-        const uint32_t standIn = (ctx.r1.u32 - 0x6000u) & ~15u;
+        // The original walk reserves 2304 bytes and calls only this intercepted
+        // virtual, which returns above without using the guest stack. Keep the
+        // 32-byte object below that frame, within its 224-byte ABI red zone,
+        // instead of writing 24 KB below a possibly small guest stack.
+        static const bool nearStack = []() { const char* v = getenv("COD3_CULL_NEARSTACK"); return !(v && v[0] == '0'); }();
+        const uint32_t standIn = (ctx.r1.u32 - (nearStack ? 2304u + 128u : 0x6000u)) & ~15u;
         Guest::Write32(base, standIn, standIn + 16);
         Guest::Write32(base, standIn + 16, 0x824193E0u);
         const PPCContext saved = ctx;
@@ -11650,6 +11744,914 @@ PPC_FUNC(sub_824193E0)
     Walk(ctx, base, nullptr);
 }
 
+
+
+// 0.5.417: two of the world trace's busiest pieces, native (Marseille at 32
+// players, 0.5.414: 1.8% and 1.6% of the main thread, the trace itself
+// sub_824A0940 2.3% more). sub_824851F8 tests a segment against a box's two
+// sets of faces (a slab test; 1 when it misses) and sub_824850D0 puts the
+// pieces of a list that match a contents mask into three lists of 128 by
+// range. Both copied step for step from the recompiled code (every value
+// rounded to single precision where the original's fsubs/fmuls/fdivs are;
+// the faces copied below sp as the original's vector store does), and
+// checked against a transcription of it off line on 6 million segments
+// and 1500 lists. The first 3000 calls of each also run the game's own and
+// compare: r3 and f1 for the first, the three lists for the second; one
+// difference and the game's own is used from then on ("trace native").
+// COD3_NATIVE_SLAB=0 / COD3_NATIVE_SORT=0 turn them off.
+namespace NativeTrace
+{
+    inline uint32_t R32(uint8_t* base, uint32_t at) { uint32_t v; memcpy(&v, base + at, 4); return _byteswap_ulong(v); }
+    inline uint32_t R16(uint8_t* base, uint32_t at) { uint16_t v; memcpy(&v, base + at, 2); return _byteswap_ushort(v); }
+    inline void W32(uint8_t* base, uint32_t at, uint32_t v) { v = _byteswap_ulong(v); memcpy(base + at, &v, 4); }
+    inline double F(uint8_t* base, uint32_t at) { const uint32_t v = R32(base, at); float f; memcpy(&f, &v, 4); return double(f); }
+    inline double Round(double d) { return double(float(d)); }
+
+    // sub_824851F8: a segment against a box's two sets of faces, as the
+    // recompiled code does it, step for step: every value a double held
+    // at single precision (the fsubs/fmuls/fdivs), the faces copied to the
+    // guest stack below sp as the original's vector store does. Returns
+    // r3 (1: misses); `exitFraction` is f1 in and out.
+    uint32_t Slab(uint8_t* base, uint32_t sp, uint32_t start, uint32_t end, uint32_t facesA, uint32_t facesB, double& exitFraction)
+    {
+        const double zero = F(base, 0x820641A0u);      // f11
+        const double second = F(base, 0x8206178Cu);    // f8
+        double sign = F(base, 0x825DA49Cu);            // f10
+        const double margin = F(base, 0x820853E0u);    // f9
+        double enter = zero;                           // f12
+        const uint32_t slot = sp - 16;
+        uint32_t faces = facesA;
+        for (;;)
+        {
+            memcpy(base + (slot & ~15u), base + (faces & ~15u), 16);
+            for (uint32_t i = 0; i < 3; i++)
+            {
+                const double face = F(base, slot + 4 * i);
+                const double fromStart = Round(Round(F(base, start + 4 * i) - face) * sign);
+                const double fromEnd = Round(Round(F(base, end + 4 * i) - face) * sign);
+                if (fromStart > zero)
+                {
+                    if (fromEnd > zero) return 1;
+                    const double span = Round(fromStart - fromEnd);
+                    const double reach = Round(fromStart - margin);
+                    if (reach > Round(span * enter))
+                    {
+                        enter = Round(reach / span);
+                        if (!(enter < exitFraction)) return 1;
+                    }
+                }
+                else if (fromEnd > zero)
+                {
+                    const double span = Round(fromStart - fromEnd);
+                    if (fromStart > Round(span * exitFraction))
+                    {
+                        exitFraction = Round(fromStart / span);
+                        if (!(enter < exitFraction)) return 1;
+                    }
+                }
+            }
+            if (sign == second) return 0;
+            sign = second;
+            faces = facesB;
+        }
+    }
+
+    // sub_824850D0: the pieces of a list whose contents match the mask,
+    // put in one of three lists (before, inside or after a range), 128 at
+    // most each, as the original does.
+    void Sort(uint8_t* base, uint32_t self, uint32_t mask)
+    {
+        const uint32_t count = R32(base, self + 1044);
+        for (uint32_t i = 0; i < count; i++)
+        {
+            const uint32_t list = R32(base, self + 1040);
+            const uint32_t world = R32(base, self + 2640);
+            const uint32_t table = R32(base, world + 64);
+            const uint32_t item = R32(base, list + i * 4);
+            if ((R32(base, table + (item & 0xFFFFu) * 36u) & mask) == 0) continue;
+            const uint32_t low = R16(base, world + 56);
+            uint32_t into;
+            if (item < low) into = self + 1056;
+            else if (item >= low + R16(base, world + 58)) into = self + 2112;
+            else into = self + 1584;
+            const uint32_t n = R32(base, into + 516);
+            if (n == 128) continue;
+            W32(base, into + 516, n + 1);
+            W32(base, R32(base, into + 512) + n * 4u, item);
+        }
+    }
+}
+
+namespace NativeTrace
+{
+    std::atomic<uint32_t> g_slabChecked{ 0 }, g_sortChecked{ 0 };
+    std::atomic<bool> g_slabFailed{ false }, g_sortFailed{ false };
+    bool SlabOn() { static const bool on = []() { const char* t = getenv("COD3_NATIVE_SLAB"); return !(t && t[0] == '0'); }(); return on && !g_slabFailed.load(std::memory_order_relaxed); }
+    bool SortOn() { static const bool on = []() { const char* t = getenv("COD3_NATIVE_SORT"); return !(t && t[0] == '0'); }(); return on && !g_sortFailed.load(std::memory_order_relaxed); }
+}
+
+// 0.5.419: the tree walk's (sub_824A0940's) calls, written down while the
+// game's own walk runs, for the native walk to be checked against (below).
+namespace NativeWalk
+{
+    enum : uint8_t { SiteSlabA, SiteLeafA, SiteSlabB, SiteLeafB };
+    // What the walk passed (r3-r7, f1), what came back (r3, r4, f1) and the
+    // trace as the call left it.
+    struct Call { uint8_t site; uint32_t in[5]; uint64_t f1In; uint32_t r3, r4; uint64_t f1Out; uint8_t trace[128]; };
+    thread_local std::vector<Call>* t_rec = nullptr;
+    thread_local uint32_t t_trace = 0;
+    thread_local int t_inGame = 0;
+
+    int SiteOf(uint32_t lr)
+    {
+        switch (lr)
+        {
+        case 0x824A0AE0u: return SiteSlabA;
+        case 0x824A0B00u: return SiteLeafA;
+        case 0x824A0B58u: return SiteSlabB;
+        case 0x824A0B78u: return SiteLeafB;
+        default: return -1;
+        }
+    }
+    // Calls straight from the game's walk only (a leaf test's own slab
+    // tests come from elsewhere).
+    // An index, not a pointer: the record can grow while the call runs.
+    constexpr size_t None = ~size_t(0);
+    size_t Begin(PPCContext& ctx)
+    {
+        if (!t_rec) return None;
+        const int site = SiteOf(uint32_t(ctx.lr));
+        if (site < 0) return None;
+        Call& c = t_rec->emplace_back();
+        c.site = uint8_t(site);
+        c.in[0] = ctx.r3.u32; c.in[1] = ctx.r4.u32; c.in[2] = ctx.r5.u32; c.in[3] = ctx.r6.u32; c.in[4] = ctx.r7.u32;
+        memcpy(&c.f1In, &ctx.f1.f64, 8);
+        return t_rec->size() - 1;
+    }
+    void End(PPCContext& ctx, uint8_t* base, size_t at)
+    {
+        if (at == None || !t_rec || at >= t_rec->size()) return;
+        Call& c = (*t_rec)[at];
+        c.r3 = ctx.r3.u32; c.r4 = ctx.r4.u32;
+        memcpy(&c.f1Out, &ctx.f1.f64, 8);
+        memcpy(c.trace, base + t_trace, 128);
+    }
+}
+
+extern "C" PPC_FUNC(__imp__sub_824851F8);
+static void SlabHook(PPCContext& ctx, uint8_t* base)
+{
+    namespace T = NativeTrace;
+    if (!T::SlabOn()) { __imp__sub_824851F8(ctx, base); return; }
+    ctx.fpscr.disableFlushMode();
+    double exitFraction = ctx.f1.f64;
+    const uint32_t mine = T::Slab(base, ctx.r1.u32, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, exitFraction);
+    if (T::g_slabChecked.load(std::memory_order_relaxed) < 3000)
+    {
+        __imp__sub_824851F8(ctx, base);
+        const uint32_t n = T::g_slabChecked.fetch_add(1) + 1;
+        if (ctx.r3.u32 != mine || memcmp(&ctx.f1.f64, &exitFraction, 8) != 0)
+        {
+            T::g_slabFailed.store(true);
+            printf("trace native: the slab test differs from the game's at call %u (%u / %u, %.9g / %.9g): the game's own from now on\n",
+                n, mine, ctx.r3.u32, exitFraction, ctx.f1.f64);
+            fflush(stdout);
+        }
+        else if (n == 3000) { printf("trace native: the slab test matched the game's on 3000 of 3000 calls\n"); fflush(stdout); }
+        return;
+    }
+    ctx.r3.u64 = mine;
+    ctx.f1.f64 = exitFraction;
+}
+PPC_FUNC(sub_824851F8)
+{
+    const size_t c = NativeWalk::Begin(ctx);   // 0.5.419
+    SlabHook(ctx, base);
+    NativeWalk::End(ctx, base, c);
+}
+
+extern "C" PPC_FUNC(__imp__sub_824850D0);
+PPC_FUNC(sub_824850D0)
+{
+    namespace T = NativeTrace;
+    if (!T::SortOn()) { __imp__sub_824850D0(ctx, base); return; }
+    const uint32_t self = ctx.r3.u32, mask = ctx.r4.u32;
+    if (T::g_sortChecked.load(std::memory_order_relaxed) < 3000)
+    {
+        // The three lists before, as the game's own leaves them, and as
+        // this leaves them (the game's own runs last; its result stays).
+        static constexpr uint32_t Lists[3] = { 1056, 1584, 2112 };
+        uint32_t before[3][129], game[3][129], mine[3][129];
+        auto take = [&](uint32_t (&into)[3][129]) {
+            for (int l = 0; l < 3; l++)
+            {
+                into[l][0] = T::R32(base, self + Lists[l] + 516);
+                const uint32_t array = T::R32(base, self + Lists[l] + 512);
+                for (uint32_t i = 0; i < 128; i++) into[l][i + 1] = array ? T::R32(base, array + i * 4) : 0;
+            }
+        };
+        auto put = [&](const uint32_t (&from)[3][129]) {
+            for (int l = 0; l < 3; l++)
+            {
+                T::W32(base, self + Lists[l] + 516, from[l][0]);
+                const uint32_t array = T::R32(base, self + Lists[l] + 512);
+                if (array) for (uint32_t i = 0; i < 128; i++) T::W32(base, array + i * 4, from[l][i + 1]);
+            }
+        };
+        take(before);
+        bool sane = true;
+        for (int l = 0; l < 3; l++) sane = sane && before[l][0] <= 128 && T::R32(base, self + Lists[l] + 512) != 0;
+        if (sane)
+        {
+            T::Sort(base, self, mask);
+            take(mine);
+            put(before);
+            __imp__sub_824850D0(ctx, base);
+            take(game);
+            const uint32_t n = T::g_sortChecked.fetch_add(1) + 1;
+            if (memcmp(mine, game, sizeof(mine)) != 0)
+            {
+                T::g_sortFailed.store(true);
+                printf("trace native: the piece sort differs from the game's at call %u: the game's own from now on\n", n);
+                fflush(stdout);
+            }
+            else if (n == 3000) { printf("trace native: the piece sort matched the game's on 3000 of 3000 calls\n"); fflush(stdout); }
+            return;
+        }
+        __imp__sub_824850D0(ctx, base);
+        return;
+    }
+    T::Sort(base, self, mask);
+}
+
+// 0.5.419: the world trace's tree walk (sub_824A0940), native: 2.3-2.6% of
+// the main thread on Marseille at 32 players (0.5.418's run), the busiest
+// of the trace after the world search. A node's plane splits the segment:
+// one side or both are walked (the nearer first), then the node's two lists
+// of pieces each go through the slab test and, if it does not miss, a leaf
+// test (sub_82499F58 / sub_8249DDC8, still the game's). Same steps as the
+// recompiled code: the same guest stack frames (208 bytes a level) with the
+// midpoints and boxes in them where the original keeps them, values held at
+// single precision where it rounds, the vector part with denormals flushed
+// as the vector unit does.
+// Checked: the first 3000 walks of a match run the game's own walk, which
+// writes down every call it makes (its arguments, what came back and the
+// trace after). The native walk then runs from the same trace against that
+// record: each call it would make must be the next one written down (the
+// recorded result is put back instead of calling again, so nothing runs
+// twice), and it must end with the same calls and the same trace. One
+// difference and the game's own from then on ("walk native:" in the log).
+// COD3_NATIVE_WALK=0 turns it off.
+extern "C" PPC_FUNC(__imp__sub_82499F58);
+PPC_FUNC(sub_82499F58)
+{
+    const size_t c = NativeWalk::Begin(ctx);
+    __imp__sub_82499F58(ctx, base);
+    NativeWalk::End(ctx, base, c);
+}
+extern "C" PPC_FUNC(__imp__sub_8249DDC8);
+PPC_FUNC(sub_8249DDC8)
+{
+    const size_t c = NativeWalk::Begin(ctx);
+    __imp__sub_8249DDC8(ctx, base);
+    NativeWalk::End(ctx, base, c);
+}
+
+namespace NativeWalk
+{
+    using NativeTrace::R32;
+    using NativeTrace::W32;
+    using NativeTrace::F;
+    using NativeTrace::Round;
+    inline void WF(uint8_t* base, uint32_t at, float f) { uint32_t v; memcpy(&v, &f, 4); W32(base, at, v); }
+    // lfs then stfs: the word through a double and back, as the original moves it
+    inline void MoveF(uint8_t* base, uint32_t to, uint32_t from) { WF(base, to, float(F(base, from))); }
+
+    thread_local const std::vector<Call>* t_play = nullptr;
+    thread_local size_t t_at = 0;
+    thread_local bool t_bad = false;
+    std::atomic<uint32_t> g_checked{ 0 };
+    std::atomic<bool> g_failed{ false };
+    bool On() { static const bool on = []() { const char* t = getenv("COD3_NATIVE_WALK"); return !(t && t[0] == '0'); }(); return on && !g_failed.load(std::memory_order_relaxed); }
+
+    // A call the walk makes: the game's function, or (checking) the next
+    // call written down, compared and its result put back.
+    void Make(PPCContext& ctx, uint8_t* base, uint8_t site, uint32_t trace)
+    {
+        if (t_play)
+        {
+            if (t_bad) { ctx.r3.u64 = 1; return; }
+            if (t_at >= t_play->size()) { t_bad = true; ctx.r3.u64 = 1; return; }
+            const Call& c = (*t_play)[t_at++];
+            const bool slab = site == SiteSlabA || site == SiteSlabB;
+            bool same = c.site == site && c.in[0] == ctx.r3.u32 && c.in[1] == ctx.r4.u32 && c.in[2] == ctx.r5.u32 && c.in[3] == ctx.r6.u32;
+            if (!slab) same = same && c.in[4] == ctx.r7.u32;
+            else same = same && memcmp(&c.f1In, &ctx.f1.f64, 8) == 0;
+            if (!same) { t_bad = true; ctx.r3.u64 = 1; return; }
+            ctx.r3.u64 = c.r3; ctx.r4.u64 = c.r4;
+            memcpy(&ctx.f1.f64, &c.f1Out, 8);
+            memcpy(base + trace, c.trace, 128);
+            return;
+        }
+        ctx.lr = site == SiteSlabA ? 0x824A0AE0u : site == SiteLeafA ? 0x824A0B00u : site == SiteSlabB ? 0x824A0B58u : 0x824A0B78u;
+        if (site == SiteLeafA) sub_82499F58(ctx, base);
+        else if (site == SiteLeafB) sub_8249DDC8(ctx, base);
+        else sub_824851F8(ctx, base);
+    }
+
+    // sub_824A0940(r3 trace, r4 node, f1 / f2 the piece's fractions, r7 / r8
+    // its start and end), sp the caller's r1.
+    void Walk(PPCContext& ctx, uint8_t* base, uint32_t trace, uint32_t node, double f1, double f2, uint32_t start, uint32_t end, uint32_t sp)
+    {
+        const uint32_t frame = sp - 208;
+        ctx.fpscr.disableFlushMode();
+        if (!(F(base, trace + 32) > f1)) return;
+        if ((R32(base, node + 4) & R32(base, trace + 80)) == 0) return;
+        const uint32_t axis = R32(base, node) << 2;
+        const double dist = F(base, node + 12);
+        const double t1 = Round(F(base, start + axis) - dist);
+        const double t2 = Round(F(base, end + axis) - dist);
+        const double zero = F(base, 0x820641A0u);
+        uint32_t child;
+        double childF1 = f1;
+        uint32_t childStart = start;
+        if (!(t1 < zero) && !(t2 < zero)) child = R32(base, node + 32);
+        else if (!(t1 > zero) && !(t2 > zero)) child = R32(base, node + 36);
+        else
+        {
+            const double span = Round(t1 - t2);
+            const double reach = Round(f2 - f1);
+            const double frac = Round(t1 / span);
+            WF(base, frame + 80, float(frac));
+            const double mid = Round(reach * frac + f1);
+            // The midpoint, four lanes: start + (end - start) * frac, the
+            // lanes as raw words (the vector loads are 16-byte aligned, as
+            // the store to the frame is)
+            uint32_t s[4], e[4], m[4];
+            for (int i = 0; i < 4; i++) { s[i] = R32(base, (start & ~15u) + 4 * i); e[i] = R32(base, (end & ~15u) + 4 * i); }
+            const float fracF = float(frac);
+            ctx.fpscr.enableFlushModeUnconditional();
+            const __m128 vs = _mm_castsi128_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(s)));
+            const __m128 ve = _mm_castsi128_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(e)));
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(m), _mm_castps_si128(_mm_add_ps(vs, _mm_mul_ps(_mm_sub_ps(ve, vs), _mm_set1_ps(fracF)))));
+            ctx.fpscr.disableFlushModeUnconditional();
+            for (int i = 0; i < 4; i++) W32(base, ((frame + 96) & ~15u) + 4 * i, m[i]);
+            const uint32_t side = t1 < zero ? 1u : 0u;
+            Walk(ctx, base, trace, R32(base, node + 4 * (8 + side)), f1, mid, start, frame + 96, frame);
+            child = R32(base, node + 4 * (9 - side));
+            childF1 = mid;
+            childStart = frame + 96;
+        }
+        Walk(ctx, base, trace, child, childF1, f2, childStart, end, frame);
+
+        for (uint32_t piece = R32(base, node + 20); piece; piece = R32(base, piece + 220))
+        {
+            const uint32_t mask = R32(base, trace + 80);
+            if ((R32(base, R32(base, piece + 104) + 64) & mask) == 0) continue;
+            ctx.fpscr.disableFlushMode();
+            for (uint32_t i = 0; i < 3; i++) MoveF(base, frame + 112 + 4 * i, piece + 172 + 4 * i);
+            for (uint32_t i = 0; i < 3; i++) MoveF(base, frame + 128 + 4 * i, piece + 160 + 4 * i);
+            ctx.r1.u64 = frame;
+            ctx.r3.u64 = trace + 96; ctx.r4.u64 = trace + 112; ctx.r5.u64 = frame + 128; ctx.r6.u64 = frame + 112;
+            ctx.f1.f64 = F(base, trace + 32);
+            Make(ctx, base, SiteSlabA, trace);
+            if (ctx.r3.s32 != 0) continue;
+            ctx.r6.u64 = ctx.r4.u32; ctx.r7.u64 = mask; ctx.r5.u64 = trace + 96; ctx.r4.u64 = trace; ctx.r3.u64 = piece;
+            ctx.r1.u64 = frame;
+            Make(ctx, base, SiteLeafA, trace);
+        }
+        for (uint32_t piece = R32(base, node + 24); piece; piece = R32(base, piece + 156))
+        {
+            ctx.fpscr.disableFlushMode();
+            memcpy(base + ((frame + 128) & ~15u), base + ((piece + 176) & ~15u), 16);
+            memcpy(base + ((frame + 112) & ~15u), base + ((piece + 192) & ~15u), 16);
+            ctx.r1.u64 = frame;
+            ctx.r3.u64 = trace + 96; ctx.r4.u64 = trace + 112; ctx.r5.u64 = frame + 128; ctx.r6.u64 = frame + 112;
+            ctx.f1.f64 = F(base, trace + 32);
+            Make(ctx, base, SiteSlabB, trace);
+            if (ctx.r3.s32 != 0) continue;
+            ctx.r6.u64 = trace + 112; ctx.r7.u64 = R32(base, trace + 80); ctx.r5.u64 = trace + 96; ctx.r4.u64 = trace; ctx.r3.u64 = piece;
+            ctx.r1.u64 = frame;
+            Make(ctx, base, SiteLeafB, trace);
+        }
+    }
+}
+
+extern "C" PPC_FUNC(__imp__sub_824A0940);
+PPC_FUNC(sub_824A0940)
+{
+    namespace W = NativeWalk;
+    if (W::t_inGame || W::t_play || !W::On()) { __imp__sub_824A0940(ctx, base); return; }
+    const uint32_t trace = ctx.r3.u32, node = ctx.r4.u32, start = ctx.r7.u32, end = ctx.r8.u32, sp = ctx.r1.u32;
+    const double f1 = ctx.f1.f64, f2 = ctx.f2.f64;
+    if (W::g_checked.load(std::memory_order_relaxed) < 3000)
+    {
+        static thread_local std::vector<W::Call> record;
+        record.clear();
+        uint8_t before[128], game[128];
+        memcpy(before, base + trace, 128);
+        // The game's own walk, its calls written down
+        W::t_rec = &record; W::t_trace = trace; W::t_inGame++;
+        __imp__sub_824A0940(ctx, base);
+        W::t_inGame--; W::t_rec = nullptr;
+        memcpy(game, base + trace, 128);
+        static thread_local PPCContext after;
+        after = ctx;
+        // The native walk from the same trace, against the record
+        memcpy(base + trace, before, 128);
+        W::t_play = &record; W::t_at = 0; W::t_bad = false;
+        W::Walk(ctx, base, trace, node, f1, f2, start, end, sp);
+        W::t_play = nullptr;
+        const bool same = !W::t_bad && W::t_at == record.size() && memcmp(game, base + trace, 128) == 0;
+        memcpy(base + trace, game, 128);
+        ctx = after;
+        ctx.fpscr.setcsr(ctx.fpscr.csr);   // the float modes as the game's walk left them
+        const uint32_t n = W::g_checked.fetch_add(1) + 1;
+        if (!same)
+        {
+            W::g_failed.store(true);
+            printf("walk native: the tree walk differs from the game's at walk %u (%zu of %zu calls the same%s): the game's own from now on\n",
+                n, W::t_at, record.size(), W::t_bad ? ", then a different one" : "");
+            fflush(stdout);
+        }
+        else if (n == 3000) { printf("walk native: the tree walk matched the game's on 3000 of 3000 walks (%zu calls in the last)\n", record.size()); fflush(stdout); }
+        return;
+    }
+    W::Walk(ctx, base, trace, node, f1, f2, start, end, sp);
+    ctx.r1.u64 = sp;
+}
+
+// 0.5.420: a segment against a box (sub_82490A30), native: 0.9% of the main
+// thread on Marseille at 32 players (0.5.419's run; called by the trace's
+// pieces, sub_82497958 and sub_824972D0). r3 / r4 the segment's ends, r5 /
+// r6 and r7 / r8 two boxes' corners. First, with the vector unit (denormals
+// flushed): if any of x, y, z of max(r7 - r6, r5 - r8) reaches the limit at
+// 0x820641C0, 0 (apart). Then the segment's enter and exit fractions
+// against the faces of r7 (z, y, x) and of r8 (z, y, x), single precision
+// as the original rounds: 0 as soon as enter is not below exit, else 1.
+// It writes nothing. The first 5000 calls of a match also run the game's
+// own and compare ("box native:" in the log); one difference and the
+// game's own from then on. COD3_NATIVE_BOX=0 turns it off.
+namespace NativeBox
+{
+    using NativeTrace::R32;
+    using NativeTrace::F;
+    using NativeTrace::Round;
+    std::atomic<uint32_t> g_checked{ 0 };
+    std::atomic<bool> g_failed{ false };
+    bool On() { static const bool on = []() { const char* t = getenv("COD3_NATIVE_BOX"); return !(t && t[0] == '0'); }(); return on && !g_failed.load(std::memory_order_relaxed); }
+
+    inline __m128 Load(uint8_t* base, uint32_t at)
+    {
+        uint32_t w[4];
+        for (int i = 0; i < 4; i++) w[i] = R32(base, (at & ~15u) + 4 * i);
+        return _mm_castsi128_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(w)));
+    }
+
+    uint32_t Test(PPCContext& ctx, uint8_t* base, uint32_t s, uint32_t e, uint32_t a, uint32_t b, uint32_t lo, uint32_t hi)
+    {
+        ctx.fpscr.enableFlushMode();
+        const __m128 gap = _mm_max_ps(_mm_sub_ps(Load(base, lo), Load(base, b)), _mm_sub_ps(Load(base, a), Load(base, hi)));
+        const __m128 reach = _mm_cmpge_ps(gap, Load(base, 0x820641C0u));
+        if ((_mm_movemask_ps(reach) & 7) != 0) return 0;   // lanes x, y, z (w is z again in the original)
+        ctx.fpscr.disableFlushMode();
+        const double zero = F(base, 0x820641A0u), margin = F(base, 0x820853E0u);
+        double enter = zero, exit = F(base, 0x8206178Cu);
+        for (int i = 2; i >= 0; i--)
+        {
+            const double face = F(base, lo + 4 * i);
+            const double fromStart = Round(face - F(base, s + 4 * i));
+            const double fromEnd = Round(face - F(base, e + 4 * i));
+            if (fromStart > zero)
+            {
+                const double span = Round(fromStart - fromEnd);
+                if (!(fromStart > Round(span * enter + margin))) continue;
+                enter = Round(Round(fromStart - margin) / span);
+            }
+            else
+            {
+                if (!(fromEnd > zero)) continue;
+                const double span = Round(fromStart - fromEnd);
+                if (!(fromStart > Round(span * exit))) continue;
+                exit = Round(fromStart / span);
+            }
+            if (!(enter < exit)) return 0;
+        }
+        for (int i = 2; i >= 0; i--)
+        {
+            const double face = F(base, hi + 4 * i);
+            const double fromStart = Round(F(base, s + 4 * i) - face);
+            const double fromEnd = Round(F(base, e + 4 * i) - face);
+            if (fromStart > zero)
+            {
+                const double span = Round(fromStart - fromEnd);
+                if (!(fromStart > Round(span * enter))) continue;
+                enter = Round(fromStart / span);
+            }
+            else
+            {
+                if (!(fromEnd > zero)) continue;
+                const double span = Round(fromStart - fromEnd);
+                if (!(fromStart > Round(span * exit))) continue;
+                exit = Round(fromStart / span);
+            }
+            if (!(enter < exit)) return 0;
+        }
+        return 1;
+    }
+}
+
+extern "C" PPC_FUNC(__imp__sub_82490A30);
+PPC_FUNC(sub_82490A30)
+{
+    namespace B = NativeBox;
+    if (!B::On()) { __imp__sub_82490A30(ctx, base); return; }
+    const uint32_t mine = B::Test(ctx, base, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32, ctx.r8.u32);
+    if (B::g_checked.load(std::memory_order_relaxed) < 5000)
+    {
+        __imp__sub_82490A30(ctx, base);
+        const uint32_t n = B::g_checked.fetch_add(1) + 1;
+        if (ctx.r3.u32 != mine)
+        {
+            B::g_failed.store(true);
+            printf("box native: the box test differs from the game's at call %u (%u / %u): the game's own from now on\n", n, mine, ctx.r3.u32);
+            fflush(stdout);
+        }
+        else if (n == 5000) { printf("box native: the box test matched the game's on 5000 of 5000 calls\n"); fflush(stdout); }
+        return;
+    }
+    ctx.r3.u64 = mine;
+}
+
+// 0.5.421: a moving box against a box's faces (sub_8248BB48), native: 1.1%
+// of the main thread on Marseille at 32 players (0.5.420's run; called from
+// sub_824972D0 and sub_82497958, the trace's pieces). r3 the trace (start
+// +0, end +16, the moving box's half sizes +80, the fraction so far +288),
+// r4 and r5 the two sets of faces: the first with the sign at 0x825DA49C,
+// the second with 1. Per face the segment's distances (less the half size),
+// then the enter and exit fractions as in the slab test; 0 as soon as they
+// cross (or both ends are beyond a face and the end too near). On the way out: a
+// hit writes the enter fraction at +288 and the face's normal at +272;
+// none, +317 = 1 and, if no face had the end beyond it, +288 = 0 and
+// +316 = 1.
+// Same steps and rounding as the recompiled code (its scratch below r1 is
+// not kept: nothing reads it after the return). The first 5000 calls of a
+// match also run the game's own from the same trace and compare r3 and
+// what was written ("box sweep native:" in the log); one difference and the
+// game's own from then on. COD3_NATIVE_SWEEP=0 turns it off.
+namespace NativeSweep
+{
+    using NativeTrace::R32;
+    using NativeTrace::W32;
+    using NativeTrace::F;
+    using NativeTrace::Round;
+    std::atomic<uint32_t> g_checked{ 0 };
+    std::atomic<bool> g_failed{ false };
+    bool On() { static const bool on = []() { const char* t = getenv("COD3_NATIVE_SWEEP"); return !(t && t[0] == '0'); }(); return on && !g_failed.load(std::memory_order_relaxed); }
+    inline void WF(uint8_t* base, uint32_t at, float f) { uint32_t v; memcpy(&v, &f, 4); W32(base, at, v); }
+    inline double Lane(uint8_t* base, uint32_t vec, int i) { return F(base, (vec & ~15u) + 4 * uint32_t(i)); }
+
+    uint32_t Sweep(PPCContext& ctx, uint8_t* base, uint32_t trace, uint32_t facesA, uint32_t facesB, uint32_t sp)
+    {
+        ctx.fpscr.disableFlushMode();
+        // the original's stores into the caller's parameter area
+        W32(base, sp + 20, trace); W32(base, sp + 28, facesA); W32(base, sp + 36, facesB);
+        const double zero = F(base, 0x820641A0u), margin = F(base, 0x820853E0u);
+        double exit = Round(F(base, trace + 288));
+        double enter = zero;
+        double sign = F(base, 0x825DA49Cu);
+        bool hit = false, endInside = true;   // r7: no face had the end beyond it
+        uint32_t normal[4];
+        for (int i = 0; i < 4; i++) normal[i] = R32(base, 0x820641C0u + 4 * i);
+        uint32_t faces = facesA;
+        for (int pass = 0; pass < 2; pass++)
+        {
+            for (int i = 0; i < 3; i++)
+            {
+                const double half = F(base, trace + 80 + 4 * i);
+                const double face = Lane(base, faces, i);
+                const double toStart = Round(Lane(base, trace, i) - face);
+                const double toEnd = Round(Lane(base, trace + 16, i) - face);
+                const double d1 = Round(toStart * sign - half);
+                const double d2 = Round(toEnd * sign - half);
+                if (d1 > zero)
+                {
+                    const double span = Round(d1 - d2);
+                    if (d2 > zero)
+                    {
+                        if (!(span > zero)) return 0;
+                        if (!(d2 < margin)) return 0;
+                        endInside = false;
+                    }
+                    const double t = Round(span * enter);
+                    const double reach = Round(d1 - margin);
+                    if (reach > t)
+                    {
+                        enter = Round(reach / span);
+                        if (!(enter < exit)) return 0;
+                    }
+                    else if (hit) continue;
+                    for (int k = 0; k < 4; k++) normal[k] = R32(base, 0x820641C0u + 4 * k);
+                    float s = float(sign); memcpy(&normal[i], &s, 4);
+                    hit = true;
+                }
+                else
+                {
+                    if (!(d2 > zero)) continue;
+                    const double span = Round(d1 - d2);
+                    endInside = false;
+                    const double t = Round(span * exit);
+                    if (!(d1 > t)) continue;
+                    exit = Round(d1 / span);
+                    if (!(enter < exit)) return 0;
+                }
+            }
+            sign = F(base, 0x8206178Cu);
+            faces = facesB;
+        }
+        if (hit)
+        {
+            WF(base, trace + 288, float(enter));
+            for (int k = 0; k < 4; k++) W32(base, ((trace + 272) & ~15u) + 4 * k, normal[k]);
+            return 1;
+        }
+        base[trace + 317] = 1;
+        if (endInside)
+        {
+            WF(base, trace + 288, float(zero));
+            base[trace + 316] = 1;
+        }
+        return 1;
+    }
+}
+
+extern "C" PPC_FUNC(__imp__sub_8248BB48);
+PPC_FUNC(sub_8248BB48)
+{
+    namespace S = NativeSweep;
+    if (!S::On()) { __imp__sub_8248BB48(ctx, base); return; }
+    const uint32_t trace = ctx.r3.u32, a = ctx.r4.u32, b = ctx.r5.u32, sp = ctx.r1.u32;
+    if (S::g_checked.load(std::memory_order_relaxed) < 5000)
+    {
+        uint8_t before[48], mine[48], game[48];
+        const uint32_t area = (trace + 272) & ~15u;
+        memcpy(before, base + area, 48);
+        const uint32_t r3 = S::Sweep(ctx, base, trace, a, b, sp);
+        memcpy(mine, base + area, 48);
+        memcpy(base + area, before, 48);
+        __imp__sub_8248BB48(ctx, base);
+        memcpy(game, base + area, 48);
+        const uint32_t n = S::g_checked.fetch_add(1) + 1;
+        if (ctx.r3.u32 != r3 || memcmp(mine, game, 48) != 0)
+        {
+            S::g_failed.store(true);
+            printf("box sweep native: differs from the game's at call %u (r3 %u / %u, written %s): the game's own from now on\n",
+                n, r3, ctx.r3.u32, memcmp(mine, game, 48) ? "different" : "the same");
+            fflush(stdout);
+        }
+        else if (n == 5000) { printf("box sweep native: matched the game's on 5000 of 5000 calls\n"); fflush(stdout); }
+        return;
+    }
+    ctx.r3.u64 = S::Sweep(ctx, base, trace, a, b, sp);
+}
+
+// 0.5.422: a stream of packed vectors unpacked (sub_82181520), native: 1.65%
+// of the main thread on Marseille at 32 players (0.5.421's run; called from
+// sub_82189380). Three stream positions are rounded up (*r6 to 2 bytes,
+// *(r4+8) to 4, *(r4+12) to 4 and then 4 more); then for each of the
+// *(*(r4+4)+40) entries: four big-endian 16-bit values from the stream at
+// *r6, each made a float as the recompiled vupkd3d128 does (the bits of 3.0
+// plus the value), times the vector at 0x82028C50 plus the one at
+// 0x82028C60 (denormals flushed, as the vector unit does), stored at the
+// entry's address from the table (*(r8 + 4 * (*(*(r4+4)+36) + i)) + r5).
+// The positions are written back and r3 is the last count. The generated
+// code put together each 8-byte read from two partial vector loads and
+// the unpack lane by lane.
+// Checked: the first 3000 calls of a match first work out, without writing
+// anything, what they would store; then the game's own runs and each store,
+// the three positions and r3 must be the same ("unpack native:" in the
+// log); one difference and the game's own from then on. COD3_NATIVE_UNPACK=0
+// turns it off.
+namespace NativeUnpack
+{
+    using NativeTrace::R32;
+    using NativeTrace::W32;
+    using NativeTrace::R16;
+    std::atomic<uint32_t> g_checked{ 0 };
+    std::atomic<bool> g_failed{ false };
+    bool On() { static const bool on = []() { const char* t = getenv("COD3_NATIVE_UNPACK"); return !(t && t[0] == '0'); }(); return on && !g_failed.load(std::memory_order_relaxed); }
+    struct Store { uint32_t at; uint32_t w[4]; };
+
+    inline __m128 Vec(uint8_t* base, uint32_t at)
+    {
+        uint32_t w[4];
+        for (int i = 0; i < 4; i++) w[i] = R32(base, (at & ~15u) + 4 * i);
+        return _mm_castsi128_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(w)));
+    }
+
+    // dry: nothing written, the stores and the end positions given back
+    void Unpack(PPCContext& ctx, uint8_t* base, bool dry, std::vector<Store>* stores, uint32_t (&ends)[3])
+    {
+        const uint32_t r4 = ctx.r4.u32, r5 = ctx.r5.u32, r6 = ctx.r6.u32, r8 = ctx.r8.u32;
+        const uint32_t posAt = r6, wordsAt = R32(base, r4 + 8), countAt = R32(base, r4 + 12);
+        uint32_t pos = (R32(base, posAt) + 1) & ~1u;
+        uint32_t count = ((R32(base, countAt) + 3) & ~3u) + 4;
+        uint32_t words = (R32(base, wordsAt) + 3) & ~3u;
+        if (!dry) { W32(base, posAt, pos); W32(base, countAt, count); W32(base, wordsAt, words); }
+        const __m128 scale = Vec(base, 0x82028C50u), bias = Vec(base, 0x82028C60u);
+        uint32_t list = R32(base, r4 + 4);
+        for (int32_t i = 0; i < int32_t(R32(base, list + 40)); i++)
+        {
+            const uint32_t to = R32(base, r8 + ((R32(base, list + 36) + uint32_t(i)) << 2)) + r5;
+            count++;
+            words += 4;
+            uint32_t w[4];
+            for (int k = 0; k < 4; k++) w[k] = 0x40400000u + uint32_t(int32_t(int16_t(R16(base, pos + 2 * k))));
+            pos += 8;
+            ctx.fpscr.enableFlushMode();
+            const __m128 v = _mm_castsi128_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(w)));
+            Store s;
+            s.at = to & ~15u;
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(s.w), _mm_castps_si128(_mm_add_ps(_mm_mul_ps(v, scale), bias)));
+            if (dry) stores->push_back(s);
+            else for (int k = 0; k < 4; k++) W32(base, s.at + 4 * k, s.w[k]);
+            list = R32(base, r4 + 4);
+        }
+        if (!dry) { W32(base, posAt, pos); W32(base, wordsAt, words); W32(base, countAt, count); }
+        ends[0] = pos; ends[1] = words; ends[2] = count;
+        ctx.r3.u64 = count;
+    }
+}
+
+extern "C" PPC_FUNC(__imp__sub_82181520);
+PPC_FUNC(sub_82181520)
+{
+    namespace U = NativeUnpack;
+    if (!U::On()) { __imp__sub_82181520(ctx, base); return; }
+    uint32_t ends[3];
+    if (U::g_checked.load(std::memory_order_relaxed) < 3000)
+    {
+        static thread_local std::vector<U::Store> stores;
+        stores.clear();
+        const uint32_t posAt = ctx.r6.u32, wordsAt = U::R32(base, ctx.r4.u32 + 8), countAt = U::R32(base, ctx.r4.u32 + 12);
+        static thread_local PPCContext entry;
+        entry = ctx;
+        U::Unpack(entry, base, true, &stores, ends);
+        const uint32_t mineR3 = entry.r3.u32;
+        ctx.fpscr.setcsr(ctx.fpscr.csr);   // the float modes as ctx knows them
+        __imp__sub_82181520(ctx, base);
+        bool same = ctx.r3.u32 == mineR3 && U::R32(base, posAt) == ends[0] && U::R32(base, wordsAt) == ends[1] && U::R32(base, countAt) == ends[2];
+        // the last store to each address is what memory holds now
+        for (size_t i = 0; same && i < stores.size(); i++)
+        {
+            bool later = false;
+            for (size_t j = i + 1; j < stores.size() && !later; j++) later = stores[j].at == stores[i].at;
+            if (later) continue;
+            for (int k = 0; k < 4; k++) same = same && U::R32(base, stores[i].at + 4 * k) == stores[i].w[k];
+        }
+        ctx.fpscr.setcsr(ctx.fpscr.csr);
+        const uint32_t n = U::g_checked.fetch_add(1) + 1;
+        if (!same)
+        {
+            U::g_failed.store(true);
+            printf("unpack native: differs from the game's at call %u (%zu stores, r3 %u / %u): the game's own from now on\n", n, stores.size(), mineR3, ctx.r3.u32);
+            fflush(stdout);
+        }
+        else if (n == 3000) { printf("unpack native: matched the game's on 3000 of 3000 calls (%zu stores in the last)\n", stores.size()); fflush(stdout); }
+        return;
+    }
+    U::Unpack(ctx, base, false, nullptr, ends);
+}
+
+// 0.5.423: a search of a table by a 32-byte key (sub_820B64D0), native:
+// 1.1% of the main thread on Marseille at 32 players (0.5.422's run; called
+// from sub_8253C130, sub_8253B130, sub_82542DB8 and sub_8253CC70). The
+// table at *(r3+116) holds *(r3+112) entries of 48 bytes; the first whose
+// first eight words equal the key at r5 is the answer, written at r4 as
+// the pair (r3, its index); none, (0, the word that was in the stack slot
+// the original builds the pair in). Equal words are equal bytes, so each
+// entry is two 16-byte compares instead of eight loads byte-swapped one by
+// one. The first 3000 calls of a match also run the game's own and compare
+// the pair ("table search native:" in the log); one difference and the
+// game's own from then on. COD3_NATIVE_TABLESEARCH=0 turns it off.
+namespace NativeTableSearch
+{
+    using NativeTrace::R32;
+    using NativeTrace::W32;
+    std::atomic<uint32_t> g_checked{ 0 };
+    std::atomic<bool> g_failed{ false };
+    bool On() { static const bool on = []() { const char* t = getenv("COD3_NATIVE_TABLESEARCH"); return !(t && t[0] == '0'); }(); return on && !g_failed.load(std::memory_order_relaxed); }
+
+    void Find(PPCContext& ctx, uint8_t* base)
+    {
+        const uint32_t self = ctx.r3.u32, out = ctx.r4.u32, key = ctx.r5.u32, sp = ctx.r1.u32;
+        const uint64_t r31 = _byteswap_uint64(ctx.r31.u64);
+        memcpy(base + sp - 8, &r31, 8);   // the original keeps r31 there
+        W32(base, sp - 16, 0);
+        memcpy(base + out, base + sp - 16, 8);
+        const int32_t count = int32_t(R32(base, self + 112));
+        if (count <= 0) return;
+        const uint32_t table = R32(base, self + 116);
+        const __m128i k0 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(base + key));
+        const __m128i k1 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(base + key + 16));
+        for (int32_t i = 0; i < count; i++)
+        {
+            const uint8_t* e = base + uint32_t(table + 48u * uint32_t(i));
+            const __m128i a = _mm_cmpeq_epi8(k0, _mm_loadu_si128(reinterpret_cast<const __m128i*>(e)));
+            const __m128i b = _mm_cmpeq_epi8(k1, _mm_loadu_si128(reinterpret_cast<const __m128i*>(e + 16)));
+            if (_mm_movemask_epi8(_mm_and_si128(a, b)) != 0xFFFF) continue;
+            W32(base, sp - 16, self);
+            W32(base, sp - 12, uint32_t(i));
+            memcpy(base + out, base + sp - 16, 8);
+            return;
+        }
+    }
+}
+
+extern "C" PPC_FUNC(__imp__sub_820B64D0);
+PPC_FUNC(sub_820B64D0)
+{
+    namespace T = NativeTableSearch;
+    if (!T::On()) { __imp__sub_820B64D0(ctx, base); return; }
+    if (T::g_checked.load(std::memory_order_relaxed) < 3000)
+    {
+        const uint32_t out = ctx.r4.u32;
+        uint8_t mine[8], game[8];
+        T::Find(ctx, base);
+        memcpy(mine, base + out, 8);
+        __imp__sub_820B64D0(ctx, base);
+        memcpy(game, base + out, 8);
+        const uint32_t n = T::g_checked.fetch_add(1) + 1;
+        if (memcmp(mine, game, 8) != 0)
+        {
+            T::g_failed.store(true);
+            printf("table search native: differs from the game's at call %u (%08X %08X / %08X %08X): the game's own from now on\n",
+                n, T::R32(mine, 0), T::R32(mine, 4), T::R32(game, 0), T::R32(game, 4));
+            fflush(stdout);
+        }
+        else if (n == 3000) { printf("table search native: matched the game's on 3000 of 3000 calls\n"); fflush(stdout); }
+        return;
+    }
+    T::Find(ctx, base);
+}
+
+// 0.5.424: a rotate of 8-byte elements (sub_82147008, std::rotate's
+// gcd-cycles form: r3 first, r4 middle, r5 last), native: 0.75% of the main
+// thread on Marseille at 32 players (0.5.423's run; called from
+// sub_82147498, a merge). The elements are moved whole (two words each),
+// never looked at, so the result is the same bytes however they are moved:
+// the first k put aside, the rest moved down, the k after them. The
+// original's gcd takes a division per step. Only 0 < k < n (the cases the
+// original moves anything in, with sane sizes); anything else is the
+// game's own. The first 3000 calls of a match run the game's own first;
+// the range is put back, rotated natively and compared byte for byte
+// ("rotate native:" in the log); one difference and the game's own from
+// then on. COD3_NATIVE_ROTATE=0 turns it off.
+namespace NativeRotate
+{
+    std::atomic<uint32_t> g_checked{ 0 };
+    std::atomic<bool> g_failed{ false };
+    bool On() { static const bool on = []() { const char* t = getenv("COD3_NATIVE_ROTATE"); return !(t && t[0] == '0'); }(); return on && !g_failed.load(std::memory_order_relaxed); }
+
+    void Rotate(uint8_t* base, uint32_t first, uint32_t k, uint32_t n)
+    {
+        static thread_local std::vector<uint8_t> aside;
+        aside.resize(size_t(k) * 8);
+        memcpy(aside.data(), base + first, size_t(k) * 8);
+        memmove(base + first, base + first + size_t(k) * 8, size_t(n - k) * 8);
+        memcpy(base + first + size_t(n - k) * 8, aside.data(), size_t(k) * 8);
+    }
+}
+
+extern "C" PPC_FUNC(__imp__sub_82147008);
+PPC_FUNC(sub_82147008)
+{
+    namespace X = NativeRotate;
+    const uint32_t first = ctx.r3.u32, middle = ctx.r4.u32, last = ctx.r5.u32;
+    const int32_t k = int32_t(middle - first) >> 3, n = int32_t(last - first) >> 3;
+    if (!X::On() || k <= 0 || k >= n || n > (1 << 20) || ((middle - first) & 7) || ((last - first) & 7)) { __imp__sub_82147008(ctx, base); return; }
+    if (X::g_checked.load(std::memory_order_relaxed) < 3000)
+    {
+        static thread_local std::vector<uint8_t> before, game;
+        const size_t bytes = size_t(n) * 8;
+        before.assign(base + first, base + first + bytes);
+        __imp__sub_82147008(ctx, base);
+        game.assign(base + first, base + first + bytes);
+        memcpy(base + first, before.data(), bytes);
+        X::Rotate(base, first, uint32_t(k), uint32_t(n));
+        const uint32_t c = X::g_checked.fetch_add(1) + 1;
+        if (memcmp(base + first, game.data(), bytes) != 0)
+        {
+            memcpy(base + first, game.data(), bytes);
+            X::g_failed.store(true);
+            printf("rotate native: differs from the game's at call %u (%d of %d): the game's own from now on\n", c, k, n);
+            fflush(stdout);
+        }
+        else if (c == 3000) { printf("rotate native: matched the game's on 3000 of 3000 calls\n"); fflush(stdout); }
+        return;
+    }
+    X::Rotate(base, first, uint32_t(k), uint32_t(n));
+}
 
 // 0.5.376: the animation's quaternion blend (sub_820B5CD8), native. 3.7%
 // of the main thread on Marseille at 32 players (every bone of every

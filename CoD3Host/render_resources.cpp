@@ -25,9 +25,42 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <memory>
 
 #include <d3d11_1.h>
 #include <wrl/client.h>
+
+namespace
+{
+    // 0.5.413: the textures', vertex buffers' and index buffers' entries,
+    // by handle, in blocks of 256 that never move. They were std::deques,
+    // which Microsoft's library builds of one entry a block for anything
+    // over 16 bytes: each look up by handle (some 25000 a frame in
+    // Marseille's busy views, on the command thread) went through the
+    // deque's map to an entry of its own somewhere on the heap. Here it is
+    // one small table of blocks, then the entry, its neighbours beside it.
+    // Like the deque, an entry stays where it is while more are added.
+    // Only what the three tables use: emplace_back, size, back, [].
+    template <typename T>
+    class StableArray
+    {
+    public:
+        static constexpr size_t BlockShift = 8, BlockSize = size_t(1) << BlockShift;
+        T& operator[](size_t i) { return m_blocks[i >> BlockShift][i & (BlockSize - 1)]; }
+        const T& operator[](size_t i) const { return m_blocks[i >> BlockShift][i & (BlockSize - 1)]; }
+        size_t size() const { return m_size; }
+        T& back() { return (*this)[m_size - 1]; }
+        // A new entry as T() makes it (the blocks' entries are made so).
+        T& emplace_back()
+        {
+            if ((m_size >> BlockShift) == m_blocks.size()) m_blocks.emplace_back(new T[BlockSize]());
+            return (*this)[m_size++];
+        }
+    private:
+        std::vector<std::unique_ptr<T[]>> m_blocks;
+        size_t m_size = 0;
+    };
+}
 
 using Microsoft::WRL::ComPtr;
 
@@ -326,6 +359,11 @@ namespace
     std::deque<ResolvedEntry> g_resolved;
     RenderTable::KeyTable<1> g_resolvedKeys;
     uint64_t g_resolveSerial = 0;
+    // 0.5.411: moved on whenever ResolvedAt's answer could change (a
+    // resolve's surface added, made again or let go), so the texture
+    // lookup's front cache (TextureForUnchecked) never keeps a "not a
+    // resolve" answer past it.
+    uint64_t g_resolvedVersion = 1;
 
     // --- textures --------------------------------------------------------------------------------
 
@@ -418,7 +456,7 @@ namespace
         uint32_t mirrorEpoch = 0;
         uint64_t verifiedFrame = 0;
     };
-    std::deque<TextureEntry> g_textures;   // by handle less one; handle 1 is the white texture
+    StableArray<TextureEntry> g_textures;   // by handle less one; handle 1 is the white texture (0.5.413: was a std::deque)
 
     // --- the texture pool ------------------------------------------------------------------
     //
@@ -670,7 +708,7 @@ namespace
         if (first < end) memcpy(entry.mirror.data() + first, data + first, end - first);
         if (first == 0 && end >= entry.seen) entry.mirrorEpoch = Verify::epoch.load(std::memory_order_relaxed);
     }
-    std::deque<BufferEntry> g_buffers;
+    StableArray<BufferEntry> g_buffers;   // 0.5.413: was a std::deque
     uint64_t g_vertexCalls = 0;         // VertexBufferFor's calls, counted
 
     // A vertex buffer this big is compared with a copy of what went up, a
@@ -699,7 +737,7 @@ namespace
         uint32_t bytes = 0;              // the host buffer's
         bool live = false;
     };
-    std::deque<IndexEntry> g_indexEntries;   // by handle less one
+    StableArray<IndexEntry> g_indexEntries;   // by handle less one (0.5.413: was a std::deque)
     RenderTable::KeyTable<4> g_indexKeys;
     std::vector<uint32_t> g_freeIndexEntries;
     std::vector<uint8_t> g_indexScratch;
@@ -1487,6 +1525,7 @@ bool RenderResources::Forget(uint32_t address, uint32_t size)
         entry.DropCrop();
         entry.surface.texture = nullptr; entry.surface.resource = nullptr; entry.surface.view = nullptr;
         entry.surface.width = entry.surface.height = 0;
+        g_resolvedVersion++;
         dropped = true;
     }
     return dropped;
@@ -1676,11 +1715,13 @@ RenderResources::Resolved* RenderResources::ResolvedFor(uint32_t physical, uint3
         handle = Handle(g_resolved.size());
         g_resolved.back().physical = key[0];
         g_resolvedKeys.Insert(key, handle);
+        g_resolvedVersion++;
     }
     ResolvedEntry& entry = g_resolved[handle - 1];
     Resolved& out = entry.surface;
     if (!entry.texture || out.width != width || out.height != height || out.format != format)
     {
+        g_resolvedVersion++;
         RenderQueue::Sync(7);
         if (entry.texture) g_resourceBytes -= uint64_t(out.width) * out.height * 4;
         entry.texture.Reset(); entry.resource.Reset(); entry.view.Reset();
@@ -1840,9 +1881,41 @@ RenderState::Handle RenderResources::TextureForUnchecked(const uint32_t fetch[6]
     resolved = false;
     if ((fetch[0] & 3) != 2 || base == 0 || width > 8192 || height > 8192) { g_whiteReason = "no texture in the fetch constant"; return 1; }
 
+    // 0.5.411: a small front cache of the lookups that found a texture.
+    // Every texture of every draw asked the resolves' table (ResolvedAt)
+    // and then the textures' (g_textureKeys), two hash probes each, some
+    // 24000 a frame in Marseille's busy views. A hit here needs the same
+    // four-word key as before, the resolves unchanged since it was noted
+    // (g_resolvedVersion), and the entry it names still live under that
+    // very key; then it is exactly what the two probes would have found.
+    // Everything after the lookup (the page watch, the fingerprint, the
+    // upload) runs as before. COD3_TEXTURELOOKUPCACHE=0: the probes always.
+    static const bool textureFront = []() {
+        const char* value = getenv("COD3_TEXTURELOOKUPCACHE");
+        return value == nullptr || value[0] != '0';
+    }();
+    struct TextureFront { uint32_t key[4]; Handle handle; uint64_t resolvedVersion; };
+    static constexpr uint32_t TextureFrontSize = 2048;
+    static TextureFront textureFrontTable[TextureFrontSize] = {};
+    const uint32_t lookDimension = (fetch[5] >> 9) & 3;
+    const uint32_t lookKey[4] = { Guest::GpuOffset(base), format | (lookDimension << 8), width, height };
+    TextureFront* front = nullptr;
+    Handle frontHandle = 0;
+    if (textureFront)
+    {
+        const uint32_t mixed = (lookKey[0] >> 12) ^ (lookKey[0] >> 23) ^ (lookKey[1] * 0x9E3779B9u) ^ (lookKey[2] * 0x85EBCA6Bu) ^ (lookKey[3] * 0xC2B2AE35u);
+        front = &textureFrontTable[(mixed ^ (mixed >> 15)) & (TextureFrontSize - 1)];
+        if (front->handle != 0 && front->resolvedVersion == g_resolvedVersion && memcmp(front->key, lookKey, sizeof(lookKey)) == 0 &&
+            front->handle <= g_textures.size())
+        {
+            const TextureEntry& cached = g_textures[front->handle - 1];
+            if (cached.live && memcmp(cached.key, lookKey, sizeof(lookKey)) == 0) frontHandle = front->handle;
+        }
+    }
+
     // A surface a resolve made, at the size the frame was drawn: those are
     // the shadow maps and the post processing's copies of the frame.
-    if (const Resolved* surface = ResolvedAt(base))
+    if (const Resolved* surface = frontHandle != 0 ? nullptr : ResolvedAt(base))
     {
         // A fetch that does not look like the resolve: said once each. A
         // shadow map or depth copy read as 24 bit depth, or a copy of the
@@ -1887,7 +1960,13 @@ RenderState::Handle RenderResources::TextureForUnchecked(const uint32_t fetch[6]
     if (!uploadable) { g_whiteReason = "format not uploaded"; return 1; }
     if (dimension == 2) return 1;   // a volume: not uploaded, white
     const uint32_t key[4] = { Guest::GpuOffset(base), format | (dimension << 8), width, height };
-    Handle handle = g_textureKeys.Find(key);
+    Handle handle = frontHandle != 0 ? frontHandle : g_textureKeys.Find(key);
+    if (front != nullptr && handle != 0 && handle != frontHandle)
+    {
+        memcpy(front->key, key, sizeof(key));
+        front->handle = handle;
+        front->resolvedVersion = g_resolvedVersion;
+    }
     const uint8_t* data = Guest::Base + Guest::PhysicalAlias(base);
     if (handle != 0)
     {

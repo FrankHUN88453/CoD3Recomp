@@ -1368,6 +1368,33 @@ constexpr uint32_t StanceButton = 0x2000, GrenadeButton = 0x80, SprintButton = 0
 // like a grenade; smoke counted apart) is read back. The first press that
 // spends one is kept for every bot ("bots: frag button found"). A bot with
 // none left does not try.
+// 0.5.416: what kind of grenade each weapon is, remembered. BotNadeAmmo and
+// BotNadeWeapon looked at all 127 weapons each time a bot's grenades were
+// asked about, each name lower-cased and searched up to nine times (BotNadeAmmo
+// and strstr together 1.5% of the main thread on Marseille at 32
+// players). The names do not change in a match: a weapon's kind is worked
+// out again only when its name's bytes are not the ones it was worked out
+// from (a new map's weapons can sit at the same addresses).
+// COD3_NADEKINDCACHE=0: worked out every time, as before.
+struct NadeKind { uint8_t name[40] = {}; bool known = false, nade = false, smoke = false, rg = false; };
+static const NadeKind& NadeKindOf(uint8_t* base, uint32_t w, uint32_t text)
+{
+    static const bool cache = []() { const char* t = getenv("COD3_NADEKINDCACHE"); return !(t && t[0] == '0'); }();
+    static thread_local NadeKind kinds[128];
+    NadeKind& kind = kinds[w & 127];
+    uint8_t raw[40] = {};
+    for (int c = 0; c < 39; c++) { raw[c] = Guest::Read8(base, text + c); if (!raw[c]) break; }
+    if (cache && kind.known && memcmp(kind.name, raw, sizeof(raw)) == 0) return kind;
+    memcpy(kind.name, raw, sizeof(raw));
+    char name[40] = {};
+    for (int c = 0; c < 39 && raw[c]; c++) name[c] = char(tolower(raw[c]));
+    kind.smoke = strstr(name, "smoke") != nullptr;
+    kind.nade = kind.smoke || strstr(name, "grenade") || strstr(name, "nade") || strstr(name, "mills") || strstr(name, "frag") ||
+        strstr(name, "stiel") || strstr(name, "sticky") || strstr(name, "mk2") || strstr(name, "m24");
+    kind.rg = strstr(name, "_rg") != nullptr;
+    kind.known = true;
+    return kind;
+}
 static uint32_t BotNadeAmmo(uint8_t* base, uint32_t record, bool smoke)
 {
     const uint32_t list = Guest::Read32(base, 0x82BCBF9C);
@@ -1379,12 +1406,8 @@ static uint32_t BotNadeAmmo(uint8_t* base, uint32_t record, bool smoke)
         if (def < 0x40000000u || def >= 0xA0000000u) continue;
         const uint32_t text = Guest::Read32(base, def + 8);
         if (text < 0x40000000u || text >= 0xA0000000u) continue;
-        char name[40] = {};
-        for (int c = 0; c < 39; c++) { const char ch = char(Guest::Read8(base, text + c)); if (!ch) break; name[c] = char(tolower(static_cast<unsigned char>(ch))); }
-        const bool isSmoke = strstr(name, "smoke") != nullptr;
-        const bool isNade = isSmoke || strstr(name, "grenade") || strstr(name, "nade") || strstr(name, "mills") || strstr(name, "frag") ||
-            strstr(name, "stiel") || strstr(name, "sticky") || strstr(name, "mk2") || strstr(name, "m24");
-        if (!isNade || isSmoke != smoke) continue;
+        const NadeKind& kind = NadeKindOf(base, w, text);
+        if (!kind.nade || kind.smoke != smoke) continue;
         const uint32_t clip = Guest::Read32(base, def + 1468), spare = Guest::Read32(base, def + 1460);
         if (clip > 128 || spare > 128) continue;
         total += Guest::Read32(base, record + 4 * (172 + clip));
@@ -1454,12 +1477,8 @@ static uint32_t BotNadeWeapon(uint8_t* base, uint32_t record, bool smoke)
         if (def < 0x40000000u || def >= 0xA0000000u) continue;
         const uint32_t text = Guest::Read32(base, def + 8);
         if (text < 0x40000000u || text >= 0xA0000000u) continue;
-        char name[40] = {};
-        for (int c = 0; c < 39; c++) { const char ch = char(Guest::Read8(base, text + c)); if (!ch) break; name[c] = char(tolower(static_cast<unsigned char>(ch))); }
-        const bool isSmoke = strstr(name, "smoke") != nullptr;
-        const bool isNade = isSmoke || strstr(name, "grenade") || strstr(name, "nade") || strstr(name, "mills") || strstr(name, "frag") ||
-            strstr(name, "stiel") || strstr(name, "sticky") || strstr(name, "mk2") || strstr(name, "m24");
-        if (!isNade || isSmoke != smoke || strstr(name, "_rg")) continue;
+        const NadeKind& kind = NadeKindOf(base, w, text);
+        if (!kind.nade || kind.smoke != smoke || kind.rg) continue;
         const uint32_t clip = Guest::Read32(base, def + 1468), spare = Guest::Read32(base, def + 1460);
         if (clip > 128 || spare > 128) continue;
         uint32_t ammo = Guest::Read32(base, record + 4 * (172 + clip));
@@ -7751,6 +7770,59 @@ namespace BigTest
                         put(client + 1668, ReadFloat(base, client + 1668) + AngleDifference(v.pitch, pitchNow));
                     }
                 }
+                // 0.5.410: the view held. setviewpos turns him once, then
+                // something on the server's side turns him again (0.5.408's
+                // city run: every view commanded pitch 0 yaw 0; the pictures
+                // 0 0, then 20.7 156.6 for views 2-4; 0.5.407's -180 and
+                // -114.3), so per-view numbers were not the same scenes. The
+                // facing is checked twice a second and setviewpos sent again
+                // when it is more than 1.5 degrees off (at most once a
+                // second); logged "bench: turned back". COD3_BENCH_HOLDTURN=0:
+                // once a view only, as before.
+                // 0.5.411: off unless COD3_BENCH_HOLDTURN=1. 0.5.410's run
+                // faced yaw 90 all along and setviewpos sent again every
+                // second never moved it: here setviewpos places him but
+                // does not turn him. The facing stays one way for a whole
+                // run, so runs are compared at the same draw counts, and
+                // "bench: hold check" says which way each view faced.
+                {
+                    static const bool holdTurn = [] { const char* t = getenv("COD3_BENCH_HOLDTURN"); return t != nullptr && t[0] == '1'; }();
+                    static uint32_t turnCheckedAt = 0, turnResentAt = 0;
+                    static int turnResends = 0, turnResendsLogged = 0;
+                    if (holdTurn && now - turnCheckedAt >= 500)
+                    {
+                        turnCheckedAt = now;
+                        const PhotoTour::View& v = views[size_t(index)];
+                        const float pitchOff = AngleDifference(v.pitch, ReadFloat(base, record + 204));
+                        const float yawOff = AngleDifference(v.yaw, ReadFloat(base, record + 208));
+                        if ((fabsf(pitchOff) > 1.5f || fabsf(yawOff) > 1.5f) && now - turnResentAt >= 1000)
+                        {
+                            turnResentAt = now;
+                            turnResends++;
+                            char command[128];
+                            snprintf(command, sizeof(command), "setviewpos %.0f %.0f %.0f %.1f %.1f", v.x, v.y, v.z, v.yaw, v.pitch);
+                            Kernel::QueueConsoleCommand(command);
+                            if (turnResendsLogged < 60)
+                            {
+                                turnResendsLogged++;
+                                printf("bench: turned back (view %d, %d so far): pitch was %.1f off, yaw %.1f off\n", index + 1, turnResends, pitchOff, yawOff);
+                                fflush(stdout);
+                            }
+                        }
+                    }
+                    // Where he faces 30 s into each view (3 s before the end of a shorter one):
+                    // whether the hold worked, for the whole view.
+                    static int heldOf = -1, heldWatch = -1;
+                    static uint32_t heldSince = 0;
+                    if (index != heldWatch) { heldWatch = index; heldSince = now; }
+                    if (index != heldOf && now - heldSince >= std::min<uint32_t>(30000u, each > 3000u ? each - 3000u : each))
+                    {
+                        heldOf = index;
+                        printf("bench: hold check, view %d: pitch %.1f yaw %.1f (wanted %.1f %.1f), %d turned back so far\n", index + 1,
+                               ReadFloat(base, record + 204), ReadFloat(base, record + 208), views[size_t(index)].pitch, views[size_t(index)].yaw, turnResends);
+                        fflush(stdout);
+                    }
+                }
                 // 0.5.390: an A/B switch within each view (COD3_BENCH_TOGGLE=
                 // "command A|command B"): the two commands in turn every
                 // COD3_BENCH_TOGGLE_SECONDS (6), logged "bench: setting A/B",
@@ -8854,22 +8926,36 @@ static void SceneAddGuard(uint8_t* base, uint32_t node, uint32_t tailAt, const c
 {
     skip = false;
     if (node < 0x40000000u) return;
-    // 0.5.369: only while the killcam plays (every double add it ever caught
-    // was in the replay: 367's log, 12 of 12). Walking the whole list on
-    // every add, every frame, costs time with 32 players' worth of models.
-    if (!Killcam::Replaying()) return;
-    // 0.5.356: refused when the node is ANYWHERE in the list already (at the
-    // tail it makes a loop; elsewhere it cuts off everything after it)
+    // 0.5.418: the tail check always, killcam or not. 416's two-player test
+    // froze on the frame the killcam ended ("killcam: over", then the main
+    // thread in 8243E198 for ever with model instance 5F586190, the one the
+    // guard had refused a dozen times in the replay): the same double add
+    // came once more with Replaying() already false, unguarded, and the node
+    // followed itself. A double add at the tail is what makes the loop, and
+    // checking for it is one read. COD3_SCENETAILGUARD=0: replay only, as before.
+    static const bool tailAlways = []() { const char* t = getenv("COD3_SCENETAILGUARD"); return !(t && t[0] == '0'); }();
     bool present = Guest::Read32(base, tailAt) == node;
-    const uint32_t end = tailAt - 4;   // the list's end node (its next word); tail = end + 4
-    for (uint32_t n = Guest::Read32(base, end), k = 0; !present && n && n != end && k < 4096; n = Guest::Read32(base, n), k++)
-        if (n == node) present = true;
-    if (!present) return;
-    skip = true;
-    static int told = 0;
-    if (told < 12)
+    if (!present || !tailAlways)
     {
-        told++;
+        // 0.5.369: only while the killcam plays (every double add it ever caught
+        // was in the replay: 367's log, 12 of 12). Walking the whole list on
+        // every add, every frame, costs time with 32 players' worth of models.
+        if (!Killcam::Replaying()) return;
+        // 0.5.356: refused when the node is ANYWHERE in the list already (at the
+        // tail it makes a loop; elsewhere it cuts off everything after it)
+        const uint32_t end = tailAt - 4;   // the list's end node (its next word); tail = end + 4
+        for (uint32_t n = Guest::Read32(base, end), k = 0; !present && n && n != end && k < 4096; n = Guest::Read32(base, n), k++)
+            if (n == node) present = true;
+        if (!present) return;
+    }
+    skip = true;
+    // 0.5.418: those outside the replay counted apart, so the replay's dozen
+    // never hide the one that used to freeze the game
+    static int told = 0, toldOutside = 0;
+    int& count = Killcam::Replaying() ? told : toldOutside;
+    if (count < 12)
+    {
+        count++;
         const uint32_t e = Guest::Read32(base, node + 0x60);
         printf("killcam guard: model instance %08X added to scene list %s twice in a row (caller %08X; entity %08X type %u +484 %08X; killcam %s): second add skipped\n",
                node, list, lr, e, (e >= 0x40000000u && e < 0xA0000000u) ? Guest::Read8(base, e) : 0u, (e >= 0x40000000u && e < 0xA0000000u) ? Guest::Read32(base, e + 484) : 0u,

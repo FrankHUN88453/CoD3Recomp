@@ -15,6 +15,7 @@
 // guarded with #ifndef, so this file has to define its versions first or it
 // would redefine them.
 #include <emmintrin.h>
+#include <tmmintrin.h>   // 0.5.424: pshufb (SSSE3, in x86-64-v2)
 #include "cod3_mmio.h"
 #include "modules.h"
 
@@ -148,8 +149,8 @@ namespace
         for (; i + 4 <= count; i += 4)
         {
             __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(from + i * 4));
-            v = _mm_or_si128(_mm_slli_epi16(v, 8), _mm_srli_epi16(v, 8));   // bytes in each half
-            v = _mm_or_si128(_mm_slli_epi32(v, 16), _mm_srli_epi32(v, 16));  // halves in each word
+            // 0.5.424: one byte shuffle (was four shifts and two ors)
+            v = _mm_shuffle_epi8(v, _mm_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12));
             _mm_storeu_si128(reinterpret_cast<__m128i*>(file + i), v);
         }
         for (; i < count; i++) file[i] = Guest::Read32(Guest::Base, guestAddress + i * 4);

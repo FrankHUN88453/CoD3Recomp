@@ -56,6 +56,16 @@ namespace
     StateTable<3, ID3D11RasterizerState> g_rasterizer;
     StateTable<2, ID3D11SamplerState> g_sampler;
 
+    // 0.5.417: the sampler handle of each key lately asked for, in front of
+    // the table: every texture of every draw asks (some 12000 a frame in
+    // Marseille's busy views), for a handful of different samplers. A key
+    // is under 21 bits; it is kept plus one, so an empty entry never
+    // matches. The generation moves on when the table is emptied (the
+    // filtering setting changed). COD3_SAMPLERFRONT=0: the table always.
+    struct SamplerFront { uint32_t keyPlusOne = 0, handle = 0, generation = 0; };
+    SamplerFront g_samplerFront[512];
+    uint32_t g_samplerGeneration = 1;
+
     RenderPipeline::Filter g_filter = RenderPipeline::Filter::Anisotropic;
     uint32_t g_anisotropy = 16;
 
@@ -326,6 +336,7 @@ void RenderPipeline::SetFiltering(Filter filter, uint32_t anisotropy)
     g_filter = filter;
     g_anisotropy = anisotropy;
     g_sampler.Clear();
+    g_samplerGeneration++;   // 0.5.417: the front's handles are of the old table
 }
 
 RenderPipeline::Filter RenderPipeline::Filtering() { return g_filter; }
@@ -366,6 +377,23 @@ RenderState::Handle RenderPipeline::Rasterizer(uint32_t suScModeControl, bool sc
     return g_rasterizer.Insert(key, MakeRasterizer(key[0], scale, offset));
 }
 
+namespace
+{
+    RenderState::Handle SamplerFor(uint32_t key0)
+    {
+        static const bool front = []() { const char* t = getenv("COD3_SAMPLERFRONT"); return !(t && t[0] == '0'); }();
+        SamplerFront& entry = g_samplerFront[(key0 ^ (key0 >> 9) ^ (key0 >> 18)) & 511];
+        if (front && entry.generation == g_samplerGeneration && entry.keyPlusOne == key0 + 1) return entry.handle;
+        const uint32_t key[2] = { key0, 0 };
+        uint32_t handle = g_sampler.Find(key);
+        if (handle == 0) handle = g_sampler.Insert(key, MakeSampler(key0));
+        entry.keyPlusOne = key0 + 1;
+        entry.handle = handle;
+        entry.generation = g_samplerGeneration;
+        return handle;
+    }
+}
+
 RenderState::Handle RenderPipeline::Sampler(const uint32_t fetch[6])
 {
     const uint32_t clampX = (fetch[0] >> 10) & 7, clampY = (fetch[0] >> 13) & 7, clampZ = (fetch[0] >> 16) & 7;
@@ -375,18 +403,14 @@ RenderState::Handle RenderPipeline::Sampler(const uint32_t fetch[6])
     if (mag == 3) mag = 1;
     if (min == 3) min = 1;
     if (mip == 3) mip = 1;
-    const uint32_t key[2] = { clampX | (clampY << 3) | (clampZ << 6) | (mag << 9) | (min << 11) | (mip << 13) | (aniso << 15) | (border << 18), 0 };
-    if (const uint32_t handle = g_sampler.Find(key)) return handle;
-    return g_sampler.Insert(key, MakeSampler(key[0]));
+    return SamplerFor(clampX | (clampY << 3) | (clampZ << 6) | (mag << 9) | (min << 11) | (mip << 13) | (aniso << 15) | (border << 18));
 }
 
 RenderState::Handle RenderPipeline::SamplerPoint(const uint32_t fetch[6])
 {
     const uint32_t clampX = (fetch[0] >> 10) & 7, clampY = (fetch[0] >> 13) & 7, clampZ = (fetch[0] >> 16) & 7;
     const uint32_t border = fetch[5] & 3;
-    const uint32_t key[2] = { clampX | (clampY << 3) | (clampZ << 6) | (2u << 13) | (border << 18) | (1u << 20), 0 };
-    if (const uint32_t handle = g_sampler.Find(key)) return handle;
-    return g_sampler.Insert(key, MakeSampler(key[0]));
+    return SamplerFor(clampX | (clampY << 3) | (clampZ << 6) | (2u << 13) | (border << 18) | (1u << 20));
 }
 
 bool RenderPipeline::BlendTakesConstantAlpha(const uint32_t control[4])

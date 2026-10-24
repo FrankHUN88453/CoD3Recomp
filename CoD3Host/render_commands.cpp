@@ -33,6 +33,7 @@
 
 #include <d3d11_1.h>
 #include <emmintrin.h>
+#include <tmmintrin.h>   // 0.5.424: pshufb (SSSE3, in x86-64-v2)
 
 using RenderState::Handle;
 using RenderState::DrawCommand;
@@ -199,7 +200,7 @@ namespace
         for (; i + 8 <= count; i += 8)
         {
             __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(from + i));
-            v = _mm_or_si128(_mm_slli_epi16(v, 8), _mm_srli_epi16(v, 8));
+            v = _mm_shuffle_epi8(v, _mm_setr_epi8(1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14));   // 0.5.424: one shuffle
             _mm_storeu_si128(reinterpret_cast<__m128i*>(to + i), v);
         }
         for (; i < count; i++) to[i] = uint16_t(BSwap16(from[i]));
@@ -212,9 +213,7 @@ namespace
         for (; i + 4 <= count; i += 4)
         {
             __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(from + i));
-            v = _mm_or_si128(_mm_slli_epi16(v, 8), _mm_srli_epi16(v, 8));
-            v = _mm_shufflelo_epi16(v, _MM_SHUFFLE(2, 3, 0, 1));
-            v = _mm_shufflehi_epi16(v, _MM_SHUFFLE(2, 3, 0, 1));
+            v = _mm_shuffle_epi8(v, _mm_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12));   // 0.5.424: one shuffle
             _mm_storeu_si128(reinterpret_cast<__m128i*>(to + i), v);
         }
         for (; i < count; i++) to[i] = _byteswap_ulong(from[i]);
@@ -376,8 +375,26 @@ namespace
         case 20: expected = DXGI_FORMAT_BC3_UNORM; break;
         default: return;
         }
+        // 0.5.412: each view asked once. This check is only for the log, and
+        // GetDesc is a call into the Direct3D runtime: some 12000 a frame in
+        // Marseille's busy views, every texture of every draw, all on the
+        // command thread. A view already found to be of the fetch's kind is
+        // noted (by its pointer and the kind expected) and not asked again,
+        // and so is one of another kind once looked at (the texture pack's
+        // replacements are RGBA whatever the title's format, so every draw
+        // of one asked again only to be told the same). A pointer reused for
+        // a new view can at worst skip one log line. Resolved surfaces are
+        // not noted (each read says so once anyway).
+        // COD3_VIEWCHECKALL=1: every draw asks, as before.
+        static const bool checkAll = getenv("COD3_VIEWCHECKALL") != nullptr;
+        static constexpr uint32_t CheckedSize = 4096;
+        static uint64_t checked[CheckedSize] = {};
+        const uint64_t viewKey = (uint64_t(uintptr_t(view)) << 8) ^ uint64_t(expected) ^ 1u;
+        const uint32_t checkedSlot = uint32_t((viewKey >> 4) ^ (viewKey >> 17) ^ (viewKey >> 31)) & (CheckedSize - 1);
+        if (!checkAll && !resolved && checked[checkedSlot] == viewKey) return;
         D3D11_SHADER_RESOURCE_VIEW_DESC desc{};
         view->GetDesc(&desc);
+        if (!resolved) checked[checkedSlot] = viewKey;
         if (desc.Format == expected && !resolved) return;
         static std::atomic<int> said{ 0 };
         static uint64_t last = 0;
@@ -770,12 +787,37 @@ namespace
                 // (a whole 4 KB a draw was most of the command processor's
                 // copying).
                 static const bool alwaysSent = getenv("COD3_ALWAYSSENTFILE") != nullptr;
+                static const bool constantLibraryCopy = getenv("COD3_CONSTLIBCOPY") != nullptr;
                 const bool keepSent = record || alwaysSent;
                 g_sentValid[stage] = keepSent;
                 if (map.empty())
                 {
                     memcpy(words, from, 4096);
                     if (keepSent) memcpy(g_sentFile[stage], from, 4096);
+                }
+                else if (!constantLibraryCopy)
+                {
+                    // 0.5.414: a constant (16 bytes) at a time, straight in
+                    // order, without the library's memcpy. Each run of
+                    // consecutive constants was a call to it, a short copy
+                    // of unknown length each time: 3.2% of the command
+                    // thread in 0.5.410's busy views was memcpy from here.
+                    // The ring's memory is written front to back as before.
+                    // COD3_CONSTLIBCOPY=1: the runs through memcpy again.
+                    const uint16_t* constant = map.data();
+                    const size_t count = map.size();
+                    __m128i* toWords = reinterpret_cast<__m128i*>(words);
+                    const uint32_t* fromFile = from;
+                    for (size_t i = 0; i < count; i++)
+                        _mm_storeu_si128(toWords + i, _mm_loadu_si128(reinterpret_cast<const __m128i*>(fromFile + uint32_t(constant[i]) * 4u)));
+                    // What was sent kept from the file, not read back from
+                    // the ring (mapped for writing: slow to read).
+                    if (keepSent)
+                        for (size_t i = 0; i < count; i++)
+                        {
+                            const uint32_t at = uint32_t(constant[i]) * 4u;
+                            _mm_storeu_si128(reinterpret_cast<__m128i*>(g_sentFile[stage] + at), _mm_loadu_si128(reinterpret_cast<const __m128i*>(fromFile + at)));
+                        }
                 }
                 else
                 {

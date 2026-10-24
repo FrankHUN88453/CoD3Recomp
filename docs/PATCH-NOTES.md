@@ -1,6 +1,6 @@
 # CoD3 Recomp: patch notes since 0.4.0
 
-**Current source version: 0.5.407.** See the newest entry below.
+**Current source version: 0.5.424.** See the newest entry below.
 
 Historical versioning note: 0.5.0 was the build of October 11, 2026, evening.
 From now on, every rebuild numbers itself one higher: 0.5.1, 0.5.2 and so on.
@@ -12,6 +12,404 @@ the work by what it added. Only 0.4.0 and 0.5.0 were real builds with those
 names.
 
 ---
+
+## 0.5.424: byte order turned round in one shuffle; a rotate, native
+
+- 0.5.423 tested (city benchmark): clean, no heap waits, effects-guard
+  hits, access violations or freezes; "table search native:" 3000 of
+  3000 and the other six native checks passed. sub_820B64D0's share of
+  the main thread: 1.10% in 0.5.422's run, 0.02% now. The camera faced
+  yaw 90 as in 0.5.421's run, at about the same draws: the main thread
+  12.7 / 12.8 / 13.9 / 16.3 ms a frame against 13.8 / 13.6 / 13.5 /
+  15.9; 58.2 / 56.3 / 63.3 / 75.0 fps against 57.6 / 55.6 / 61.7 / 71.1.
+  (The benchmark's batch file did not copy its log this run; CoD3MP.log
+  was read.)
+- 0.5.423 without profilers (BENCH-MARSEILLE-CITY-PLAIN, yaw 0): 81.0 /
+  81.2 / 81.7 / 68.5 fps at 2188 / 2159 / 1870 / 3928 draws. In the
+  busiest views (5000 draws, yaw 90) the main thread is no longer what
+  holds the frame (12.7 ms): the command thread is (15.6-16.7 ms a
+  frame), with the drawing thread about as busy (about 16 ms).
+- The constant and register runs read from guest memory, and the index
+  copies, turned each word round with four shifts and two ors (two
+  shifts, an or and two half-word shuffles for the indices'). One SSSE3
+  byte shuffle each now (x86-64-v2 has it): Gpu's WriteRegisterRunFrom
+  (6.5% of the command thread in 0.5.423's busy views) and
+  RenderCommands' Swap16Into / Swap32Into. The same bytes.
+- sub_82147008 (0.75% of the main thread; from sub_82147498, a merge)
+  rotates a range of 8-byte elements, std::rotate's way round the cycles
+  with a division a step for their greatest common divisor. The elements
+  are moved whole, never read as values, so the result is the same bytes
+  however they are moved: native, the first ones put aside, the rest
+  moved down, those after them. Only when the original moves anything
+  (the middle strictly inside the range); else the game's own. The first
+  3000 calls of a match run the game's own first, then the range is put
+  back, rotated natively and compared byte for byte ("rotate native:" in
+  the log); one difference and the game's own from then on.
+  COD3_NATIVE_ROTATE=0 turns it off.
+
+## 0.5.423: a table searched by its 32-byte key, natively
+
+- 0.5.422 tested (city benchmark): clean, no heap waits, effects-guard
+  hits, access violations or freezes; "unpack native:" 3000 of 3000 (27
+  stores in the last) and the other five native checks passed.
+  sub_82181520's share of the main thread: 1.65% in 0.5.421's run, 0.60%
+  now. The camera faced yaw 63.5 (pitch 7), a facing no earlier run had:
+  58.4 / 57.8 / 63.6 / 66.1 fps at 4413 / 4450 / 2876 / 3269 draws, the
+  main thread 14.2 / 14.7 / 15.4 / 17.1 ms a frame; not compared.
+- sub_820B64D0 (1.1% of the main thread in 0.5.422's busy views; called
+  from sub_8253C130, sub_8253B130, sub_82542DB8 and sub_8253CC70) looks a
+  32-byte key up in a table of 48-byte entries, one by one, each by eight
+  word loads byte-swapped and compared. Equal words are equal bytes: each
+  entry is now two 16-byte compares. The answer is written as the
+  original does, the pair (the table's owner, the index), or none (0 and
+  the word already in the stack slot the original builds the pair in).
+  The first 3000 calls of a match also run the game's own and compare
+  the pair ("table search native:" in the log); one difference and the
+  game's own from then on. COD3_NATIVE_TABLESEARCH=0 turns it off.
+
+## 0.5.422: a stream of packed vectors unpacked natively
+
+- 0.5.421 tested (city benchmark): clean, no heap waits, effects-guard
+  hits, access violations or freezes; "box sweep native:" 5000 of 5000
+  and the other four native checks passed. sub_8248BB48's share of the
+  main thread: 1.1% in 0.5.420's run, 0.09% now. The camera faced yaw 90
+  as in 0.5.418's run: the main thread's CPU a frame 13.8 / 13.6 / 13.5 /
+  15.9 ms against 14.3 / 13.3 / 15.5 / 17.6 (0.5.419-0.5.421's trace
+  pieces about 0.4 ms of it, the rest the match); 57.6 / 55.6 / 61.7 /
+  71.1 fps at 4920 / 4791 / 3710 / 1873 draws.
+- sub_82181520 (1.65% of the main thread in 0.5.421's busy views; called
+  from sub_82189380) unpacks a stream of packed vectors: three stream
+  positions rounded up, then for each entry four big-endian 16-bit values
+  made floats as the recompiled vupkd3d128 does (the bits of 3.0 plus the
+  value), scaled and offset by two constant vectors (denormals flushed as
+  the vector unit does) and stored at the entry's address from a table.
+  The generated code built each 8-byte read out of two partial vector
+  loads and did the unpack lane by lane. Native, the same values.
+- Checked: the first 3000 calls of a match first work out, writing
+  nothing, what they would store; the game's own then runs and every
+  store, the three positions and r3 must be the same ("unpack native:" in
+  the log); one difference and the game's own from then on.
+  COD3_NATIVE_UNPACK=0 turns it off.
+
+## 0.5.421: a moving box against a box's faces, native
+
+- 0.5.420 tested (city benchmark): clean, no heap waits, effects-guard
+  hits, access violations or freezes. "box native:" 5000 of 5000; the
+  walk 3000 of 3000 (180 calls in the last); the slab test and the piece
+  sort 3000 of 3000. sub_82490A30's share of the main thread: 0.86% in
+  0.5.419's run, under 0.1% now. The camera faced yaw -180 as in
+  0.5.415's run: the main thread's CPU a frame in views 1-3 13.6 / 14.2 /
+  14.2 ms against 14.3 / 14.0 / 13.9 (the fighting near the camera moves
+  it more than these steps do); 63.4 / 69.4 / 58.2 / 68.4 fps.
+- sub_8248BB48 (1.1% of the main thread in 0.5.420's busy views; called
+  from the trace's pieces, sub_824972D0 and sub_82497958) sweeps the
+  trace's box (its half sizes at +80) along the segment against two sets
+  of a box's faces: per face the distances of the two ends less the half
+  size, then the enter and exit fractions as in the slab test, 0 as soon
+  as they cross. A hit writes the enter fraction (+288) and the face's
+  normal (+272); none, +317 and, if no face had the end beyond it, a
+  zero fraction and +316. Native, step for step as the recompiled code,
+  single precision where it rounds. The first 5000 calls of a match also
+  run the game's own from the same trace and compare r3 and the 48 bytes
+  it writes ("box sweep native:" in the log); one difference and the
+  game's own from then on. COD3_NATIVE_SWEEP=0 turns it off.
+
+## 0.5.420: a segment against a box, native
+
+- 0.5.419 tested (city benchmark): clean, no heap waits, effects-guard
+  hits, access violations or freezes. "walk native:" the tree walk
+  matched the game's on 3000 of 3000 walks (233 calls in the last);
+  both "trace native:" checks 3000 of 3000. The walk's share of the main
+  thread: 1.63% (native walk 1.59, the hook 0.04) against 2.31% in
+  0.5.418's run. The camera faced yaw 0 this run, lighter scenes (1677
+  to 3737 draws): 71.6 / 75.5 / 75.5 / 66.9 fps, not compared.
+- sub_82490A30 (0.9% of the main thread in 0.5.419's busy views; called
+  from the trace's pieces, sub_82497958 and sub_824972D0) tests a segment
+  against a box: first with the vector unit, apart (0) if any of x, y, z
+  of the boxes' gap reaches a limit; then the segment's enter and exit
+  fractions against the box's faces, z, y, x, the lower corner's and then
+  the upper's, 0 as soon as enter is not below exit, else 1. Native, step
+  for step as the recompiled code, single precision where it rounds and
+  denormals flushed in the vector part as there. It writes nothing, so
+  the first 5000 calls of a match simply run both and compare ("box
+  native:" in the log); one difference and the game's own from then on.
+  COD3_NATIVE_BOX=0 turns it off.
+
+## 0.5.419: the world trace's tree walk, native
+
+- 0.5.418 tested (city benchmark): clean, no heap waits, effects-guard
+  hits, access violations or freezes; both "trace native:" checks 3000
+  of 3000. The camera faced yaw 90 (pitch 20): 56.2 / 56.6 / 61.4 / 69.2
+  fps at 4528 / 4899 / 3753 / 1899 draws, near 0.5.413's 54.5 fps at
+  5000+ draws at that facing. No killcam in the benchmark, so the new
+  guard had nothing to catch: that wants a two-player game.
+- sub_824A0940, the trace's walk down the world's tree (2.3-2.6% of the
+  main thread in 0.5.418's busy views, the main thread's busiest after
+  the world search), is native. At each node the plane splits the
+  segment and one side or both are walked, the nearer first; then the
+  node's two lists of pieces each go through the slab test and, where it
+  does not miss, a leaf test (sub_82499F58 / sub_8249DDC8, still the
+  game's own). The same steps as the recompiled code: the same guest
+  stack frames (208 bytes a level) with the midpoints and boxes where the
+  original keeps them, single precision where it rounds, the midpoint's
+  vector part with denormals flushed as the vector unit does.
+- Checked differently from the earlier native pieces, since the leaf
+  tests write into the trace and must not run twice: the first 3000
+  walks of a match are the game's own, writing down every call they make
+  (arguments, results, the trace after). The native walk then runs from
+  the same trace against that record: each call it would make must be
+  the next one written down, whose result is put back instead of calling
+  again; at the end the calls and the trace must be the same. One
+  difference and the game's own walk from then on ("walk native:" in the
+  log). COD3_NATIVE_WALK=0 turns it off.
+
+## 0.5.418: the killcam freeze at the replay's end
+
+- 0.5.417 tested (city benchmark): clean, no heap waits, effects-guard
+  hits, access violations or freezes ("spare slots IN USE" 31 times, as
+  before). "trace native:" the slab test and the piece sort each matched
+  the game's on 3000 of 3000 calls. Their share of the main thread: the
+  slab test 0.7-1.1% and the sort 0.8-1.0% against 1.8% and 1.6% in
+  0.5.414's run. The camera looked down this run (pitch 38, 1800-3200
+  draws against 2700-4300), so its frame rates (70.2 / 67.0 / 66.2 /
+  60.5) are not compared with 0.5.416's.
+- 0.5.416 played by two (the host and a friend over the network, 32
+  players): froze on the frame a killcam ended. During the replay the
+  guard refused the same model instance (5F586190, entity 82A59010
+  type 2) a dozen times, as it was meant to. Then "killcam: over (played
+  out)", and from the next second nothing was drawn (the watchdog: no
+  swap for five seconds). The game's main thread was not waiting on
+  anything: it was walking the scene's model list in sub_8243E198 /
+  sub_82433B88 for ever, with that same instance in r4 and r31. The guard
+  has run only while the replay plays since 0.5.369, so the same add
+  came once more on the frame the replay ended, unguarded, and the
+  instance followed itself in the list.
+- The tail check (the instance is already the list's last one: the add
+  that makes the loop) now runs on every add, killcam or not. It is one
+  read. The walk of the whole list stays for the replay only, as in
+  0.5.369. Adds refused outside the replay are logged with a count of
+  their own ("killcam guard: ... killcam not playing"), so the replay's
+  dozen messages do not hide them. COD3_SCENETAILGUARD=0: replay only,
+  as before.
+- Not found: why the game adds that instance twice at all (entity type
+  2, around the replay). The guard stops the freeze; the cause is still
+  open.
+- The friend's log (0.5.416, 32 threads at 3.5 GHz, NVIDIA, over
+  Tailscale) froze the same way on its own: the main thread in
+  sub_8243E198 for ever with its own doubled instance (5EFD5C70, entity
+  82A5A010 type 2, caller 8245C314) right after "killcam: over". Both
+  machines need 0.5.418.
+- The friend's 14-24 fps (52-105 s, as low as 6 at 96-100 s; 100-190
+  either side) was the GPU: the same ~2000 draws, the CPU's part of a
+  frame 3-5 ms throughout, but the GPU's 46-58 ms a frame against 7
+  (the wait showing first in resolves, 70-95 ms, then in present, 40-48
+  ms). Video memory steady (580-610 MB), scale 1.731 all along. It came
+  back by itself at 106 s. Not found in the log: what slowed the GPU (a
+  smoke cloud lasts about that long, but the log names no throw; or
+  something else on that PC using the GPU, or its clocks).
+
+## 0.5.417: two of the world trace's pieces, native; the sampler asked for in front of its table
+
+- 0.5.416 tested (city benchmark): clean, no heap waits, effects-guard
+  hits or access violations (the "spare slots IN USE" player-limit
+  warning, 32 times, as in 0.5.415's run: 31). BotNadeAmmo and strstr,
+  0.7-1.0% each in 0.5.415's profiles, are gone from them. The camera's
+  facing changed in view 4 (yaw -57, pitch 27, 3938 draws against 2804),
+  so the runs compare in views 1-3 only: 63.7 / 65.4 / 57.4 fps against
+  60.9 / 68.0 / 60.3 at about the same draws (3670 / 2748 / 4154 against
+  3883 / 2867 / 4311). Views 2 and 3 a little slower: the match (the
+  main thread holds the frame there), not shown to be the change.
+- Two changes in this one build (written as 0.5.417 and 0.5.418, built
+  together).
+- The world trace (movement, bullets, the bots' sight lines) is now the
+  main thread's busiest work after the world search: two of its pieces,
+  1.8% and 1.6% of the main thread in 0.5.414's run, are native.
+  sub_824851F8 tests a segment against a box's two sets of faces;
+  sub_824850D0 sorts the pieces of a list that match what the trace
+  looks for into three lists of up to 128. Both are copied step for step
+  from the recompiled code, every value rounded to single precision where
+  the original rounds it. Checked off line against a transcription of
+  the recompiled code: 6 million segments (1.35 million hits) and 1500
+  lists, not one difference, writes to memory included.
+- The first 3000 calls of each in a match also run the game's own and
+  compare ("trace native:" in the log); one difference and the game's
+  own is used from then on. COD3_NATIVE_SLAB=0 / COD3_NATIVE_SORT=0
+  turn them off.
+- Every texture of every draw looked its sampler up in the samplers'
+  table (some 12000 a frame in Marseille's busy views, for a handful of
+  different samplers), on the command thread. The handle of each key
+  lately asked for is now kept in front of the table (512 entries),
+  emptied with it when the filtering setting changes. The second drawing
+  thread only replays Direct3D calls, so the front is the command
+  thread's alone. COD3_SAMPLERFRONT=0: the table always.
+
+## 0.5.416: the bots' grenade check remembers each weapon's kind
+
+- 0.5.415 tested (city benchmark): clean, no heap waits, effects-guard
+  hits, mismatches or access violations; 3000 world-search checks
+  matched. The camera faced yaw -180, as in 0.5.412's and 0.5.414's runs,
+  so the views compare one for one. Frame rate, 0.5.414 -> 0.5.415:
+  view 1 59.3 -> 60.7, view 2 66.4 -> 68.0, view 3 (the busy one, 4155
+  draws) 52.2 -> 60.0, view 4 62.2 -> 66.5. The main thread's CPU a
+  frame in view 3: 18.7 ms -> 16.0 (0.5.412: 17.8); lower in every view.
+  The walk and its push_back were 4.9% of the main thread, now 3.0%.
+  Some of view 3's difference is the match (how much fighting near the
+  camera), but every view moved the same way.
+- Each time a bot's grenades were asked about, all 127 weapons' names
+  were read, lower-cased and searched up to nine times for "grenade",
+  "smoke" and the like (BotNadeAmmo and strstr together about 1.5% of
+  the main thread on Marseille at 32 players). Each weapon's kind is now
+  remembered with the name it was worked out from, and worked out again
+  only when the name is different (a new map). COD3_NADEKINDCACHE=0:
+  worked out every time, as before.
+
+## 0.5.415: the world search's stack without push_back
+
+- 0.5.414 tested (city benchmark): clean, no heap waits, effects-guard
+  hits, mismatches or access violations; 3000 world-search checks
+  matched. The camera faced yaw -180 all run, as in 0.5.412's, so the
+  two compare view by view: the busy view (4206 draws) took the command
+  thread 14.2 ms a frame against 15.3 (3.43 us a draw against 3.65, 8%
+  less, 0.5.413 and 0.5.414 together); memcpy's share fell from 3.8% to
+  2.3%. That view's frame rate went with the main thread, which had more
+  to do in this run (18.7 ms of CPU a frame against 17.8: more fighting
+  near it): 52.2 fps against 54.9. The main thread holds the frame.
+- The game's world search (NativeCull::Walk, the main thread's busiest
+  single function on Marseille, 3.3%) kept the boxes still to look at
+  in a vector, and its push_back took another 1.1% of the main thread.
+  The stack is now a plain array sized once for the deepest it can get
+  (the roots and three a level). Checked against the vector on 3000
+  random trees: the same pieces in the same order. The game's own
+  3000-query comparison at the start of each match still runs.
+  COD3_CULL_VECTORSTACK=1: the vector again.
+
+## 0.5.414: the shader constants copied without memcpy calls
+
+- 0.5.413 tested (city benchmark): clean, no heap waits, effects-guard
+  hits, mismatches or access violations. The camera faced yaw 90 all run,
+  as in 0.5.410's: the same four views, draw counts within 0.5%. Busy
+  views (78 samples over 4000 draws): the command thread 16.2 ms a frame
+  against 17.0 in 0.5.410 (3.19 us a draw against 3.35, 5% less); view 3
+  8% less. The frame rate stayed (54.5 against 54.6): in these views the
+  game's main thread (17.4 ms of CPU a frame: the server and bots 6.9,
+  the client and its drawing 11.5) is now what holds the frame. 0.5.411
+  to 0.5.413 together; 0.5.415 and on are for the main thread.
+- Each draw's shader constants are copied into the constant ring, the
+  ones each program reads. A run of consecutive constants went as one
+  call to the library's memcpy, a short copy of a length known only at
+  run time: 3.2% of the command thread in 0.5.410's busy views was
+  memcpy called from there. They are now copied a constant (16 bytes) at
+  a time in a plain loop, front to back as before. Checked against the
+  old copy on 2000 random constant maps: the same bytes, both in the
+  ring and in the copy kept of what was sent. COD3_CONSTLIBCOPY=1: the
+  memcpy calls again.
+
+## 0.5.413: the drawing tables' entries kept together
+
+- 0.5.412 tested (city benchmark): clean, no heap waits, effects-guard
+  hits, mismatches or access violations; the 3000 world-search checks
+  matched. The profiler's D3D11CoreRegisterLayers (the GetDesc calls,
+  named after the nearest export) went from 0.8-0.9% of the command
+  thread to nothing. The camera faced yaw -180 the whole run, other
+  scenes again, so its frame rates are not compared with 0.5.411's.
+- The test ran with COD3_BENCH_CLIENTTURN (BENCH-MARSEILLE-CITY-TURN.bat):
+  the local client's view yaw climbed to 5760 while the player kept
+  facing -180. In the bot test neither setviewpos nor the client's
+  angles turn him; runs are compared by draw counts and the profiler.
+- The textures', vertex buffers' and index buffers' entries were kept
+  in std::deques. Microsoft's library makes a deque of anything over
+  16 bytes one entry a block, so each look up by handle (some 25000 a
+  frame in Marseille's busy views, on the command thread) went through
+  the deque's map to an entry of its own somewhere on the heap. They
+  are now kept in blocks of 256 that never move: one small table of
+  blocks, then the entry, with its neighbours beside it. As with the
+  deque, an entry stays where it is while more are added. Nothing
+  else changes.
+
+## 0.5.412: the texture view check asks once a view
+
+- 0.5.411 tested (city benchmark): clean, no heap waits, effects-guard
+  hits, mismatches or access violations. The camera faced about where
+  0.5.408's run did (pitch 18-21, yaw 157-164): between 4000 and 4500
+  draws, 3.43 us a draw at 54.2 fps (42 samples) against 0.5.408's
+  3.65 us at 53.2 fps (39 samples), some 6% less a draw. Not the very
+  same scenes, so a good sign rather than proof. The texture lookup's
+  share of the packet loop's time fell from 7.8% to 6.2% (profiler).
+- Every texture of every draw had its view asked for its format
+  (GetDesc, a call into Direct3D) by a check that only writes to the
+  log when a view is of the wrong kind: some 12000 calls a frame in
+  Marseille's busy views, on the command thread. Each view is now asked
+  once and noted (the texture pack's replacements, always of another
+  kind, included). Nothing drawn
+  changes; the most a reused view could cost is one log line.
+  COD3_VIEWCHECKALL=1 asks on every draw, as before.
+
+## 0.5.411: the texture lookup's front cache
+
+- 0.5.410 tested (Marseille city benchmark, 32 players): clean, with
+  no heap waits, effects-guard hits, mismatches or access violations.
+  Every view faced yaw 90, heavier than earlier runs: 72 samples between
+  5000 and 5500 draws, median 54.75 fps, command thread 17.0 ms a frame,
+  3.35 us a draw. That is the baseline for 0.5.411.
+- 0.5.410's camera hold did not work: setviewpos was sent again every
+  second, yet every view faced yaw 90 the whole run. Here setviewpos
+  places the player but does not turn him. The facing stays one way for
+  a run (it differs between runs), so runs are compared at the same draw
+  counts. The resend is now off (COD3_BENCH_HOLDTURN=1 turns it on); the
+  "bench: hold check" line stays, saying which way each view faced.
+- Every texture of every draw asked two tables in turn: is this a
+  surface a resolve made, and which texture is it. That is two hash
+  probes per texture, some 24000 a frame in Marseille's busy views, on
+  the command thread that limits those views. A small cache now sits in
+  front of them. A hit needs the same address, format, size and kind of
+  texture as before, no resolve made, remade or let go since, and the
+  texture still in use under that same key; then it is exactly the
+  answer the two tables would give. The checks for changed texels run
+  as before. COD3_TEXTURELOOKUPCACHE=0 turns the cache off.
+
+## 0.5.410: the benchmark camera holds its facing
+
+- 0.5.409 tested (Rimling, 32 players): clean. All 3000 world-search
+  checks matched; no heap waits, effects-guard hits, mismatches or access
+  violations; median 55.8 fps at about 3760 draws.
+- The Marseille benchmark moved the camera to the right places but did
+  not keep it facing the way it was told. 0.5.408's city run asked for
+  pitch 0 yaw 0 at every view; views 2-4 faced pitch 20.7 yaw 156.6.
+  0.5.407's run faced -180 three times and -114.3 once. So per-view
+  numbers from different runs were not the same scenes.
+- The facing is now checked twice a second. When it is more than 1.5
+  degrees off, setviewpos is sent again (at most once a second), logged
+  "bench: turned back". Each view also logs "bench: hold check" near its
+  end with where he faces. COD3_BENCH_HOLDTURN=0 restores once-a-view.
+- Benchmark only; nothing changes when playing.
+
+## 0.5.409: Restore the bounded world-search self-check scratch
+
+- mp_fixes.cpp sub_824193E0 still placed its self-check object 24 KB below
+  the guest stack, despite the 0.5.385 note saying this was fixed. Restore
+  placement 128 bytes below the original walk's 2304-byte frame. The walk's
+  only callback is intercepted before any guest-stack use; the 32-byte object
+  fits within the Xbox 360 ABI red zone below that frame.
+- COD3_CULL_NEARSTACK=0 restores the old placement for comparison. The native
+  culling algorithm and its 3000-query comparison remain unchanged.
+- This removes a possible small-stack corruption source; it is not a proven
+  cause of heap exhaustion or the effects crash. Built OK; Rimling clean
+  (3000/3000 checks matched).
+
+## 0.5.408: Identify the heap request that cannot make progress
+
+- The cache has two allocation loops. Its old wait report always used the
+  entry's largest request, even if a smaller later level was failing.
+  mp_fixes.cpp HeapWait now reports the current loop's exact units, stride,
+  header, 64-bit size/overflow, allocator and eight game-heap capacity/usage
+  records on the first and hundredth empty reclaim (12 reports maximum).
+- Diagnostic reads cannot demand-commit guest memory. Normal successful
+  allocation behavior and the existing 1 ms retry sleep are unchanged.
+  COD3_HEAPWAIT_AUDIT=0 disables the additional diagnostic reports.
+- Built OK; automated Rimling 32-player test completed with no heap
+  waits, effects-guard hits, native mismatch or access violation. The
+  freeze did not reproduce, so the new diagnostic path was not exercised.
+  This is evidence collection, not a fix for the freeze.
 
 ## 0.5.407: a watch on a heap freeze
 

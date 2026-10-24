@@ -1,6 +1,6 @@
 # Pick me up (read this first)
 
-Last updated by Claude, 2026-10-23 19:55. Next build 0.5.408. Source and install: 0.5.407. One freeze seen (0.5.406, Rimling: a game heap full, a cache retrying for ever) - watched from 0.5.407 ("heapwait:" in the log).
+Last updated by Claude, 2026-10-24 01:25. Install/source 0.5.424: pshufb byte swaps (WriteRegisterRunFrom 6.5% -> 4.4% of cp) + native rotate sub_82147008. SMALL NATIVE PIECES ARE AT DIMINISHING RETURNS: read 'Where it stands' at the end of docs/CLAUDE-SESSION-2026-10-23.md. 0.5.423: native table search sub_820B64D0 (3000/3000; 1.1% -> 0.02% of main). 0.5.422: native packed-vector unpack sub_82181520 (3000/3000; 1.65% -> 0.60% of main). 0.5.421: native box sweep sub_8248BB48 (5000/5000; 1.1% -> 0.09% of main). 0.5.420: native segment-box test sub_82490A30 (5000/5000; 0.9% -> under 0.1% of main). 0.5.419: native trace tree walk (record-and-replay check, 3000/3000), walk 2.3% -> 1.6%. 0.5.418 fixed the freeze when a killcam ends (both host and friend hit it in 416); not yet proven in a 2-player game: look for "killcam guard: ... killcam not playing". Friend's 14 fps in 416 was their GPU slowing 7x for ~55 s (game's CPU work steady 3-5 ms); cause outside the log. Next main-thread targets (0.5.421 profile): sub_82164160 1.7% (a loop of virtual calls: little to gain), sub_8241B2A8 0.9%, sub_82167E28 0.8%, sub_82147008 0.75%, leaf tests sub_82499F58 / sub_8249DDC8, sub_8248C708 (0.6%, VMX flush switches); Killcam::Record memcpy 0.8%. Table: docs/CLAUDE-SESSION-2026-10-23.md. Read newest NEXT-SESSION STATE.
 
 **Goal:** a steady 60 fps on Marseille (map "ordnance") at 32 players.
 
@@ -27,7 +27,7 @@ the main thread (~14 ms, fully busy). CPU target stays x86-64-v2 (no AVX2:
 friends' older PCs). Switches: COD3_DRAWTHREAD=0, COD3_FIBERPOOL=0,
 COD3_FIBERCLEAR=0, COD3_NATIVE_MEMCPY=0, COD3_FXGUARD=0, COD3_HOSTPROFILE_SELF=1.
 
-**GitHub:** GitHub release NOT done yet: public repo hovg-N8/CoD3Recomp is still at 0.5.183. Claude's session had no GitHub account linked (add_repo refused). Release text ready: docs/RELEASE-0.5.407.md (source only, no binaries, credit FrankHUN88453/CoD3Recomp). Upload handwritten source/docs/scripts only.
+**GitHub:** source-only v0.5.407 published by Codex: https://github.com/hovg-N8/CoD3Recomp/releases/tag/v0.5.407 (commit40db64a6856fbf7dce494f715b1c9284e587a4fe). No game data/binaries/logs. Release407 excludes408. Local nested Git checkout still atA3; fetch before pushing.
 
 **How to test (no clicking needed):** put the bat's name in test-request.txt
 (source root), then a build-request.txt whose text starts "test only". The
@@ -42,6 +42,8 @@ local file name for every file you send (the bridge can resend a stale copy).
 
 **Never upload game data to GitHub** (ISO, .cod/.xex, generated ppc/ppc_mp,
 textures, shaders, exes).
+
+**408:** exact heap-wait request/overflow and safe heap capacity/usage audit; off COD3_HEAPWAIT_AUDIT=0. Rimling test completed clean; freeze not reproduced. See newest STATE.
 
 **Details:** docs/NEXT-SESSION.md (top lines), docs/HANDOFF-MARSEILLE-60FPS.md,
 docs/CODEX-HANDOFF-0.5.384.md (history), docs/RELEASE-0.5.407.md.

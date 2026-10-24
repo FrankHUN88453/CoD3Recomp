@@ -259,3 +259,7 @@ All nine logs, three modified source snapshots, backups/diffs/parsers/reproducti
 launchers preserved outside Git in D:\Call of Duty 3 (USA, Europe)\CoD3-local-handoff-2026-10-23-Codex-384.
 No more tests/builds scheduled. Constant-shadow optimization and particle diagnostic
 NOT implemented. User authorized agent-launched tests; stopped for low account usage.
+
+## 0.5.408 Codex (2026-10-23)
+408 BUILT OK (3.6min), installed, Rimling32 completed clean: heapwait0/fxguard0/native differs0/Guest fault0. Median gameplay55.5fps at3015draws vs saved40758.3fps at2319draws, no >4000-draw samples; not matched-load regression evidence. Main CPU17.345 vs16.025ms. Freeze NOT reproduced; diagnostic path unexercised. Fresh407 city baseline also completed clean (~58.75/57.41/53.32/55.41 fps,3782/2371/4111/3642 draws); camera yaw differs from historical comparisons.
+GitHub account hovg-N8 linked; source-only v0.5.407 PUBLISHED https://github.com/hovg-N8/CoD3Recomp/releases/tag/v0.5.407 at40db64a6856fbf7dce494f715b1c9284e587a4fe, treeb64cf3fa9c33be3ff7fe89bf3d5785238fade1fc. 101 text/source changes audited, no game assets/generatedPPC/binaries/logs uploaded. Release snapshot excludes408. Source release workflow40051496183 succeeded, release draftfalse/assets[], tagSHA verified. Public main fast-forward requested to sameSHA. Nested local checkout untouched atA3; fetch before future pushes.

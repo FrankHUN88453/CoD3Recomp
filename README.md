@@ -1,4 +1,4 @@
-# CoD3Recomp â€” full campaign + multiplayer fork
+# CoD3Recomp — full campaign + multiplayer fork
 
 **Call of Duty 3 (Xbox 360), statically recompiled to run natively on Windows PC.**
 This is a fork of **[FrankHUN88453/CoD3Recomp](https://github.com/FrankHUN88453/CoD3Recomp)**,
@@ -6,30 +6,30 @@ built on Frank's recompilation work (made with [XenonRecomp](https://github.com/
 Full credit to Frank for the original port: the recompiled engine, the kernel, the Direct3D 11 renderer
 and the installer all come from his project.
 
-> **Where this fork is at:** Frank's public 0.4.0 build only let me play through the first 4â€“5 campaign
-> missions. In this fork **the whole campaign plays through**, and **multiplayer works** â€” System Link
+> **Where this fork is at:** Frank's public 0.4.0 build only let me play through the first 4–5 campaign
+> missions. In this fork **the whole campaign plays through**, and **multiplayer works** — System Link
 > over LAN or Tailscale, with bots, custom classes, DLC maps and restored cut content.
 >
-> Current source version: **0.5.407**. Every change since 0.4.0 is logged in
-> [docs/PATCH-NOTES.md](docs/PATCH-NOTES.md).
+> Current source version: **0.5.424**. Every change since 0.4.0 is logged in
+> [docs/PATCH-NOTES.md](docs/PATCH-NOTES.md), newest first.
 
 You need your **own** Xbox 360 disc image of Call of Duty 3. No game files are included in this repository.
 
 ## What this fork adds since 0.4.0
 
-**Multiplayer (0.4.1 â€“ 0.4.10)**
+**Multiplayer (0.4.1 – 0.4.10)**
 - Multiplayer runs: System Link between PCs (LAN or Tailscale), the F11 settings menu for addresses and options
 - DLC maps and bots (experimental), custom rules for everyone
 - **Domination**, the cut game mode, restored
 - Custom classes, loadout extras, aiming and ability tweaks, graphics options and movement fixes
 
-**Campaign weapons in multiplayer (0.5.0 â€“ 0.5.56)**
+**Campaign weapons in multiplayer (0.5.0 – 0.5.56)**
 - The campaign's Lee-Enfield, Sten, FG42 (and scoped FG42), Bren and Mills bomb usable in multiplayer,
   with their models, arms, reload timing, gunshots, reload sounds and pick-up icons
 - Memory past 512 MB (big memory), so Poissons and other big maps load whole with the campaign guns
 - Pick up and swap the gun in your hands; dying drops the gun you are holding; aim in the air
 
-**Console, binoculars and killstreaks (0.5.57 â€“ 0.5.84)**
+**Console, binoculars and killstreaks (0.5.57 – 0.5.84)**
 - The developer console works in multiplayer (`devmap`, `god`, `noclip`, `setviewpos`, ...)
 - Binoculars for every class (d-pad up / down, light zoom)
 - **Killstreaks**: UAV (enemies on the compass), artillery barrage, and the **Typhoon strafing run**
@@ -37,42 +37,77 @@ You need your **own** Xbox 360 disc image of Call of Duty 3. No game files are i
   strikes are marked with the spotter's binoculars. Players who join get their artillery/Typhoon armed too.
 - `streak_give uav|artillery|typhoon` for testing
 
-**Vehicles and the Kangaroo APC (0.5.59 â€“ 0.5.86)**
+**Vehicles and the Kangaroo APC (0.5.59 – 0.5.86)**
 - `spawnvehicle`, vehicles on any map (`vehicles_everywhere`), saved vehicle spots (`vehicle_mark`, `vehicle_clear`, `vehicle_list`)
 - The campaign's **Kangaroo APC** brought into multiplayer as its own vehicle: drivable, mountable gun,
   six passenger seats, its own driving curve, wheels, suspension and treads drawn
 
 **Menus and textures**
-- Texture replacement packs; the menu art, banners, fonts, controller diagrams and HUD icons upscaled 4Ã—
+- Texture replacement packs; the menu art, banners, fonts, controller diagrams and HUD icons upscaled 4×
 
 **HDR mode, on RenoDX**
-- F11 â†’ **HDR**: an scRGB HDR picture. The game's 8 bit colour targets become 16 bit float, so fire,
+- F11 → **HDR**: an scRGB HDR picture. The game's 8 bit colour targets become 16 bit float, so fire,
   sky and muzzle flashes keep their highlights. The frame is tone mapped right after the bloom and
   before the HUD, which keeps its own brightness.
 - Tone mappers: Vanilla, None, ACES, RenoDRT, PsychoV 17 / 22 / 30 and Prism; peak, game and UI
   brightness, gamma correction, the console's TV gamma ramp, film upgrade and bloom strength
-- F11 â†’ **RenoDX**: RenoDX's sliders (exposure, highlights, shadows, contrast, saturation, highlight
+- F11 → **RenoDX**: RenoDX's sliders (exposure, highlights, shadows, contrast, saturation, highlight
   saturation, blowout, flare, hue correction, cone response), applied as they move
 - Built on **[RenoDX](https://github.com/clshortfuse/renodx)** by Carlos Lopez Jr. and its contributors
   (MIT; `thirdparty/renodx`), with the **Prism** tone mapper by Musa Haji and OopyDoopy / KickFister / Jon
   (MIT; `thirdparty/prism`)
 
-## Recent work (0.5.87 â€“ 0.5.183)
-
+**Controls, menus and the Kangaroo (0.5.87 – 0.5.183)**
 - Kangaroo entry/exit improvements, native controller sensitivity up to 200%,
-  persistent audio/controller settings, and menu input fixes.
-- Sniper steady aim and experimental saved-position controls: hold L3 for
-  one second while stationary to save; hold X for two seconds to return.
-- Bot input/session isolation, combat diagnostics and owned-weapon recovery.
-  New bots balance across teams, including connected humans, and retain
-  their assigned team through respawns.
-- **Experimental:** 0.5.183 team assignment awaits live testing. Remote bot
-  visibility from both teams, held/dropped weapon visibility, combat crashes,
-  unintended movement and bot UAV markers remain under investigation.
+  persistent audio/controller settings, and menu input fixes
+- Sniper steady aim; a saved position (hold R3) and a return to it (hold X)
+
+**Bots (0.5.109 – 0.5.416)**
+- Visible, named bots ("Bot 1" to "Bot 24") that are seen by everyone in the match, not only the host
+- They fight properly: cover, prone, flanking, smoke, grenades, mines, rifle grenades, melee charges,
+  aiming down sights and overwatch sniping; medics revive; they learn each map as you play,
+  get unstuck, use ladders, vehicles and mounted guns
+- Customizable bot kits, classes and roles (including the Demolitionist), and bots as a lobby setting
+
+**32 players (0.5.206 – 0.5.364)**
+- Matches past the console's 24-player limit, up to 32, with the scoreboard, rank and status icons
+  and vehicles all working for the extra players
+
+**Killstreaks: the UAV plane and the mortar (0.5.253 – 0.5.331)**
+- The UAV as a real plane circling the map (the Typhoon for the Allies, the Stuka for the Germans)
+  that you can shoot down, with hit markers and engine and flyby sounds, shown to everyone in the lobby
+- A mortar killstreak built from the campaign mortar, with its camera matched to the campaign's
+
+**Killcam (0.5.321 – 0.5.418)**
+- A true replay of your death through the killer's eyes: everyone in their real poses and places from
+  that moment, the killer's real aim and gun, you in the picture, timed like Call of Duty 4
+
+**Co-op campaign (experimental, 0.5.223 – 0.5.320)**
+- A co-op campaign experiment (Forest) with shared films and smoother movement, merged in steps
+
+**HD textures and photo modes**
+- UPSCALE-TEXTURES.bat upscales a map's textures 4× on your graphics card (see HD-TEXTURES-README.txt)
+- F10 photo mode and a free-fly photo mode
+
+**Performance (0.5.369 – 0.5.424)**
+- Goal: a steady 60 fps on Marseille (ordnance) at 32 players. Benchmarks (`BENCH-MARSEILLE*.bat`),
+  a second drawing thread for heavy frames, pooled script fibers, and game functions made native, each
+  checked against the game's own code for the first few thousand calls of a match
+- The main thread went from 17.4 ms to about 12.7 ms a frame in Marseille's city views; without
+  profilers the light views run about 81 fps. The heaviest views (5000+ draws) are now limited by the
+  command and drawing threads (about 3.1–3.4 µs a draw each)
+- Requires a CPU with SSE4.2 (x86-64-v2); no AVX2 needed
+
+## Where it stands (0.5.424)
+
+- Open: confirming the killcam freeze fix (0.5.418) in a two-player game; the effects crash and one
+  heap-full freeze are guarded (`fxguard:` / `heapwait:` in CoD3MP.log) but their causes are not found
+- Every performance change since 0.5.391 can be switched off with an environment variable; they are
+  listed in [patch notes](docs/PATCH-NOTES.md) under each build
 
 See [patch notes](docs/PATCH-NOTES.md) for build history and
 [handoff](docs/HANDOFF.md) for the current checkpoint. This is a source
-update; no game data or compiled game executables are published here.
+update; no game data, recompiled game code or compiled game executables are published here.
 
 ## Original README (Frank's project)
 
@@ -82,7 +117,7 @@ update; no game data or compiled game executables are published here.
 > with your own Xbox 360 disc image, is on the
 > [releases page](https://github.com/FrankHUN88453/CoD3Recomp/releases).
 >
-> *MÃ©g fejlesztÃ©s alatt: hibÃ¡k elÅ‘fordulhatnak.*
+> *Még fejlesztés alatt: hibák előfordulhatnak.*
 
 Static recompilation of Call of Duty 3 (Xbox 360) to native x86-64, using
 [XenonRecomp](https://github.com/hedge-dev/XenonRecomp).
@@ -93,7 +128,7 @@ implemented, memory mapped I/O reaches the GPU register file, and a command
 processor decodes the packets the graphics driver queues.
 
 `CoD3.exe` installs the game from your own disc image and boots it into a window.
-The first level, Saint-LÃ´, is playable: the menus, the loading screen, the
+The first level, Saint-Lô, is playable: the menus, the loading screen, the
 opening cutscene and the fighting run at the title's own 60 frames a second
 on the host's GPU through a Direct3D 11 renderer built for a PC (see
 [docs/renderer.md](docs/renderer.md)), drawn from the title's own shaders
