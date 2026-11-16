@@ -9,6 +9,7 @@
 
 #include "kernel.h"
 #include "sampler.h"
+#include "settings.h"
 #include "scheduler.h"
 #include <chrono>
 
@@ -99,7 +100,7 @@ PPC_FUNC(__imp__ExGetXConfigSetting)
         switch (setting)
         {
         case 0x0001: value = 0; break;            // time zone bias
-        case 0x0009: value = 1; break;            // language: English
+        case 0x0009: value = Settings::TitleLanguage(); break;   // language: the one chosen (English when none)
         case 0x000A: value = 0x00040000; break;   // video flags: widescreen
         case 0x000C: value = 0; break;            // retail flags
         case 0x000E: value = 103; break;          // country: United States
@@ -130,7 +131,9 @@ PPC_FUNC(__imp__ExGetXConfigSetting)
 }
 
 // ULONG XGetLanguage(void)
-PPC_FUNC(__imp__XGetLanguage) { ctx.r3.u32 = 1; }          // English
+// The language chosen at setup (CoD3Recomp.ini's language), English when
+// none is. A disc without the language asked for falls back to its first.
+PPC_FUNC(__imp__XGetLanguage) { ctx.r3.u32 = uint32_t(Settings::TitleLanguage()); }
 
 // ULONG XGetAVPack(void)
 PPC_FUNC(__imp__XGetAVPack) { ctx.r3.u32 = 8; }            // HDMI

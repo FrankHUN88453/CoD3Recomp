@@ -29,6 +29,8 @@ $VsInstaller = 'C:\Program Files (x86)\Microsoft Visual Studio\Installer'
 $VcVars = @(
     'C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat'
     'C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvars64.bat'
+    'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat'
+    'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat'
 ) | Where-Object { Test-Path $_ } | Select-Object -First 1
 
 if (-not $VcVars) { throw "vcvars64.bat not found. Install Visual Studio Build Tools." }
@@ -67,7 +69,7 @@ if (-not (Test-Path $Xex)) {
 # --- 1. Host tools ---------------------------------------------------------
 if ($BuildTools -or -not (Test-Path $Recomp)) {
     Write-Host '==> Building XenonRecomp and XenonAnalyse' -ForegroundColor Cyan
-    Invoke-InVsEnv "cmake -S `"$Root\tools\XenonRecomp`" -B `"$ToolBuild`" -G Ninja -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_BUILD_TYPE=Release"
+    Invoke-InVsEnv "cmake -S `"$Root\tools\XenonRecomp`" -B `"$ToolBuild`" -G Ninja -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_BUILD_TYPE=Release"
     Invoke-InVsEnv "cmake --build `"$ToolBuild`" --target XenonRecomp XenonAnalyse --parallel $Jobs"
 }
 

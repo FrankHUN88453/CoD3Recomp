@@ -50,6 +50,8 @@ namespace
         printf("  --main <folder>   the main folder a fresh install goes into\n");
         printf("  --game <folder>   the main folder of a game already installed\n");
         printf("  --copy <folder>   copy this extracted folder into the main folder\n");
+        printf("  --language <code> play in this language (fr, it, es, en, de...) when\n");
+        printf("                    the disc has it; \"ask\" to choose again from a list\n");
         printf("  --no-update       do not look for a newer version this time\n");
         printf("  --list-iso <file> show what is inside a disc image and exit\n");
         printf("  --extract-one <iso> <path in iso> <output file>\n");
@@ -219,6 +221,23 @@ int Run(int argc, char** argv)
         {
             source.main = fs::path(argv[++i]);
         }
+        else if (option == "--language" && hasValue)
+        {
+            const std::string value = argv[++i];
+            if (value == "ask" || value == "auto")
+            {
+                source.askLanguage = true;
+            }
+            else
+            {
+                source.language = Settings::LanguageFromText(value);
+                if (source.language == 0)
+                {
+                    fprintf(stderr, "Unknown language: %s (try fr, it, es, en, de or ask)\n", value.c_str());
+                    return 1;
+                }
+            }
+        }
         else if (option == "--no-update")
         {
             noUpdate = true;
@@ -256,6 +275,9 @@ int Run(int argc, char** argv)
     }
 
     printf("Main folder: %s\n\n", game.root.string().c_str());
+
+    // The language: asked once when the main folder holds several.
+    Installer::ChooseLanguage(game.root, source);
 
     // Useful while the runtime is still missing: install the game without
     // watching the boot stop at the first kernel call.

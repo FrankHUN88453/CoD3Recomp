@@ -34,6 +34,8 @@ namespace Installer
         std::filesystem::path folder;  // an extracted folder: the main folder as it is, or copied
         bool copyFolder = false;       // copy it into the main folder rather than using it in place
         std::filesystem::path main;    // where a fresh install (or a copy) goes; asked when empty
+        int language = 0;              // the language to play in (--language), by XGetLanguage number; 0 the one chosen before, else asked
+        bool askLanguage = false;      // ask again even when one was chosen before (--language ask)
     };
 
     // True when `folder` looks like an extracted Call of Duty 3 disc.
@@ -46,4 +48,11 @@ namespace Installer
                 const Source& source,
                 GameLocation& out,
                 std::string& error);
+
+    // Makes sure the language the game is played in (Settings' language,
+    // what XGetLanguage tells the title) is one the main folder holds. A
+    // disc in several languages (sound banks .wfr/.wit/.wes, films -fr/-it/
+    // -es) asks which, once; a single one is taken as it is. A fresh install
+    // from a disc image already asked before extracting.
+    void ChooseLanguage(const std::filesystem::path& main, const Source& source);
 }

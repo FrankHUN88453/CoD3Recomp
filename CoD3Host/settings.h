@@ -54,6 +54,7 @@ namespace Settings
         float mouseSensitivity = 1.0f;   // the look's, both axes, 0.05 .. 5: 1 is 0.066 degrees a count (mouse_look.cpp); look_sensitivity in the ini
         bool rawMouse = true;            // the mouse's own counts, not the pointer's travel
         bool autoUpdate = true;          // on start, a newer release from GitHub downloaded and started (updater.cpp)
+        int language = 0;                // the Xbox 360 language the title is told (XGetLanguage): 1 English, 3 German, 4 French, 5 Spanish, 6 Italian...; 0 none chosen yet (English). Setup asks when the disc holds several (installer.cpp)
         int keys[ActionCount] = {};
     };
 
@@ -70,6 +71,17 @@ namespace Settings
     // The resolutions the display offers, largest last, for the menu.
     struct Mode { int width, height; };
     const std::vector<Mode>& DisplayModes();
+
+    // The Xbox 360 languages, by their XGetLanguage number: the short code
+    // the disc's localized files, the ini and the command line use ("es"),
+    // and the language's own name ("Espanol"). Null for 0 or a number not
+    // known.
+    const char* LanguageCode(int language);
+    const char* LanguageName(int language);
+    // "es", "spa", "spanish", "5"...: the number, or 0 when not recognised.
+    int LanguageFromText(const std::string& text);
+    // The number the title is told: the one chosen, English when none is.
+    int TitleLanguage();
 
     // The current values, and setting them (which also saves).
     Values Get();

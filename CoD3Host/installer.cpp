@@ -1,8 +1,11 @@
 #include "installer.h"
+#include "settings.h"
 #include "xdvdfs.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <chrono>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -240,6 +243,147 @@ namespace
         return true;
     }
 
+    // --- Languages -----------------------------------------------------------
+    //
+    // A European disc holds the game in several languages side by side: each
+    // level's sound bank once per language (sp/<level>/sound/<level>.wfr, .wit,
+    // .wes, beside the .wul every language shares) and each briefing film's
+    // sound track once per language (movies/<level>-fr.wma, -it, -es). The
+    // title plays the one XGetLanguage names, and the first the disc has when
+    // that one is not there; so with English asked for, a disc without it was
+    // always played in its first language.
+
+    // The languages named by paths relative to the main folder ('/'
+    // separated, any case), by XGetLanguage number, in that order.
+    std::vector<int> LanguagesIn(const std::vector<std::string>& paths)
+    {
+        std::set<int> found;
+        std::set<std::string> films, filmBases;
+        for (std::string path : paths)
+        {
+            std::replace(path.begin(), path.end(), '\\', '/');
+            std::transform(path.begin(), path.end(), path.begin(),
+                [](unsigned char c) { return char(tolower(c)); });
+
+            const size_t slash = path.rfind('/');
+            const std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
+            const size_t dot = name.rfind('.');
+            if (dot == std::string::npos) continue;
+            const std::string stem = name.substr(0, dot), extension = name.substr(dot);
+
+            // A single player sound bank: .w and the language's two letters.
+            if (path.compare(0, 3, "sp/") == 0 && extension.size() == 4 && extension[1] == 'w')
+            {
+                if (const int language = Settings::LanguageFromText(extension.substr(2)))
+                    found.insert(language);
+            }
+            // A film's sound track: <film>-xx.wma; and <film>.wma, which with
+            // a localized sibling is the English one.
+            else if (path.compare(0, 7, "movies/") == 0 && (extension == ".wma" || extension == ".wmv"))
+            {
+                const size_t dash = stem.rfind('-');
+                if (dash != std::string::npos && stem.size() - dash == 3)
+                {
+                    if (const int language = Settings::LanguageFromText(stem.substr(dash + 1)))
+                    {
+                        found.insert(language);
+                        filmBases.insert(stem.substr(0, dash));
+                    }
+                }
+                else if (extension == ".wma")
+                {
+                    films.insert(stem);
+                }
+            }
+        }
+        for (const std::string& base : filmBases)
+            if (films.count(base)) { found.insert(1); break; }
+        return { found.begin(), found.end() };
+    }
+
+    std::vector<int> LanguagesInFolder(const fs::path& main)
+    {
+        std::vector<std::string> paths;
+        for (const char* sub : { "sp", "movies" })
+        {
+            std::error_code ec;
+            for (auto it = fs::recursive_directory_iterator(main / sub, ec);
+                 !ec && it != fs::recursive_directory_iterator(); it.increment(ec))
+            {
+                if (!it->is_regular_file(ec)) continue;
+                paths.push_back(fs::relative(it->path(), main, ec).generic_string());
+            }
+        }
+        return LanguagesIn(paths);
+    }
+
+    std::string LanguageLabel(int language)
+    {
+        const char* name = Settings::LanguageName(language);
+        const char* code = Settings::LanguageCode(language);
+        return std::string(name ? name : "?") + " (" + (code ? code : "?") + ")";
+    }
+
+    // Which of `languages` to play in: the one the command line names, the
+    // one chosen before, or the user's answer. 0 leaves the setting as it is.
+    int PickLanguage(const std::vector<int>& languages, const Installer::Source& source)
+    {
+        auto has = [&](int language) {
+            return std::find(languages.begin(), languages.end(), language) != languages.end();
+        };
+
+        if (source.language != 0)
+        {
+            if (languages.empty() || has(source.language)) return source.language;
+            printf("The game's files are not in %s.\n", LanguageLabel(source.language).c_str());
+        }
+        else if (!source.askLanguage)
+        {
+            const int current = Settings::Get().language;
+            if (Settings::LanguageCode(current) && (languages.empty() || has(current))) return 0;
+        }
+
+        if (languages.empty()) return 0;     // nothing to choose from: the title's default
+        if (languages.size() == 1) return languages.front();
+
+        printf("The game is on this disc in %zu languages:\n\n", languages.size());
+        for (size_t i = 0; i < languages.size(); i++)
+            printf("  %zu  %s\n", i + 1, LanguageLabel(languages[i]).c_str());
+        printf("\n");
+        printf("The menus, the voices and the films' sound are played in the one\n");
+        printf("chosen. To change it later, set language in CoD3Recomp.ini (or\n");
+        printf("\"auto\" to be asked again), or start with --language ask.\n");
+        printf("\n");
+
+        for (;;)
+        {
+            printf("Language [1]: ");
+            fflush(stdout);
+            if (feof(stdin)) { printf("\n"); return languages.front(); }
+            const std::string answer = ReadLine();
+            if (answer.empty()) return languages.front();
+            const int number = atoi(answer.c_str());
+            if (number >= 1 && size_t(number) <= languages.size() &&
+                answer.find_first_not_of("0123456789 ") == std::string::npos)
+                return languages[number - 1];
+            if (const int language = Settings::LanguageFromText(answer); has(language))
+                return language;
+            printf("  Type a number from 1 to %zu.\n", languages.size());
+        }
+    }
+
+    void UseLanguage(int language)
+    {
+        if (language == 0) return;
+        Settings::Values values = Settings::Get();
+        if (values.language != language)
+        {
+            values.language = language;
+            Settings::Set(values);
+        }
+        printf("Language: %s\n\n", LanguageLabel(language).c_str());
+    }
+
     bool AskYes(const char* question)
     {
         printf("%s [y/N]: ", question);
@@ -334,6 +478,14 @@ namespace
             return false;
         }
         printf("  executable: matches the one this build was recompiled from\n\n");
+
+        // The language, asked before the long extraction rather than after.
+        {
+            std::vector<std::string> paths;
+            for (const auto& file : files)
+                if (!file.isDirectory) paths.push_back(file.path);
+            UseLanguage(PickLanguage(LanguagesIn(paths), source));
+        }
 
         printf("Extracting to %s\n", Utf8(main.wstring()).c_str());
         uint64_t lastReported = 0;
@@ -497,4 +649,9 @@ bool Installer::Locate(const fs::path& exeDirectory, const Source& source,
     printf("Setup complete. The main folder is %s\n", Utf8(main.wstring()).c_str());
     printf("and your saves will be kept in its save folder.\n\n");
     return Found(main, out);
+}
+
+void Installer::ChooseLanguage(const fs::path& main, const Source& source)
+{
+    UseLanguage(PickLanguage(LanguagesInFolder(main), source));
 }
