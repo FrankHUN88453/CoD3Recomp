@@ -30,6 +30,63 @@ namespace
         while (b > a && isspace((unsigned char)text[b - 1])) b--;
         return text.substr(a, b - a);
     }
+
+    // Indexed by the XGetLanguage number. The codes are the ones the disc's
+    // localized files carry: the sound banks' last two letters (.wfr, .wit,
+    // .wes) and the films' suffix (-fr, -it, -es). The names are plain ASCII,
+    // the console window is not UTF-8.
+    struct LanguageInfo { const char* code; const char* name; const char* aliases; };
+    const LanguageInfo Languages[] = {
+        { nullptr, nullptr, "" },
+        { "en", "English",             "eng english ingles us uk" },
+        { "ja", "Japanese",            "jpn japanese jp" },
+        { "de", "Deutsch",             "deu ger german ge aleman" },
+        { "fr", "Francais",            "fra fre french frances" },
+        { "es", "Espanol",             "spa spanish espanol sp" },
+        { "it", "Italiano",            "ita italian" },
+        { "ko", "Korean",              "kor korean kr" },
+        { "tc", "Traditional Chinese", "cht zh-tw" },
+        { "pt", "Portugues",           "por portuguese br" },
+        { "sc", "Simplified Chinese",  "chs zh-cn" },
+        { "pl", "Polski",              "pol polish" },
+        { "ru", "Russkiy",             "rus russian" },
+    };
+    constexpr int LanguageCount = int(sizeof(Languages) / sizeof(Languages[0]));
+}
+
+const char* Settings::LanguageCode(int language)
+{
+    return language > 0 && language < LanguageCount ? Languages[language].code : nullptr;
+}
+
+const char* Settings::LanguageName(int language)
+{
+    return language > 0 && language < LanguageCount ? Languages[language].name : nullptr;
+}
+
+int Settings::LanguageFromText(const std::string& text)
+{
+    std::string t = Trim(text);
+    std::transform(t.begin(), t.end(), t.begin(), [](unsigned char c) { return char(tolower(c)); });
+    if (t.empty()) return 0;
+    if (std::all_of(t.begin(), t.end(), [](unsigned char c) { return isdigit(c) != 0; }))
+    {
+        const int n = atoi(t.c_str());
+        return n > 0 && n < LanguageCount ? n : 0;
+    }
+    for (int i = 1; i < LanguageCount; i++)
+    {
+        if (t == Languages[i].code) return i;
+        const std::string aliases = std::string(" ") + Languages[i].aliases + " ";
+        if (aliases.find(" " + t + " ") != std::string::npos) return i;
+    }
+    return 0;
+}
+
+int Settings::TitleLanguage()
+{
+    const int language = Get().language;
+    return LanguageCode(language) ? language : 1;
 }
 
 const char* Settings::ActionName(Action action)
@@ -169,6 +226,7 @@ void Settings::Load(const std::filesystem::path& exeDirectory)
             else if (key == "look_sensitivity") v.mouseSensitivity = float(atof(value.c_str()));
             else if (key == "raw_mouse") v.rawMouse = atoi(value.c_str()) != 0;
             else if (key == "auto_update") v.autoUpdate = atoi(value.c_str()) != 0;
+            else if (key == "language") v.language = LanguageFromText(value);
             else if (key.compare(0, 4, "key_") == 0)
             {
                 for (int i = 0; i < ActionCount; i++)
@@ -208,6 +266,9 @@ void Settings::Save()
             v.renderer, resolution, v.resolutionScale, v.textureFilter, v.anisotropy, v.vsync ? 1 : 0, v.unlockFrameRate ? 1 : 0, v.antialiasing, v.textureQuality, v.fov, v.modelDetail, v.shadowQuality, v.aspectRatio, v.consoleDepth ? 1 : 0, v.nativeCommands ? 1 : 0, v.watchWrites ? 1 : 0, v.windowMode, v.fpsOverlay ? 1 : 0, v.statsOverlay ? 1 : 0);
         fprintf(file, "[game]\naim_assist = %d\nsubtitles = %d\nconsole = %d\ncontroller = %d\nbutton_prompts = %d\nlook_sensitivity = %.2f\nraw_mouse = %d\nauto_update = %d\n", v.aimAssist ? 1 : 0,
             v.subtitles ? 1 : 0, v.console ? 1 : 0, v.controller ? 1 : 0, v.buttonPrompts, v.mouseSensitivity, v.rawMouse ? 1 : 0, v.autoUpdate ? 1 : 0);
+        // "language = es"; "auto" while none is chosen, and setup asks again
+        // when the main folder holds more than one.
+        fprintf(file, "language = %s\n", LanguageCode(v.language) ? LanguageCode(v.language) : "auto");
         fprintf(file, "[keys]\n");
         for (int i = 0; i < ActionCount; i++) fprintf(file, "key_%s = %d\n", ActionKeys[i], v.keys[i]);
         fclose(file);
